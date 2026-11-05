@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Tracking Evaluation Harness for Cricket Ball Computer Vision Pipeline.
+Tracking & Detector Evaluation Harness for Cricket Ball Computer Vision Pipeline.
 
-Computes standard detection and tracking metrics:
-- Precision: Matched detections within pixel threshold / Total detections
-- Recall: Matched detections / Total ground truth positions
-- F1 Score: Harmonic mean of precision and recall
-- Mean Center Error (RMSE in pixels) on matched detections
-- Predicted Frame Fraction: Proportion of reported points filled by extrapolation/prediction
-- Maximum consecutive predicted frames (gap length)
+Separates:
+1. Measured Detector Accuracy: Evaluates ONLY measured computer vision detections
+   against annotated ground truth frames (Detector Precision, Recall, F1, RMSE).
+2. Tracking Continuity & Gap Filling: Evaluates the combined tracker output
+   (Combined Recall, Predicted Frame Fraction, Max Consecutive Predictions).
 
 Usage:
     python evaluate_tracking.py --demo
@@ -30,6 +28,21 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 
+def parse_tracking_data(data: Any) -> List[Dict[str, Any]]:
+    """Safely extracts a list of points from either a top-level list or a dictionary."""
+    if isinstance(data, list):
+        return data
+    elif isinstance(data, dict):
+        if "points" in data and isinstance(data["points"], list):
+            return data["points"]
+        elif "ball_trajectory" in data and isinstance(data["ball_trajectory"], list):
+            return data["ball_trajectory"]
+        else:
+            raise ValueError("JSON dictionary must contain a 'points' or 'ball_trajectory' list")
+    else:
+        raise ValueError(f"Unexpected JSON data type: {type(data).__name__}. Expected dict or list.")
+
+
 def load_ground_truth_csv(csv_path: str) -> Dict[int, Tuple[float, float]]:
     """
     Loads ground truth coordinates from CSV.
@@ -39,12 +52,11 @@ def load_ground_truth_csv(csv_path: str) -> Dict[int, Tuple[float, float]]:
     with open(csv_path, 'r', newline='') as f:
         reader = csv.reader(f)
         header = next(reader, None)
-        # Check if first row is header
-        start_row = 0
+        # Check if first row is header or numeric
         if header and not header[0].strip().replace('.', '', 1).isdigit():
-            pass  # header skipped
+            pass  # header row skipped
         else:
-            if header:
+            if header and len(header) >= 3:
                 gt[int(float(header[0]))] = (float(header[1]), float(header[2]))
 
         for row in reader:
@@ -63,7 +75,8 @@ def evaluate_trajectory(
     match_threshold_px: float = 15.0
 ) -> Dict[str, Any]:
     """
-    Evaluates tracked trajectory against ground truth annotations.
+    Evaluates tracking data against ground truth annotations.
+    Strictly separates measured detector accuracy from combined tracking continuity.
     """
     total_gt = len(ground_truth)
     total_tracked = len(tracked_points)
@@ -75,34 +88,28 @@ def evaluate_trajectory(
             "total_tracked": total_tracked
         }
 
-    # Extract points by frame_idx if available, or sequential index
+    # Extract points by frame_idx
     points_by_frame: Dict[int, Dict[str, Any]] = {}
-    predicted_count = 0
-    measured_count = 0
+    predicted_points: List[Dict[str, Any]] = []
+    measured_points: List[Dict[str, Any]] = []
 
     for i, pt in enumerate(tracked_points):
         f_idx = pt.get('frame_idx', i)
         points_by_frame[f_idx] = pt
         if pt.get('is_predicted', False):
-            predicted_count += 1
+            predicted_points.append(pt)
         else:
-            measured_count += 1
+            measured_points.append(pt)
 
-    # Match detections to GT
-    true_positives = 0
-    errors_px = []
-    false_positives = 0
+    # ── 1. Measured CV Detector Evaluation (Measured Points Only) ───────────
+    detector_tp = 0
+    detector_fp = 0
+    detector_errors_px = []
 
-    for f_idx, pt in points_by_frame.items():
-        # Get pixel coordinates
-        px = pt.get('pixel_x')
-        py = pt.get('pixel_y')
-        
-        # If pixel coords not directly stored, check x, y bounds if in pixel scale
-        if px is None or py is None:
-            # Fall back to x/y if in pixel range (> 20)
-            if pt.get('x', 0) > 20 or pt.get('y', 0) > 20:
-                px, py = pt.get('x'), pt.get('y')
+    for pt in measured_points:
+        f_idx = pt.get('frame_idx')
+        px = pt.get('pixel_x', pt.get('x'))
+        py = pt.get('pixel_y', pt.get('y'))
 
         if px is None or py is None:
             continue
@@ -111,22 +118,49 @@ def evaluate_trajectory(
             gt_x, gt_y = ground_truth[f_idx]
             dist = math.sqrt((px - gt_x)**2 + (py - gt_y)**2)
             if dist <= match_threshold_px:
-                true_positives += 1
-                errors_px.append(dist)
+                detector_tp += 1
+                detector_errors_px.append(dist)
             else:
-                false_positives += 1
+                detector_fp += 1
         else:
-            false_positives += 1
+            # Detection occurred on a frame outside annotated GT set
+            detector_fp += 1
 
-    false_negatives = total_gt - true_positives
-    precision = true_positives / max(1, (true_positives + false_positives))
-    recall = true_positives / max(1, total_gt)
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    detector_fn = total_gt - detector_tp
+    det_precision = detector_tp / max(1, (detector_tp + detector_fp))
+    det_recall = detector_tp / max(1, total_gt)
+    det_f1 = (2 * det_precision * det_recall / (det_precision + det_recall)) if (det_precision + det_recall) > 0 else 0.0
+    det_rmse = math.sqrt(sum(e**2 for e in detector_errors_px) / len(detector_errors_px)) if detector_errors_px else None
+    det_mean_err = (sum(detector_errors_px) / len(detector_errors_px)) if detector_errors_px else None
 
-    mean_center_error = (sum(errors_px) / len(errors_px)) if errors_px else None
-    rmse_error = math.sqrt(sum(e**2 for e in errors_px) / len(errors_px)) if errors_px else None
+    # ── 2. Combined Pipeline Evaluation (Measured + Predicted) ───────────────
+    combined_tp = 0
+    combined_fp = 0
+    combined_errors_px = []
 
-    # Consecutive predicted frames analysis
+    for f_idx, pt in points_by_frame.items():
+        px = pt.get('pixel_x', pt.get('x'))
+        py = pt.get('pixel_y', pt.get('y'))
+        if px is None or py is None:
+            continue
+
+        if f_idx in ground_truth:
+            gt_x, gt_y = ground_truth[f_idx]
+            dist = math.sqrt((px - gt_x)**2 + (py - gt_y)**2)
+            if dist <= match_threshold_px:
+                combined_tp += 1
+                combined_errors_px.append(dist)
+            else:
+                combined_fp += 1
+        else:
+            combined_fp += 1
+
+    comb_precision = combined_tp / max(1, (combined_tp + combined_fp))
+    comb_recall = combined_tp / max(1, total_gt)
+    comb_f1 = (2 * comb_precision * comb_recall / (comb_precision + comb_recall)) if (comb_precision + comb_recall) > 0 else 0.0
+    comb_rmse = math.sqrt(sum(e**2 for e in combined_errors_px) / len(combined_errors_px)) if combined_errors_px else None
+
+    # Gap length analysis
     max_consecutive_pred = 0
     curr_consecutive = 0
     for pt in tracked_points:
@@ -136,89 +170,103 @@ def evaluate_trajectory(
         else:
             curr_consecutive = 0
 
-    pred_fraction = (predicted_count / total_tracked) if total_tracked > 0 else 0.0
+    pred_fraction = (len(predicted_points) / total_tracked) if total_tracked > 0 else 0.0
 
     return {
+        "match_threshold_px": match_threshold_px,
         "total_gt_frames": total_gt,
         "total_tracked_points": total_tracked,
-        "measured_points": measured_count,
-        "predicted_points": predicted_count,
+        "measured_points": len(measured_points),
+        "predicted_points": len(predicted_points),
         "predicted_fraction": round(pred_fraction, 4),
         "max_consecutive_predicted": max_consecutive_pred,
-        "match_threshold_px": match_threshold_px,
-        "true_positives": true_positives,
-        "false_positives": false_positives,
-        "false_negatives": false_negatives,
-        "precision": round(precision, 4),
-        "recall": round(recall, 4),
-        "f1_score": round(f1, 4),
-        "mean_center_error_px": round(mean_center_error, 2) if mean_center_error is not None else None,
-        "rmse_center_error_px": round(rmse_error, 2) if rmse_error is not None else None,
+        # CV Detector Only Metrics
+        "detector_tp": detector_tp,
+        "detector_fp": detector_fp,
+        "detector_fn": detector_fn,
+        "detector_precision": round(det_precision, 4),
+        "detector_recall": round(det_recall, 4),
+        "detector_f1": round(det_f1, 4),
+        "detector_mean_error_px": round(det_mean_err, 2) if det_mean_err is not None else None,
+        "detector_rmse_px": round(det_rmse, 2) if det_rmse is not None else None,
+        # Combined Tracking Metrics
+        "combined_tp": combined_tp,
+        "combined_fp": combined_fp,
+        "combined_precision": round(comb_precision, 4),
+        "combined_recall": round(comb_recall, 4),
+        "combined_f1": round(comb_f1, 4),
+        "combined_rmse_px": round(comb_rmse, 2) if comb_rmse is not None else None,
     }
 
 
 def format_report(metrics: Dict[str, Any]) -> str:
-    """Format evaluation metrics as a readable CLI table."""
+    """Format evaluation metrics as a transparent two-section CLI table."""
     lines = [
-        "=" * 60,
-        "          CRICKET BALL TRACKING EVALUATION REPORT          ",
-        "=" * 60,
-        f"  Total Ground Truth Frames:      {metrics.get('total_gt_frames', 0):>6}",
-        f"  Total Tracked Points:           {metrics.get('total_tracked_points', 0):>6}",
-        f"    - Measured Points (CV):       {metrics.get('measured_points', 0):>6}",
-        f"    - Predicted Points (KF gap):  {metrics.get('predicted_points', 0):>6}",
-        f"  Predicted Frame Fraction:       {metrics.get('predicted_fraction', 0.0)*100:>5.1f}%",
-        f"  Max Consecutive Predictions:    {metrics.get('max_consecutive_predicted', 0):>6}",
-        "-" * 60,
-        f"  Match Distance Threshold:       {metrics.get('match_threshold_px', 0.0):>5.1f} px",
-        f"  True Positives (hits):          {metrics.get('true_positives', 0):>6}",
-        f"  False Positives (spurious):     {metrics.get('false_positives', 0):>6}",
-        f"  False Negatives (misses):       {metrics.get('false_negatives', 0):>6}",
-        "-" * 60,
-        f"  Precision:                      {metrics.get('precision', 0.0)*100:>5.1f}%",
-        f"  Recall:                         {metrics.get('recall', 0.0)*100:>5.1f}%",
-        f"  F1 Score:                       {metrics.get('f1_score', 0.0)*100:>5.1f}%",
+        "=" * 65,
+        "       CRICKET BALL TRACKING & DETECTOR EVALUATION REPORT        ",
+        "=" * 65,
+        f"  Total Ground Truth Frames:        {metrics.get('total_gt_frames', 0):>6}",
+        f"  Total Tracked Output Points:      {metrics.get('total_tracked_points', 0):>6}",
+        f"    - Measured Points (CV Output):  {metrics.get('measured_points', 0):>6}",
+        f"    - Predicted Points (KF Gaps):   {metrics.get('predicted_points', 0):>6}",
+        f"  Match Distance Threshold:         {metrics.get('match_threshold_px', 0.0):>5.1f} px",
+        "-" * 65,
+        "  SECTION 1: RAW CV DETECTOR PERFORMANCE (Measured Points ONLY)",
+        "-" * 65,
+        f"    Detector True Positives:        {metrics.get('detector_tp', 0):>6}",
+        f"    Detector False Positives:       {metrics.get('detector_fp', 0):>6}",
+        f"    Detector False Negatives:       {metrics.get('detector_fn', 0):>6}",
+        f"    Detector Precision:             {metrics.get('detector_precision', 0.0)*100:>5.1f}%",
+        f"    Detector Recall:                {metrics.get('detector_recall', 0.0)*100:>5.1f}%",
+        f"    Detector F1 Score:              {metrics.get('detector_f1', 0.0)*100:>5.1f}%",
     ]
-    if metrics.get('mean_center_error_px') is not None:
-        lines.append(f"  Mean Center Error:              {metrics.get('mean_center_error_px', 0.0):>5.2f} px")
-    if metrics.get('rmse_center_error_px') is not None:
-        lines.append(f"  RMSE Center Error:              {metrics.get('rmse_center_error_px', 0.0):>5.2f} px")
-    lines.append("=" * 60)
+    if metrics.get('detector_mean_error_px') is not None:
+        lines.append(f"    Detector Mean Centre Error:     {metrics.get('detector_mean_error_px', 0.0):>5.2f} px")
+    if metrics.get('detector_rmse_px') is not None:
+        lines.append(f"    Detector RMSE Error:            {metrics.get('detector_rmse_px', 0.0):>5.2f} px")
+
+    lines.extend([
+        "-" * 65,
+        "  SECTION 2: TRACKING CONTINUITY & GAP FILLING (Combined Pipeline)",
+        "-" * 65,
+        f"    Predicted Frame Fraction:       {metrics.get('predicted_fraction', 0.0)*100:>5.1f}%",
+        f"    Max Consecutive Predicted:      {metrics.get('max_consecutive_predicted', 0):>6} frames",
+        f"    Combined Track Recall:          {metrics.get('combined_recall', 0.0)*100:>5.1f}%",
+        f"    Combined Track Precision:       {metrics.get('combined_precision', 0.0)*100:>5.1f}%",
+        f"    Combined Track F1 Score:        {metrics.get('combined_f1', 0.0)*100:>5.1f}%",
+    ])
+    if metrics.get('combined_rmse_px') is not None:
+        lines.append(f"    Combined Track RMSE Error:      {metrics.get('combined_rmse_px', 0.0):>5.2f} px")
+
+    lines.append("=" * 65)
     return "\n".join(lines)
 
 
 def run_demo():
-    """Runs a self-contained demonstration with synthetic tracking and ground truth."""
-    print("\nRunning self-contained Tracking Evaluation demonstration...")
-    # Generate 50 frames of ground truth delivery trajectory across frame
+    """Runs a demonstration using synthetic delivery ground truth with detection dropouts."""
+    print("\nRunning synthetic delivery harness demonstration...")
+    print("NOTE: This demo illustrates metric computation and gap accounting on synthetic data.\n")
     gt = {}
     tracked = []
-    
-    # Simulated camera projection trajectory: ball travels from (640, 300) to (630, 680)
+
     for frame_idx in range(50):
         t = frame_idx / 30.0
-        # True positions
         true_x = 640.0 - 0.2 * frame_idx + 0.05 * (frame_idx ** 1.3)
         true_y = 300.0 + 7.5 * frame_idx + 0.1 * (frame_idx ** 1.4)
         gt[frame_idx] = (round(true_x, 2), round(true_y, 2))
 
-        # Simulated CV tracker:
-        # Frames 15-18 have detection dropouts (predicted points)
-        # Add small gaussian noise to measured points (1-2 px)
+        # Frames 15-18 simulate detection loss (Kalman predictions)
         if 15 <= frame_idx <= 18:
-            # Predicted point
-            pred_x = true_x + 3.2
-            pred_y = true_y - 2.5
             tracked.append({
                 'frame_idx': frame_idx,
-                'pixel_x': pred_x,
-                'pixel_y': pred_y,
-                'x': 0.1, 'y': 5.0, 'z': 1.0, 't': t,
+                'pixel_x': true_x + 3.2,
+                'pixel_y': true_y - 2.5,
                 'is_predicted': True,
-                'confidence': 0.65
+                'confidence': 0.65,
+                't': t
             })
         elif frame_idx == 45:
-            # Missed detection entirely
+            # Frame 45: true miss (no detection and gap cap exceeded)
             continue
         else:
             # Measured detection with 1.2 px noise
@@ -228,9 +276,9 @@ def run_demo():
                 'frame_idx': frame_idx,
                 'pixel_x': true_x + noise_x,
                 'pixel_y': true_y + noise_y,
-                'x': 0.1, 'y': 5.0, 'z': 1.0, 't': t,
                 'is_predicted': False,
-                'confidence': 0.88
+                'confidence': 0.88,
+                't': t
             })
 
     metrics = evaluate_trajectory(tracked, gt, match_threshold_px=15.0)
@@ -239,10 +287,10 @@ def run_demo():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate Cricket Ball Tracking Performance")
-    parser.add_argument("--demo", action="store_true", help="Run self-contained demonstration")
+    parser = argparse.ArgumentParser(description="Evaluate Cricket Ball Tracking & Detector Performance")
+    parser.add_argument("--demo", action="store_true", help="Run synthetic demonstration")
     parser.add_argument("--ground-truth", type=str, help="Path to ground truth CSV (frame_idx, x, y)")
-    parser.add_argument("--tracking-result", type=str, help="Path to tracking result JSON")
+    parser.add_argument("--tracking-result", type=str, help="Path to tracking result JSON (dict or list)")
     parser.add_argument("--video", type=str, help="Path to video file to track and evaluate")
     parser.add_argument("--threshold-px", type=float, default=15.0, help="Pixel distance match threshold")
     parser.add_argument("--output-json", type=str, help="Optional path to write metrics JSON")
@@ -267,8 +315,8 @@ def main():
         tracked_points = result.get('points', [])
     elif args.tracking_result:
         with open(args.tracking_result, 'r') as f:
-            data = json.load(f)
-            tracked_points = data.get('points', data if isinstance(data, list) else [])
+            raw_data = json.load(f)
+            tracked_points = parse_tracking_data(raw_data)
     else:
         print("Error: Either --tracking-result or --video must be specified.")
         sys.exit(1)

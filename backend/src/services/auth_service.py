@@ -25,15 +25,36 @@ class AuthService:
         self.db = db
 
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password against its hash"""
-        return pwd_context.verify(_prepare_password(plain_password), hashed_password)
+        """
+        Verify a password against its hash.
+        Supports both current scheme (SHA-256 hex -> bcrypt) and legacy direct bcrypt.
+        """
+        if not plain_password or not hashed_password:
+            return False
+
+        # 1. Try prehashed format (current scheme: sha256 hex -> bcrypt)
+        try:
+            if pwd_context.verify(_prepare_password(plain_password), hashed_password):
+                return True
+        except Exception:
+            pass
+
+        # 2. Try legacy direct bcrypt format (plain <= 72 bytes)
+        try:
+            if len(plain_password.encode('utf-8')) <= 72:
+                if pwd_context.verify(plain_password, hashed_password):
+                    return True
+        except Exception:
+            pass
+
+        return False
 
     def get_password_hash(self, password: str) -> str:
-        """Hash a password"""
+        """Hash a password using SHA-256 pre-hash + bcrypt"""
         return pwd_context.hash(_prepare_password(password))
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
-        """Authenticate a user with email and password"""
+        """Authenticate a user with email and password, transparently upgrading legacy hashes"""
         user = self.db.query(User).filter(User.email == email).first()
         if not user:
             logger.warning(f"Authentication failed: user not found - {email}")
@@ -41,6 +62,16 @@ class AuthService:
         if not self.verify_password(password, user.hashed_password):
             logger.warning(f"Authentication failed: invalid password - {email}")
             return None
+
+        # Transparently upgrade legacy direct-bcrypt hashes to the pre-hashed scheme
+        try:
+            if not pwd_context.verify(_prepare_password(password), user.hashed_password):
+                user.hashed_password = self.get_password_hash(password)
+                self.db.commit()
+                logger.info(f"Transparently upgraded legacy password hash for user: {email}")
+        except Exception as e:
+            logger.debug(f"Legacy hash upgrade check skipped: {e}")
+
         return user
 
     def create_access_token(self, data: dict, expires_delta: Optional[timedelta] = None) -> str:

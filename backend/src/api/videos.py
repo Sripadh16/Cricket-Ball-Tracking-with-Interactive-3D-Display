@@ -1,20 +1,38 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from database import get_db
 from services.video_service import VideoService
 from services.ball_tracking_service import BallTrackingService
+from services.auth_service import AuthService
 from models.trajectory import Trajectory
-from api.auth import get_current_user_optional
+from api.auth import get_current_user, get_current_user_optional
 from models.user import User
 from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS
 from services.sample_generator import DeliveryPhysicsSimulator
 import uuid
 import logging
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Shared thread pool for CPU-bound OpenCV ball tracking operations
+_TRACKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tracking_worker")
+
+
+async def _run_tracking_async(file_path: str) -> dict:
+    """Run CPU-intensive OpenCV ball tracking in the shared thread pool."""
+    loop = asyncio.get_running_loop()
+    def _do_track():
+        service = BallTrackingService()
+        return service.track_ball(str(file_path))
+    return await loop.run_in_executor(_TRACKING_EXECUTOR, _do_track)
 
 
 def _build_additional_data(trajectory_data: dict) -> dict:
@@ -25,6 +43,7 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "batter_position": trajectory_data.get("batter_position"),
         "lbw_analysis": trajectory_data.get("lbw_analysis", []),
         "debug_info": trajectory_data.get("debug_info", {}),
+        "video_info": trajectory_data.get("video_info", {}),
         "pitch_info": trajectory_data.get("pitch_info"),
         "pre_bounce_points": trajectory_data.get("pre_bounce_points"),
         "post_bounce_points": trajectory_data.get("post_bounce_points"),
@@ -35,20 +54,24 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "drs_evaluation": trajectory_data.get("drs_evaluation"),
         "release_speed_kmh": trajectory_data.get("release_speed_kmh"),
         "bounce_speed_kmh": trajectory_data.get("bounce_speed_kmh"),
+        "release_speed_px_per_sec": trajectory_data.get("release_speed_px_per_sec"),
         "length_zone": trajectory_data.get("length_zone"),
     }
 
 
+# ── Public Synthetic Presets (No authentication required) ───────────────────
+
 @router.get("/presets")
 async def get_preset_deliveries():
-    """Return all available physical preset deliveries for interactive demo"""
+    """Return all available physical preset deliveries for interactive demo (public)"""
     return {
         "presets": DeliveryPhysicsSimulator.get_all_preset_deliveries()
     }
 
+
 @router.get("/presets/{delivery_type}")
 async def get_preset_delivery_trajectory(delivery_type: str):
-    """Generate and return full 3D physics trajectory & DRS data for a preset delivery"""
+    """Generate and return full 3D physics trajectory & DRS data for a preset delivery (public)"""
     try:
         data = DeliveryPhysicsSimulator.generate_delivery(delivery_type=delivery_type)
         return data
@@ -57,52 +80,51 @@ async def get_preset_delivery_trajectory(delivery_type: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Private Video Operations (Authentication & Ownership Enforced) ──────────
+
 @router.get("/")
 async def list_videos(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_optional)
+    current_user: User = Depends(get_current_user)
 ):
-    """List all videos for the current user (or all if not authenticated)"""
+    """List all videos belonging strictly to the authenticated user"""
     try:
         video_service = VideoService(db)
-        user_id = current_user.id if current_user else None
-        videos = video_service.list_videos(user_id=user_id)
-        
+        videos = video_service.list_videos(user_id=current_user.id)
+
         return {
             "videos": [
                 {
                     "id": video.id,
-                    "filename": Path(video.file_path).name if video.file_path else video.filename,  # Use pathlib for cross-platform path handling
+                    "filename": Path(video.file_path).name if video.file_path else video.filename,
                     "original_filename": video.filename,
-                    # file_path not returned to clients for security
+                    "stream_url": f"/videos/{video.id}/stream",
                     "status": video.status,
                     "created_at": video.upload_date.isoformat() if video.upload_date else None,
                     "processed_at": video.processing_completed_at.isoformat() if video.processing_completed_at else None,
                     "duration": video.duration,
-                    "fps": None,  # FPS not stored in Video model
-                    "width": None,  # Width/height not stored separately
-                    "height": None,
                     "file_size": video.file_size
                 }
                 for video in videos
             ]
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error listing videos: {e}")
+        logger.error(f"Error listing videos for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_optional)
+    current_user: User = Depends(get_current_user)
 ):
-    """Upload a video file for ball tracking analysis.
-    Streams the file in chunks so oversized uploads are rejected before reading
-    the full content into memory.
+    """Upload a video file for ball tracking analysis with authenticated ownership.
+    Streams upload in 1 MB chunks to reject oversized files without buffering in RAM.
     """
-    # Validate file extension before reading any bytes
-    safe_name = Path(file.filename or "upload").name  # strip any path component
+    safe_name = Path(file.filename or "upload").name
     file_ext = Path(safe_name).suffix.lower()
     if file_ext not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(
@@ -110,12 +132,9 @@ async def upload_video(
             detail=f"Invalid file type '{file_ext}'. Allowed: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"
         )
 
-    # Stream upload enforcing byte limit so large files are rejected without
-    # buffering the whole payload in RAM.
     file_id = str(uuid.uuid4())
-    # Use only the sanitized basename in the stored filename to prevent path traversal
     file_path = UPLOAD_DIR / f"{file_id}_{safe_name}"
-    CHUNK = 1024 * 1024  # 1 MB chunks
+    CHUNK = 1024 * 1024
 
     try:
         file_size = 0
@@ -126,7 +145,6 @@ async def upload_video(
                     break
                 file_size += len(chunk)
                 if file_size > MAX_UPLOAD_SIZE_BYTES:
-                    # Clean up partial file before rejecting
                     out.close()
                     file_path.unlink(missing_ok=True)
                     raise HTTPException(
@@ -134,11 +152,10 @@ async def upload_video(
                         detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE_BYTES // (1024*1024)} MB"
                     )
                 out.write(chunk)
-        logger.info(f"Video uploaded: {file_path} ({file_size:,} bytes)")
+        logger.info(f"Video uploaded: {file_path} ({file_size:,} bytes) by user {current_user.id}")
     except HTTPException:
         raise
     except Exception as e:
-        # Clean up any partial file
         try:
             file_path.unlink(missing_ok=True)
         except Exception:
@@ -146,39 +163,23 @@ async def upload_video(
         logger.error(f"Failed to save video file: {e}")
         raise HTTPException(status_code=500, detail="Failed to save video file")
 
-    # Create video record
+    # Create video record bound to authenticated user
     video_service = VideoService(db)
-    user_id = current_user.id if current_user else "anonymous"
-
     video = video_service.create_video(
-        user_id=user_id,
+        user_id=current_user.id,
         filename=file.filename,
         file_path=str(file_path),
         file_size=file_size
     )
 
-    # Immediately start ball tracking after upload.
-    # Run in a thread pool so the async event loop is not blocked by CPU-heavy OpenCV work.
+    # Offload tracking to shared thread pool
     logger.info(f"Starting automatic ball tracking for video: {video.id}")
     video_service.update_video_status(video.id, "processing")
 
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-    _executor = ThreadPoolExecutor(max_workers=1)
-
-    async def _run_tracking():
-        loop = asyncio.get_event_loop()
-        def _track():
-            tracking_service = BallTrackingService()
-            return tracking_service.track_ball(str(file_path))
-        return await loop.run_in_executor(_executor, _track)
-
     try:
-        trajectory_data = await _run_tracking()
+        trajectory_data = await _run_tracking_async(str(file_path))
 
-        # Save trajectory
         additional_data = _build_additional_data(trajectory_data)
-
         trajectory = Trajectory(
             video_id=video.id,
             points=trajectory_data.get("points", []),
@@ -190,57 +191,57 @@ async def upload_video(
         db.add(trajectory)
         db.commit()
 
-        # Update video status to processed
         video_service.update_video_status(video.id, "processed")
         logger.info(f"Video processed successfully: {video.id}")
 
     except Exception as e:
         logger.error(f"Error processing video {video.id}: {e}")
+        db.rollback()
         video_service.update_video_status(video.id, "error")
 
     return {
         "id": video.id,
-        "filename": file_path.name,   # Stored UUID filename for playback URL
+        "filename": file_path.name,
         "original_filename": video.filename,
-        # file_path not returned to clients for security
+        "stream_url": f"/videos/{video.id}/stream",
         "status": video.status,
         "upload_date": video.upload_date.isoformat() if video.upload_date else None,
         "file_size": video.file_size
     }
 
 
-
 @router.post("/{video_id}/reprocess")
 async def reprocess_video(
     video_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_optional)
+    current_user: User = Depends(get_current_user)
 ):
-    """Reprocess video - delete existing trajectory and retrack"""
+    """Reprocess video with concurrency guard and atomic transactional replacement."""
+    video_service = VideoService(db)
+    video = video_service.get_video(video_id)
+
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
+    # Concurrency guard: reject duplicate processing jobs for the same video
+    if video.status == "processing":
+        raise HTTPException(status_code=409, detail="Video is currently being processed")
+
+    logger.info(f"Reprocessing video: {video_id} for user: {current_user.id}")
+
+    # Set status to processing
+    video_service.update_video_status(video_id, "processing")
+
     try:
-        video_service = VideoService(db)
-        video = video_service.get_video(video_id)
-        
-        if not video:
-            raise HTTPException(status_code=404, detail="Video not found")
-        
-        logger.info(f"Reprocessing video: {video_id}")
-        
-        # 2. Set status to 'processing' (old trajectory still intact)
-        video_service.update_video_status(video_id, "processing")
-        
-        # 3. Run tracking FIRST - before touching existing trajectory
-        tracking_service = BallTrackingService()
-        trajectory_data = tracking_service.track_ball(video.file_path)
-        
-        # 4. Tracking succeeded - now safe to replace old trajectory
-        db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
-        db.commit()
+        # Run tracking in shared thread pool FIRST
+        trajectory_data = await _run_tracking_async(video.file_path)
 
-        # Save new trajectory using consistent helper
+        # Build replacement trajectory in-memory before modifying database
         additional_data = _build_additional_data(trajectory_data)
-
-        trajectory = Trajectory(
+        new_trajectory = Trajectory(
             video_id=video_id,
             points=trajectory_data.get("points", []),
             confidence_score=trajectory_data.get("confidence_score", 0),
@@ -248,47 +249,56 @@ async def reprocess_video(
             timestamps=trajectory_data.get("timestamps", []),
             additional_data=additional_data
         )
-        db.add(trajectory)
-        db.commit()
-        
-        # Update video status to processed
-        video_service.update_video_status(video_id, "processed")
-        
+
+        # Single atomic transaction: delete old trajectory, insert new trajectory, update status
+        try:
+            db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
+            db.add(new_trajectory)
+            video.status = "processed"
+            video.processing_completed_at = datetime.utcnow()
+            db.commit()
+        except Exception as db_err:
+            db.rollback()
+            raise db_err
+
         logger.info(f"Video reprocessed successfully: {video_id}")
-        
         return {
             "message": "Video reprocessed successfully",
             "video_id": video_id,
             "ball_detected": trajectory_data.get('ball_detected', False),
             "points_detected": len(trajectory_data.get('points', []))
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error reprocessing video {video_id}: {e}")
-        # 5. Tracking failed - restore 'processed' status so old trajectory is still accessible
-        video_service.update_video_status(video_id, "processed")
+        db.rollback()
+        # Restore status based on whether an old trajectory still exists
+        still_has_traj = db.query(Trajectory).filter(Trajectory.video_id == video_id).first() is not None
+        video_service.update_video_status(video_id, "processed" if still_has_traj else "failed")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post("/{video_id}/track")
 async def track_video(
     video_id: str,
-    current_user: User = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Start ball tracking analysis on a video"""
+    """Start ball tracking analysis on a video with concurrency protection."""
     video_service = VideoService(db)
     video = video_service.get_video(video_id)
 
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # Check if tracking is already in progress
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
     if video.status == "processing":
         raise HTTPException(status_code=409, detail="Tracking already in progress")
 
-    # Check if already processed
     if video.status == "processed":
         return {
             "video_id": video_id,
@@ -296,18 +306,13 @@ async def track_video(
             "message": "Video already processed. Retrieve trajectory using /trajectory endpoint"
         }
 
-    # Update status to processing
     video_service.update_video_status(video_id, "processing")
     logger.info(f"Starting ball tracking for video: {video_id}")
 
     try:
-        # Start tracking
-        tracking_service = BallTrackingService()
-        trajectory_data = tracking_service.track_ball(video.file_path)
+        trajectory_data = await _run_tracking_async(video.file_path)
 
-        # Save trajectory
         additional_data = _build_additional_data(trajectory_data)
-
         trajectory = Trajectory(
             video_id=video_id,
             points=trajectory_data["points"],
@@ -319,7 +324,6 @@ async def track_video(
         db.add(trajectory)
         db.commit()
 
-        # Update video status
         video_service.update_video_status(video_id, "processed")
         logger.info(f"Ball tracking completed for video: {video_id}")
 
@@ -331,27 +335,38 @@ async def track_video(
             "processing_time": trajectory_data.get("processing_time", 0)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Ball tracking failed for video {video_id}: {e}")
+        db.rollback()
         video_service.update_video_status(video_id, "failed")
         raise HTTPException(status_code=500, detail=f"Tracking failed: {str(e)}")
+
 
 @router.get("/{video_id}/trajectory")
 async def get_trajectory(
     video_id: str,
-    current_user: User = Depends(get_current_user_optional),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get trajectory data for a processed video"""
-    trajectory = db.query(Trajectory).filter(Trajectory.video_id == video_id).first()
+    """Get trajectory data for a processed video, returning debug_info and video metadata."""
+    video_service = VideoService(db)
+    video = video_service.get_video(video_id)
 
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
+    trajectory = db.query(Trajectory).filter(Trajectory.video_id == video_id).first()
     if not trajectory:
         raise HTTPException(
             status_code=404,
             detail="Trajectory not found. Video may not be processed yet."
         )
 
-    # Parse additional data
     additional_data = {}
     if hasattr(trajectory, 'additional_data') and trajectory.additional_data:
         try:
@@ -360,9 +375,9 @@ async def get_trajectory(
             logger.warning(f"Failed to parse additional_data: {e}")
             additional_data = {}
 
-    # Calculate video duration from timestamps
     timestamps = trajectory.timestamps or []
-    video_duration = max(timestamps) if timestamps else 0
+    video_duration = max(timestamps) if timestamps else (video.duration or 0)
+    video_info = additional_data.get("video_info", {})
 
     return {
         "video_id": video_id,
@@ -371,7 +386,16 @@ async def get_trajectory(
         "confidence_score": trajectory.confidence_score,
         "ball_detected": trajectory.ball_detected,
         "video_duration": video_duration,
-        # Additional DRS data
+        # CV Observable Diagnostics & Metadata
+        "debug_info": additional_data.get("debug_info", {}),
+        "video_info": {
+            "fps": video_info.get("fps", 30.0),
+            "frame_count": video_info.get("frame_count"),
+            "width": video_info.get("width"),
+            "height": video_info.get("height"),
+            "duration": video_duration
+        },
+        # Stumps & Players
         "stumps_position": additional_data.get("stumps_position"),
         "bowler_position": additional_data.get("bowler_position"),
         "batter_position": additional_data.get("batter_position"),
@@ -387,29 +411,81 @@ async def get_trajectory(
         "drs_evaluation": additional_data.get("drs_evaluation"),
         "release_speed_kmh": additional_data.get("release_speed_kmh"),
         "bounce_speed_kmh": additional_data.get("bounce_speed_kmh"),
+        "release_speed_px_per_sec": additional_data.get("release_speed_px_per_sec"),
         "length_zone": additional_data.get("length_zone")
     }
+
+
+@router.get("/{video_id}/stream")
+async def stream_video(
+    video_id: str,
+    token: Optional[str] = Query(None, description="Auth token for HTML5 video tag requests"),
+    current_user_opt: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db)
+):
+    """Stream video media file with authenticated ownership verification.
+    Accepts Authorization header OR ?token= query parameter (for HTML5 video player).
+    """
+    user = current_user_opt
+    if not user and token:
+        try:
+            auth_service = AuthService(db)
+            user = auth_service.get_current_user(token)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token for video streaming",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required for video playback",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+    video_service = VideoService(db)
+    video = video_service.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
+    if not video.file_path or not os.path.exists(video.file_path):
+        raise HTTPException(status_code=404, detail="Video media file missing on disk")
+
+    return FileResponse(
+        video.file_path,
+        media_type="video/mp4",
+        filename=Path(video.file_path).name
+    )
+
 
 @router.delete("/{video_id}")
 async def delete_video(
     video_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user_optional)
+    current_user: User = Depends(get_current_user)
 ):
-    """Delete a video and its associated data"""
+    """Delete a video and its associated trajectory with ownership verification"""
     try:
         video_service = VideoService(db)
         video = video_service.get_video(video_id)
-        
+
         if not video:
             raise HTTPException(status_code=404, detail="Video not found")
-        
-        logger.info(f"Deleting video: {video_id}")
-        
+
+        if video.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
+        logger.info(f"Deleting video: {video_id} by user: {current_user.id}")
+
         # Delete trajectory data
         db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
         db.commit()
-        
+
         # Delete video file from filesystem
         if video.file_path and os.path.exists(video.file_path):
             try:
@@ -417,20 +493,20 @@ async def delete_video(
                 logger.info(f"Deleted video file: {video.file_path}")
             except Exception as e:
                 logger.error(f"Failed to delete video file {video.file_path}: {e}")
-        
+
         # Delete video record from database
         db.delete(video)
         db.commit()
-        
+
         logger.info(f"Video deleted successfully: {video_id}")
-        
         return {
             "message": "Video deleted successfully",
             "video_id": video_id
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error deleting video {video_id}: {e}")
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,29 @@
+{
+  "video_name": "sample_clip.mp4",
+  "fps": 30.0,
+  "points": [
+    {"frame_idx": 0, "pixel_x": 320.4, "pixel_y": 180.3, "is_predicted": false, "confidence": 0.92, "t": 0.0},
+    {"frame_idx": 1, "pixel_x": 324.2, "pixel_y": 188.0, "is_predicted": false, "confidence": 0.91, "t": 0.033},
+    {"frame_idx": 2, "pixel_x": 329.3, "pixel_y": 196.5, "is_predicted": false, "confidence": 0.90, "t": 0.067},
+    {"frame_idx": 3, "pixel_x": 333.0, "pixel_y": 205.8, "is_predicted": false, "confidence": 0.93, "t": 0.100},
+    {"frame_idx": 4, "pixel_x": 337.5, "pixel_y": 214.9, "is_predicted": false, "confidence": 0.89, "t": 0.133},
+    {"frame_idx": 5, "pixel_x": 342.3, "pixel_y": 223.7, "is_predicted": false, "confidence": 0.92, "t": 0.167},
+    {"frame_idx": 6, "pixel_x": 346.8, "pixel_y": 233.2, "is_predicted": false, "confidence": 0.90, "t": 0.200},
+    {"frame_idx": 7, "pixel_x": 350.8, "pixel_y": 243.5, "is_predicted": false, "confidence": 0.88, "t": 0.233},
+    {"frame_idx": 8, "pixel_x": 355.6, "pixel_y": 252.8, "is_predicted": false, "confidence": 0.91, "t": 0.267},
+    {"frame_idx": 9, "pixel_x": 360.2, "pixel_y": 263.3, "is_predicted": false, "confidence": 0.90, "t": 0.300},
+    {"frame_idx": 10, "pixel_x": 364.3, "pixel_y": 273.0, "is_predicted": false, "confidence": 0.89, "t": 0.333},
+    {"frame_idx": 11, "pixel_x": 369.2, "pixel_y": 283.8, "is_predicted": false, "confidence": 0.91, "t": 0.367},
+    {"frame_idx": 12, "pixel_x": 374.2, "pixel_y": 294.6, "is_predicted": true, "confidence": 0.65, "t": 0.400},
+    {"frame_idx": 13, "pixel_x": 379.0, "pixel_y": 305.5, "is_predicted": true, "confidence": 0.60, "t": 0.433},
+    {"frame_idx": 14, "pixel_x": 383.8, "pixel_y": 316.5, "is_predicted": true, "confidence": 0.55, "t": 0.467},
+    {"frame_idx": 15, "pixel_x": 387.2, "pixel_y": 326.5, "is_predicted": false, "confidence": 0.88, "t": 0.500},
+    {"frame_idx": 16, "pixel_x": 392.4, "pixel_y": 338.3, "is_predicted": false, "confidence": 0.87, "t": 0.533},
+    {"frame_idx": 17, "pixel_x": 396.5, "pixel_y": 349.8, "is_predicted": false, "confidence": 0.90, "t": 0.567},
+    {"frame_idx": 18, "pixel_x": 401.8, "pixel_y": 360.7, "is_predicted": false, "confidence": 0.89, "t": 0.600},
+    {"frame_idx": 19, "pixel_x": 405.9, "pixel_y": 373.1, "is_predicted": false, "confidence": 0.91, "t": 0.633},
+    {"frame_idx": 20, "pixel_x": 411.3, "pixel_y": 384.5, "is_predicted": false, "confidence": 0.88, "t": 0.667},
+    {"frame_idx": 21, "pixel_x": 415.5, "pixel_y": 397.2, "is_predicted": false, "confidence": 0.87, "t": 0.700},
+    {"frame_idx": 22, "pixel_x": 420.8, "pixel_y": 408.9, "is_predicted": false, "confidence": 0.86, "t": 0.733}
+  ]
+}

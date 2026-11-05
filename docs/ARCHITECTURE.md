@@ -4,27 +4,27 @@
 
 The Cricket Decision Review System (DRS) & 3D Trajectory Visualization pipeline is partitioned into two clear operational modes:
 1. **Interactive Physics Simulation**: Deterministic aerodynamic models (gravity, drag, Magnus force swing, seam deviation, restitution bounce) for educational and review walkthroughs.
-2. **Video Computer Vision Pipeline**: Single-camera video analysis combining adaptive color masks, temporal differencing, pixel-space trajectory association, constant-velocity Kalman smoothing, and linear projection.
+2. **Video Computer Vision Pipeline**: Single-camera video analysis combining adaptive color masks, temporal differencing, pixel-space trajectory association, 2D in-flight Kalman prediction gaps, linear projection, and 3D Kalman smoothing.
 
 ```mermaid
 graph TD
-    A[Input Source] -->|User MP4/WebM Video| B[FastAPI Streaming Upload]
-    A -->|Preset Selection| C[DeliveryPhysicsSimulator]
+    A[Input Source] -->|User MP4/WebM Video| B[FastAPI Authenticated Upload]
+    A -->|Public Preset Selection| C[DeliveryPhysicsSimulator]
     
     subgraph Video CV Pipeline
-        B --> D[First Pass: Static Pitch & Stump Detection]
-        D --> E[Second Pass: Frame-by-Frame Ball Detection]
+        B --> D[Pass 1: Static Pitch & Stump Detection]
+        D --> E[Pass 2: Frame-by-Frame Ball Candidate Extraction]
         E -->|HSV Color + Motion Differencing| F[Ball Candidate Contours]
-        F --> G[Image Pixel-Space Gating & Association]
-        G --> H[Constant-Velocity Kalman Filter dt Coupling]
-        H --> I[Gap Interpolation <= 0.2s]
-        I --> J[Linear 3D Heuristic Lift]
-        J --> K[DRS Event Analysis: Pitch, Impact, Stumps]
+        F --> G[Image Pixel-Space Gating & In-Flight Gap Prediction <=0.2s]
+        G --> H[Linear 3D Heuristic Lift: _pixel_to_3d]
+        H --> I[3D Constant-Velocity Kalman Smoothing dt Coupling]
+        I --> J[Physical Event Verification: Curvature Bounce & Pad Impact]
+        J --> K[Observable CV Output: 2D Overlay + Diagnostics Panel]
     end
 
     subgraph 3D Graphics Engine
         C --> L[HawkEyeViewer Three.js Engine]
-        K --> L
+        J --> L
         L --> M[Pre-Bounce Arc Cyan]
         L --> N[Post-Bounce Arc Amber]
         L --> O[Extrapolated Dashed Tube Magenta]
@@ -34,7 +34,17 @@ graph TD
 
 ---
 
-## 2. Coordinate System Conventions
+## 2. Authentication & Data Ownership Architecture
+
+- **Public Presets**: `/videos/presets` and `/videos/presets/{delivery_type}` are publicly accessible without authentication for demonstrations and testing.
+- **Private Video & Review Isolation**: All private endpoints (`/videos/`, `/{id}/trajectory`, `/{id}/reprocess`, `/{id}/track`, `DELETE /{id}`, `/reviews/`) enforce JWT authentication (`Depends(get_current_user)`) and user ownership (`video.user_id == current_user.id`).
+- **Protected Media Streaming**: `GET /videos/{id}/stream` replaces insecure public static mounts. It verifies user ownership and accepts credentials via `Authorization: Bearer <token>` or `?token=<token>` (enabling native HTML5 `<video>` tags).
+- **Password Compatibility**: `AuthService` supports transparent upgrade from legacy raw bcrypt hashes to SHA-256 pre-hashed bcrypt (mitigating passlib 72-byte truncation without breaking existing user accounts).
+- **Atomic Reprocessing**: `POST /videos/{id}/reprocess` validates and prepares replacement trajectory data in-memory before modifying the database. It executes the replacement in a single database transaction with explicit rollback on failure, ensuring existing trajectories are never destroyed if processing fails.
+
+---
+
+## 3. Coordinate System Conventions
 
 To ensure consistency across CV detection, physics modeling, and Three.js rendering:
 
@@ -56,7 +66,7 @@ $$\text{Three.js } Z = Y_{\text{cricket}} \quad (\text{distance down pitch})$$
 
 ---
 
-## 3. Computer Vision Processing Pipeline
+## 4. Computer Vision Processing Pipeline
 
 ### Stage 1: Static Geometry Analysis
 - **Pitch Segmentation**: Samples video frames to detect dominant green grass hue (HSV $35^\circ$–$80^\circ$). Computes convex hull of the bowling strip. Falls back to default geometry if no distinct strip is identified (flagged in `debug_info.geometry_source`).
@@ -67,29 +77,35 @@ $$\text{Three.js } Z = Y_{\text{cricket}} \quad (\text{distance down pitch})$$
 - **Motion Differencing**: Absolute frame subtraction against preceding frame ($|I_t - I_{t-1}| > \tau$) to filter static pitch textures and isolate dynamic foreground.
 - **Shape Scoring**: Contour circularity ($4\pi A / P^2$) and Hough gradient circle candidates filtered by radius ($3$ to $15\text{ px}$).
 
-### Stage 3: Pixel-Space Temporal Association
+### Stage 3: Pixel-Space Temporal Association & Gap Prediction
 - Gating is strictly executed in 2D image coordinates:
   $$\Delta p = \sqrt{(u_t - u_{t-1})^2 + (v_t - v_{t-1})^2}$$
   $$\Delta p_{\text{max}} = \max(\Delta t \cdot v_{\text{max\_px\_per\_sec}}, \text{tolerance}_{\text{px}})$$
-- Inconsistent leaps are discarded as false positives.
+- Missing frames are predicted up to `MAX_PREDICTION_GAP_S = 0.2 s` (maximum 5 consecutive frames) and explicitly flagged with `is_predicted: True`.
 
-### Stage 4: Kalman Filter Smoothing
-- Constant-velocity transition matrix with variable frame delta $\Delta t$:
+### Stage 4: Heuristic 3D Lift & Kalman Smoothing
+- 2D pixel coordinates are lifted to 3D world space using pitch reference geometry (`_pixel_to_3d`).
+- 3D smoothing uses a constant-velocity Kalman filter with variable frame delta $\Delta t$:
   $$F(\Delta t) = \begin{bmatrix} 1 & 0 & 0 & \Delta t & 0 & 0 \\ 0 & 1 & 0 & 0 & \Delta t & 0 \\ 0 & 0 & 1 & 0 & 0 & \Delta t \\ 0 & 0 & 0 & 1 & 0 & 0 \\ 0 & 0 & 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 0 & 0 & 1 \end{bmatrix}$$
-- Real detections update the state via measurement correction. Predicted gap frames update state prediction only without artificial covariance contraction.
+- Real detections update state via measurement correction. Predicted gap points preserve their `is_predicted` provenance and are clearly distinguished in visualization.
+
+### Stage 5: Physical Event Verification & Honest Semantics
+- **Bounce Detection**: Requires physical downward-to-upward curvature near pitch level ($Z \le 0.45\text{ m}$). If no physical bounce curvature exists (e.g., flat horizontal flight or non-bouncing clip), `bounce_point` is set to `None` and `post_bounce_points` is empty.
+- **Pad Impact & LBW Decisions**: Pad impact and LBW verdicts are reserved for verified events or physics simulations. On uncalibrated single-camera footage without ground-truth pad contact, `impact_point` and `drs_evaluation` are set to `None` to prevent fabricating LBW verdicts.
+- **Speed Reporting**: Uncalibrated video does not claim metric speeds (`release_speed_kmh = None`); instead, honest 2D image-space speed is reported (`release_speed_px_per_sec`).
 
 ---
 
-## 4. DRS Decision Logic
+## 5. DRS Decision Logic (Simulation & Verified Events)
 
-The Decision Review System evaluates the three ICC LBW criteria:
-1. **Pitching**: Evaluates the lateral $X$ coordinate of the bounce point against the stump corridor:
+When physical event criteria are satisfied or running in simulation mode, the Decision Review System evaluates the three ICC LBW criteria:
+1. **Pitching**: Evaluates lateral $X$ coordinate of bounce point against stump corridor:
    - $|X_{\text{bounce}}| \le 0.1143\text{ m} \implies \text{IN LINE}$
    - $X_{\text{bounce}} > 0.1143\text{ m} \implies \text{OUTSIDE OFF}$
    - $X_{\text{bounce}} < -0.1143\text{ m} \implies \text{OUTSIDE LEG}$ (automatic NOT OUT for LBW)
 2. **Impact**: Position of ball at pad impact:
    - In Line if $|X_{\text{impact}}| \le 0.1143\text{ m}$
-3. **Wickets**: Extrapolated path at the stump plane ($Y = 10.06\text{ m}$):
-   - $\text{HITTING}$ if trajectory intersects within the stump bounding volume ($|X| \le 0.1143\text{ m}$, $0.036\text{ m} \le Z \le 0.711\text{ m}$)
-   - $\text{UMPIRE'S CALL}$ if the ball center misses but the ball boundary ($r = 0.036\text{ m}$) touches the outer stump zone
-   - $\text{MISSING}$ if the trajectory passes clear over or outside the wickets
+3. **Wickets**: Extrapolated path at stump plane ($Y = 10.06\text{ m}$):
+   - $\text{HITTING}$ if trajectory intersects within stump volume ($|X| \le 0.1143\text{ m}$, $0.036\text{ m} \le Z \le 0.711\text{ m}$)
+   - $\text{UMPIRE'S CALL}$ if ball center misses but ball boundary ($r = 0.036\text{ m}$) touches outer stump zone
+   - $\text{MISSING}$ if trajectory passes clear over or outside wickets

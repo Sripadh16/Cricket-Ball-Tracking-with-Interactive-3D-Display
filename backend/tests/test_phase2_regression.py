@@ -221,7 +221,7 @@ class TestTrackingEvaluationHarness:
         scripts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts'))
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
-        from evaluate_tracking import evaluate_trajectory
+        from evaluate_tracking import evaluate_trajectory, parse_tracking_data
 
         gt = {
             0: (100.0, 100.0),
@@ -236,10 +236,26 @@ class TestTrackingEvaluationHarness:
         metrics = evaluate_trajectory(tracked, gt, match_threshold_px=15.0)
         assert metrics['total_gt_frames'] == 3
         assert metrics['total_tracked_points'] == 3
-        assert metrics['true_positives'] == 2
-        assert metrics['false_positives'] == 1
-        assert metrics['false_negatives'] == 1
-        assert abs(metrics['recall'] - (2/3)) < 0.01
-        assert abs(metrics['precision'] - (2/3)) < 0.01
+        assert metrics['measured_points'] == 2
+        assert metrics['predicted_points'] == 1
+
+        # Detector-only metrics (measured detections only)
+        assert metrics['detector_tp'] == 2
+        assert metrics['detector_fp'] == 0
+        assert metrics['detector_fn'] == 1
+        assert metrics['detector_precision'] == 1.0
+        assert abs(metrics['detector_recall'] - (2/3)) < 0.01
+
+        # Combined tracking metrics (measured + predicted)
+        assert metrics['combined_tp'] == 2
+        assert metrics['combined_fp'] == 1
+        assert abs(metrics['combined_recall'] - (2/3)) < 0.01
+        assert abs(metrics['combined_precision'] - (2/3)) < 0.01
         assert metrics['predicted_fraction'] == round(1/3, 4)
+
+        # Top-level array and dict parsing support (Finding 10)
+        list_pts = [{'frame_idx': 0, 'pixel_x': 10.0, 'pixel_y': 10.0}]
+        dict_pts = {'points': list_pts}
+        assert parse_tracking_data(list_pts) == list_pts
+        assert parse_tracking_data(dict_pts) == list_pts
 
