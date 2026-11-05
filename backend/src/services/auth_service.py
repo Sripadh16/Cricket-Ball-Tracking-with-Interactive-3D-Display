@@ -10,7 +10,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import hashlib as _hashlib
+
+# passlib 1.7.4 + bcrypt>=4 raises ValueError for passwords >72 bytes.
+# Pre-hash with SHA-256 to produce a fixed 64-char hex string, always under 72 bytes.
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _prepare_password(plain: str) -> str:
+    """SHA-256 pre-hash so bcrypt never sees a password over 72 bytes."""
+    return _hashlib.sha256(plain.encode()).hexdigest()
 
 class AuthService:
     def __init__(self, db: Session):
@@ -18,11 +26,11 @@ class AuthService:
 
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash"""
-        return pwd_context.verify(plain_password, hashed_password)
+        return pwd_context.verify(_prepare_password(plain_password), hashed_password)
 
     def get_password_hash(self, password: str) -> str:
         """Hash a password"""
-        return pwd_context.hash(password)
+        return pwd_context.hash(_prepare_password(password))
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
         """Authenticate a user with email and password"""

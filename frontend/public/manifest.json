@@ -1,0 +1,8 @@
+{
+  "short_name": "DRS",
+  "name": "DRS Cricket Ball Tracking System",
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#1a472a",
+  "background_color": "#1a472a"
+}

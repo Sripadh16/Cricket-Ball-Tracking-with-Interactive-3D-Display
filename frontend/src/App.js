@@ -40,6 +40,10 @@ function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [trajectoryData, setTrajectoryData] = useState(null);
+  // trajectoryLoading: true while the /trajectory API call is in-flight
+  const [trajectoryLoading, setTrajectoryLoading] = useState(false);
+  // trajectoryError: 'not_processed' | 'load_error' | null
+  const [trajectoryError, setTrajectoryError] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -58,25 +62,37 @@ function App() {
     setIsAuthenticated(false);
     setSelectedVideo(null);
     setTrajectoryData(null);
+    setTrajectoryLoading(false);
+    setTrajectoryError(null);
     setCurrentView('dashboard');
   }, []);
 
   const handleVideoSelect = useCallback(async (video) => {
+    // Navigate immediately so user sees the video panel while trajectory loads
     setSelectedVideo(video);
+    setTrajectoryData(null);
+    setTrajectoryLoading(true);
+    setTrajectoryError(null);
     setCurrentView('review');
-    
+
     try {
       const response = await api.get(`/videos/${video.id}/trajectory`);
       setTrajectoryData(response.data);
     } catch (err) {
       console.error('Failed to load trajectory:', err);
       setTrajectoryData(null);
+      // 404 = video not yet processed; anything else = real error
+      setTrajectoryError(err.response?.status === 404 ? 'not_processed' : 'load_error');
+    } finally {
+      setTrajectoryLoading(false);
     }
   }, []);
 
   const handleLaunchDemo = useCallback(() => {
     setSelectedVideo(null);
     setTrajectoryData(null);
+    setTrajectoryLoading(false);
+    setTrajectoryError(null);
     setCurrentView('review');
   }, []);
 
@@ -84,6 +100,8 @@ function App() {
     setCurrentView('dashboard');
     setSelectedVideo(null);
     setTrajectoryData(null);
+    setTrajectoryLoading(false);
+    setTrajectoryError(null);
   }, []);
 
   if (loading) {
@@ -125,6 +143,8 @@ function App() {
         <DRSReview
           video={selectedVideo}
           trajectoryData={trajectoryData}
+          trajectoryLoading={trajectoryLoading}
+          trajectoryError={trajectoryError}
           onBack={handleBackToDashboard}
         />
       )}

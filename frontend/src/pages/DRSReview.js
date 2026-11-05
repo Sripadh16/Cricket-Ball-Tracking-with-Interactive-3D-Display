@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Box, IconButton, Typography, Chip, Slider, ToggleButton, ToggleButtonGroup,
-  Paper, Button, Select, MenuItem, FormControl, Divider
+  Paper, Button, Select, MenuItem, FormControl, Divider, CircularProgress
 } from '@mui/material';
 import {
-  ArrowBack, PlayArrow, Pause, Replay, Speed, Gavel
+  ArrowBack, PlayArrow, Pause, Replay, Speed, Gavel, SkipPrevious, SkipNext
 } from '@mui/icons-material';
 import HawkEyeViewer from '../components/HawkEyeViewer';
 import api, { API_BASE_URL } from '../api/client';
@@ -15,10 +15,16 @@ const PRESET_DELIVERIES = [
   { id: 'inswinger_lbw', label: 'Fast Inswinger - LBW Out (142 km/h)', decision: 'OUT' },
   { id: 'offcutter_bowled', label: 'Good Length Off-Cutter - Bowled (132 km/h)', decision: 'OUT' },
   { id: 'bouncer_missing', label: 'Sharp Bouncer - Missing Stumps (148 km/h)', decision: 'NOT OUT' },
-  { id: 'legspin_umpires_call', label: 'Leg Break - Umpire\'s Call (88 km/h)', decision: 'UMPIRE\'S CALL' }
+  { id: 'legspin_umpires_call', label: "Leg Break - Umpire's Call (88 km/h)", decision: "UMPIRE'S CALL" }
 ];
 
-export default function DRSReview({ video, trajectoryData: initialTrajectory, onBack }) {
+export default function DRSReview({
+  video,
+  trajectoryData: initialTrajectory,
+  trajectoryLoading = false,
+  trajectoryError = null,
+  onBack
+}) {
   const videoRef = useRef(null);
   const animFrameRef = useRef(null);
   const lastTimeRef = useRef(null);
@@ -31,6 +37,13 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
   const [currentDeliveryType, setCurrentDeliveryType] = useState(video ? 'video' : 'inswinger_lbw');
   const [activeTrajectory, setActiveTrajectory] = useState(initialTrajectory);
   const [loadingPreset, setLoadingPreset] = useState(false);
+
+  // --- Sync activeTrajectory when parent updates (e.g., user switches clips) ---
+  useEffect(() => {
+    if (currentDeliveryType === 'video') {
+      setActiveTrajectory(initialTrajectory);
+    }
+  }, [initialTrajectory, currentDeliveryType]);
 
   // Load preset delivery data
   const loadPresetDelivery = useCallback(async (deliveryType) => {
@@ -63,14 +76,14 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
     }
   };
 
-  // If initially no trajectory and no video, load default preset
+  // Only load default preset if there's no video and no trajectory loading in flight
   useEffect(() => {
-    if (!video && !initialTrajectory) {
+    if (!video && !initialTrajectory && !trajectoryLoading) {
       loadPresetDelivery('inswinger_lbw');
     }
-  }, [video, initialTrajectory, loadPresetDelivery]);
+  }, [video, initialTrajectory, trajectoryLoading, loadPresetDelivery]);
 
-  // Video event listeners (when viewing uploaded video)
+  // Video event listeners — re-attached when viewMode changes (element may remount)
   useEffect(() => {
     if (currentDeliveryType !== 'video') return;
     const vid = videoRef.current;
@@ -92,7 +105,7 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
       vid.removeEventListener('play', onPlay);
       vid.removeEventListener('pause', onPause);
     };
-  }, [currentDeliveryType]);
+  }, [currentDeliveryType, viewMode]); // viewMode added so listeners reattach after remount
 
   // Simulated animation clock for 3D physics presets
   useEffect(() => {
@@ -124,9 +137,16 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
     };
   }, [isPlaying, playbackRate, duration, currentDeliveryType]);
 
+  // Handle play/pause — wrap play() in catch to handle browser rejection
   const togglePlay = () => {
     if (currentDeliveryType === 'video' && videoRef.current) {
-      isPlaying ? videoRef.current.pause() : videoRef.current.play();
+      if (isPlaying) {
+        videoRef.current.pause();
+      } else {
+        videoRef.current.play().catch(err => {
+          console.warn('Video play rejected:', err.name);
+        });
+      }
     } else {
       setIsPlaying(!isPlaying);
     }
@@ -153,6 +173,20 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
     }
   };
 
+  // Step one frame forward/back (for video mode)
+  const stepFrame = (direction) => {
+    if (currentDeliveryType === 'video' && videoRef.current) {
+      const fps = 30; // assume 30fps for manual stepping
+      const step = direction / fps;
+      const clamped = Math.max(0, Math.min(duration, videoRef.current.currentTime + step));
+      videoRef.current.currentTime = clamped;
+    } else {
+      // For simulation: step by ~1 frame at 60fps
+      const step = direction / 60;
+      setCurrentTime(prev => Math.max(0, Math.min(duration, prev + step)));
+    }
+  };
+
   const formatTime = (t) => {
     const mins = Math.floor(t / 60);
     const secs = Math.floor(t % 60);
@@ -165,6 +199,8 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
     : '';
 
   const drs = activeTrajectory?.drs_evaluation;
+  const isVideoMode = currentDeliveryType === 'video';
+  const isSimulation = !isVideoMode;
 
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#060d17', color: 'white' }}>
@@ -173,13 +209,19 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: 1.5,
         px: 2,
         py: 1.2,
         bgcolor: '#0a1626',
         borderBottom: '1px solid rgba(255,255,255,0.1)'
       }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <IconButton onClick={onBack} sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.06)' }}>
+          <IconButton
+            onClick={onBack}
+            sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.06)' }}
+            aria-label="Back to dashboard"
+          >
             <ArrowBack fontSize="small" />
           </IconButton>
           <Box>
@@ -187,14 +229,14 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
               Cricket DRS Review Console
             </Typography>
             <Typography variant="caption" sx={{ color: '#94a3b8' }}>
-              Computer Vision & Interactive 3D Hawk-Eye Display
+              Computer Vision &amp; Interactive 3D Hawk-Eye Display
             </Typography>
           </Box>
         </Box>
 
-        {/* Delivery Selector Dropdown */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <FormControl size="small" sx={{ minWidth: 260 }}>
+        {/* Delivery Selector Dropdown & View Mode */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 260 } }}>
             <Select
               disabled={loadingPreset}
               value={currentDeliveryType}
@@ -239,25 +281,33 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
               }
             }}
           >
-            {video && <ToggleButton value="video">Video</ToggleButton>}
-            {video && <ToggleButton value="split">Split</ToggleButton>}
-            <ToggleButton value="3d">3D Hawk-Eye</ToggleButton>
+            {video && <ToggleButton value="video" aria-label="Video only">Video</ToggleButton>}
+            {video && <ToggleButton value="split" aria-label="Split view">Split</ToggleButton>}
+            <ToggleButton value="3d" aria-label="3D Hawk-Eye">3D Hawk-Eye</ToggleButton>
           </ToggleButtonGroup>
         </Box>
       </Box>
 
       {/* Main Review Area */}
-      <Box sx={{ flex: 1, display: 'flex', flexDirection: { xs: 'column', md: 'row' }, overflow: 'hidden' }}>
+      <Box sx={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: { xs: 'column', md: 'row' },
+        overflow: { xs: 'auto', md: 'hidden' }
+      }}>
         {/* Video Panel (only if video available & viewMode is video or split) */}
         {video && (viewMode === 'video' || viewMode === 'split') && (
           <Box sx={{
             flex: viewMode === 'split' ? 1 : 'auto',
+            height: { xs: 240, md: 'auto' },
+            minHeight: { xs: 200, md: 'auto' },
             position: 'relative',
             bgcolor: 'black',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            borderRight: '1px solid rgba(255,255,255,0.1)'
+            borderRight: { xs: 'none', md: '1px solid rgba(255,255,255,0.1)' },
+            borderBottom: { xs: '1px solid rgba(255,255,255,0.1)', md: 'none' }
           }}>
             <video
               ref={videoRef}
@@ -284,7 +334,13 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
 
         {/* 3D Hawk-Eye View Panel */}
         {(viewMode === '3d' || viewMode === 'split') && (
-          <Box sx={{ flex: 1.3, position: 'relative', bgcolor: '#08121e' }}>
+          <Box sx={{
+            flex: 1.3,
+            height: { xs: 340, md: 'auto' },
+            minHeight: { xs: 280, md: 'auto' },
+            position: 'relative',
+            bgcolor: '#08121e'
+          }}>
             <HawkEyeViewer
               trajectoryData={activeTrajectory}
               currentTime={currentTime}
@@ -295,8 +351,10 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
         {/* Broadcast DRS Decision & Telemetry Sidebar */}
         <Box sx={{
           width: { xs: '100%', md: 320 },
+          flexShrink: 0,
           bgcolor: '#0a1626',
-          borderLeft: '1px solid rgba(255,255,255,0.1)',
+          borderLeft: { xs: 'none', md: '1px solid rgba(255,255,255,0.1)' },
+          borderTop: { xs: '1px solid rgba(255,255,255,0.1)', md: 'none' },
           p: 2,
           display: 'flex',
           flexDirection: 'column',
@@ -311,109 +369,143 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
             </Typography>
           </Box>
 
-          {/* 3-Box Official DRS Evaluation */}
-          {drs ? (
-            <Paper sx={{
-              p: 2,
-              bgcolor: '#0f2137',
-              borderRadius: 2,
-              border: '1px solid rgba(255,255,255,0.12)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 1.5
-            }}>
-              {/* Pitching */}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                  Pitching
-                </Typography>
-                <Chip
-                  label={drs.pitching}
-                  size="small"
-                  sx={{
-                    bgcolor: drs.pitching === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
-                    color: drs.pitching === 'IN LINE' ? '#4ade80' : '#f87171',
-                    border: `1px solid ${drs.pitching === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
-                    fontWeight: 700,
-                    fontSize: '0.72rem'
-                  }}
-                />
-              </Box>
-
-              {/* Impact */}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                  Impact
-                </Typography>
-                <Chip
-                  label={drs.impact}
-                  size="small"
-                  sx={{
-                    bgcolor: drs.impact === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
-                    color: drs.impact === 'IN LINE' ? '#4ade80' : '#f87171',
-                    border: `1px solid ${drs.impact === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
-                    fontWeight: 700,
-                    fontSize: '0.72rem'
-                  }}
-                />
-              </Box>
-
-              {/* Wickets */}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                  Wickets
-                </Typography>
-                <Chip
-                  label={drs.wickets}
-                  size="small"
-                  sx={{
-                    bgcolor: drs.wickets === 'HITTING'
-                      ? 'rgba(239,68,68,0.2)'
-                      : drs.wickets === "UMPIRE'S CALL"
-                      ? 'rgba(245,158,11,0.2)'
-                      : 'rgba(34,197,94,0.2)',
-                    color: drs.wickets === 'HITTING'
-                      ? '#f87171'
-                      : drs.wickets === "UMPIRE'S CALL"
-                      ? '#fbbf24'
-                      : '#4ade80',
-                    border: `1px solid ${
-                      drs.wickets === 'HITTING'
-                        ? '#ef4444'
-                        : drs.wickets === "UMPIRE'S CALL"
-                        ? '#f59e0b'
-                        : '#22c55e'
-                    }`,
-                    fontWeight: 700,
-                    fontSize: '0.72rem'
-                  }}
-                />
-              </Box>
-
-              <Divider sx={{ borderColor: 'rgba(255,255,255,0.1)', my: 0.5 }} />
-
-              {/* Final Big Decision Banner */}
-              <Box sx={{
-                textAlign: 'center',
-                py: 1.2,
-                borderRadius: 1.5,
-                bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                  ? '#e63946'
-                  : drs.decision.includes('UMPIRE')
-                  ? '#f59e0b'
-                  : '#2a9d8f'
-              }}>
-                <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 1.5, color: 'white' }}>
-                  {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
-                </Typography>
-              </Box>
-            </Paper>
-          ) : (
-            <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
+          {/* Loading state for uploaded video trajectory */}
+          {isVideoMode && trajectoryLoading && (
+            <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+              <CircularProgress size={16} sx={{ color: '#38bdf8' }} />
               <Typography variant="body2" sx={{ color: '#94a3b8' }}>
-                Upload a video or pick a preset to view DRS evaluation.
+                Loading trajectory analysis…
               </Typography>
             </Paper>
+          )}
+
+          {/* Error state */}
+          {isVideoMode && trajectoryError && !trajectoryLoading && (
+            <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
+              <Typography variant="body2" sx={{ color: trajectoryError === 'not_processed' ? '#fbbf24' : '#f87171' }}>
+                {trajectoryError === 'not_processed'
+                  ? '⚠ Video not yet processed. Go back and reprocess.'
+                  : '⚠ Failed to load trajectory data.'}
+              </Typography>
+            </Paper>
+          )}
+
+          {/* 3-Box Official DRS Evaluation */}
+          {!trajectoryLoading && (
+            <>
+              {drs ? (
+                <Paper sx={{
+                  p: 2,
+                  bgcolor: '#0f2137',
+                  borderRadius: 2,
+                  border: '1px solid rgba(255,255,255,0.12)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 1.5
+                }}>
+                  {/* Pitching */}
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                      Pitching
+                    </Typography>
+                    <Chip
+                      label={drs.pitching}
+                      size="small"
+                      sx={{
+                        bgcolor: drs.pitching === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
+                        color: drs.pitching === 'IN LINE' ? '#4ade80' : '#f87171',
+                        border: `1px solid ${drs.pitching === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
+                        fontWeight: 700,
+                        fontSize: '0.72rem'
+                      }}
+                    />
+                  </Box>
+
+                  {/* Impact */}
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                      Impact
+                    </Typography>
+                    <Chip
+                      label={drs.impact}
+                      size="small"
+                      sx={{
+                        bgcolor: drs.impact === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
+                        color: drs.impact === 'IN LINE' ? '#4ade80' : '#f87171',
+                        border: `1px solid ${drs.impact === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
+                        fontWeight: 700,
+                        fontSize: '0.72rem'
+                      }}
+                    />
+                  </Box>
+
+                  {/* Wickets */}
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                      Wickets
+                    </Typography>
+                    <Chip
+                      label={drs.wickets}
+                      size="small"
+                      sx={{
+                        bgcolor: drs.wickets === 'HITTING'
+                          ? 'rgba(239,68,68,0.2)'
+                          : drs.wickets === "UMPIRE'S CALL"
+                          ? 'rgba(245,158,11,0.2)'
+                          : 'rgba(34,197,94,0.2)',
+                        color: drs.wickets === 'HITTING'
+                          ? '#f87171'
+                          : drs.wickets === "UMPIRE'S CALL"
+                          ? '#fbbf24'
+                          : '#4ade80',
+                        border: `1px solid ${
+                          drs.wickets === 'HITTING'
+                            ? '#ef4444'
+                            : drs.wickets === "UMPIRE'S CALL"
+                            ? '#f59e0b'
+                            : '#22c55e'
+                        }`,
+                        fontWeight: 700,
+                        fontSize: '0.72rem'
+                      }}
+                    />
+                  </Box>
+
+                  <Divider sx={{ borderColor: 'rgba(255,255,255,0.1)', my: 0.5 }} />
+
+                  {/* Final Big Decision Banner */}
+                  <Box sx={{
+                    textAlign: 'center',
+                    py: 1.2,
+                    borderRadius: 1.5,
+                    bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
+                      ? '#e63946'
+                      : drs.decision.includes('UMPIRE')
+                      ? '#f59e0b'
+                      : '#2a9d8f'
+                  }}>
+                    <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 1.5, color: 'white' }}>
+                      {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
+                    </Typography>
+                  </Box>
+
+                  {/* Source label for video mode */}
+                  {isVideoMode && (
+                    <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.68rem', textAlign: 'center' }}>
+                      ⚠ Illustrative estimate — uncalibrated single-camera footage
+                    </Typography>
+                  )}
+                </Paper>
+              ) : (
+                !trajectoryError && (
+                  <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
+                    <Typography variant="body2" sx={{ color: '#94a3b8' }}>
+                      {isVideoMode ? 'No trajectory data available.' : 'Upload a video or pick a preset to view DRS evaluation.'}
+                    </Typography>
+                  </Paper>
+                )
+              )}
+            </>
           )}
 
           {/* Delivery Telemetry */}
@@ -431,37 +523,53 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
               <Typography variant="caption" sx={{ fontWeight: 700, color: '#38bdf8', textTransform: 'uppercase' }}>
                 Ball Telemetry
               </Typography>
+              {/* Label: SIMULATION vs ILLUSTRATIVE */}
+              <Chip
+                label={isSimulation ? 'SIMULATION' : 'ILLUSTRATIVE'}
+                size="small"
+                sx={{
+                  ml: 'auto',
+                  bgcolor: isSimulation ? 'rgba(34,197,94,0.15)' : 'rgba(245,158,11,0.15)',
+                  color: isSimulation ? '#4ade80' : '#fbbf24',
+                  border: `1px solid ${isSimulation ? 'rgba(34,197,94,0.4)' : 'rgba(245,158,11,0.4)'}`,
+                  fontSize: '0.6rem',
+                  fontWeight: 700,
+                  height: 18,
+                }}
+              />
             </Box>
 
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: '#94a3b8' }}>Release Speed</Typography>
               <Typography variant="caption" sx={{ fontWeight: 700, color: 'white' }}>
-                {activeTrajectory?.release_speed_kmh
+                {activeTrajectory?.release_speed_kmh != null
                   ? `${activeTrajectory.release_speed_kmh} km/h (${(activeTrajectory.release_speed_kmh * 0.621371).toFixed(1)} mph)`
-                  : 'N/A'}
+                  : '—'}
               </Typography>
             </Box>
 
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: '#94a3b8' }}>Bounce Speed</Typography>
               <Typography variant="caption" sx={{ fontWeight: 700, color: 'white' }}>
-                {activeTrajectory?.bounce_speed_kmh
+                {activeTrajectory?.bounce_speed_kmh != null
                   ? `${activeTrajectory.bounce_speed_kmh} km/h`
-                  : 'N/A'}
+                  : '—'}
               </Typography>
             </Box>
 
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: '#94a3b8' }}>Length Zone</Typography>
               <Typography variant="caption" sx={{ fontWeight: 700, color: '#e9c46a' }}>
-                {activeTrajectory?.length_zone || 'Good Length'}
+                {activeTrajectory?.length_zone != null
+                  ? activeTrajectory.length_zone
+                  : (isVideoMode ? '—' : 'Good Length')}
               </Typography>
             </Box>
 
             <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: '#94a3b8' }}>Stump Target</Typography>
               <Typography variant="caption" sx={{ fontWeight: 700, color: '#f72585' }}>
-                {activeTrajectory?.stump_plane_target?.hit_stump || 'None'}
+                {activeTrajectory?.stump_plane_target?.hit_stump || '—'}
               </Typography>
             </Box>
           </Paper>
@@ -514,9 +622,17 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
 
         {/* Playback & Speed Controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <IconButton onClick={restart} sx={{ color: 'white' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <IconButton onClick={restart} sx={{ color: 'white' }} aria-label="Restart">
               <Replay fontSize="small" />
+            </IconButton>
+            <IconButton
+              onClick={() => stepFrame(-1)}
+              sx={{ color: '#94a3b8' }}
+              aria-label="Previous frame"
+              size="small"
+            >
+              <SkipPrevious fontSize="small" />
             </IconButton>
             <IconButton
               onClick={togglePlay}
@@ -527,8 +643,17 @@ export default function DRSReview({ video, trajectoryData: initialTrajectory, on
                 width: 38,
                 height: 38
               }}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? <Pause fontSize="small" /> : <PlayArrow fontSize="small" />}
+            </IconButton>
+            <IconButton
+              onClick={() => stepFrame(1)}
+              sx={{ color: '#94a3b8' }}
+              aria-label="Next frame"
+              size="small"
+            >
+              <SkipNext fontSize="small" />
             </IconButton>
           </Box>
 

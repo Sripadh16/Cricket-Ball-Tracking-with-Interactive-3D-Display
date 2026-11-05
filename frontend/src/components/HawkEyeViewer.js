@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import {
   Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
-  FormControlLabel, Switch, Paper, Tooltip, IconButton
+  FormControlLabel, Switch, Paper, Tooltip, IconButton, Button
 } from '@mui/material';
 import { SportsCricket } from '@mui/icons-material';
 import * as THREE from 'three';
@@ -161,31 +161,80 @@ function CricketPitch({ showZones = false }) {
   );
 }
 
-// Glowing CatmullRom Trajectory Ribbon
+// Glowing CatmullRom Trajectory Ribbon.
+// When isDashed=true (extrapolated / predicted segments) the tube is drawn as
+// alternating short dashes with visible gaps — not just a semi-transparent tube.
 function TrajectoryTube({ points, color, emissiveColor, radius = 0.022, isDashed = false }) {
-  const geometry = useMemo(() => {
-    if (!points || points.length < 2) return null;
+  const { solidGeoms, dashedGeoms } = useMemo(() => {
+    if (!points || points.length < 2) return { solidGeoms: [], dashedGeoms: [] };
+
     const vectors = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
     const curve = new THREE.CatmullRomCurve3(vectors);
-    return new THREE.TubeGeometry(curve, Math.max(20, points.length * 3), radius, 8, false);
-  }, [points, radius]);
+    const totalLength = curve.getLength();
 
-  if (!geometry) return null;
+    if (!isDashed) {
+      // Solid tube — single geometry
+      const geom = new THREE.TubeGeometry(
+        curve, Math.max(20, points.length * 3), radius, 8, false
+      );
+      return { solidGeoms: [geom], dashedGeoms: [] };
+    }
+
+    // Dashed: alternate between dash segments (rendered) and gap segments (skipped)
+    const DASH_LENGTH = 0.25;   // metres
+    const GAP_LENGTH  = 0.15;   // metres
+    const CYCLE = DASH_LENGTH + GAP_LENGTH;
+    const numCycles = Math.ceil(totalLength / CYCLE);
+    const geoms = [];
+
+    for (let i = 0; i < numCycles; i++) {
+      const tStart = (i * CYCLE) / totalLength;
+      const tEnd   = Math.min(1.0, (i * CYCLE + DASH_LENGTH) / totalLength);
+      if (tEnd <= tStart) break;
+
+      // Sample sub-curve points
+      const steps = Math.max(4, Math.round((tEnd - tStart) * points.length * 3));
+      const subPoints = [];
+      for (let s = 0; s <= steps; s++) {
+        const t = tStart + (tEnd - tStart) * (s / steps);
+        subPoints.push(curve.getPoint(t));
+      }
+      if (subPoints.length < 2) continue;
+      const subCurve = new THREE.CatmullRomCurve3(subPoints);
+      geoms.push(new THREE.TubeGeometry(subCurve, steps, radius, 8, false));
+    }
+    return { solidGeoms: [], dashedGeoms: geoms };
+  }, [points, radius, isDashed]);
+
+  if (!solidGeoms.length && !dashedGeoms.length) return null;
+
+  // Material shared across all dash segments
+  const materialProps = {
+    color,
+    emissive: emissiveColor || color,
+    emissiveIntensity: isDashed ? 0.9 : 0.6,
+    roughness: 0.2,
+    metalness: 0.8,
+    transparent: isDashed,
+    opacity: isDashed ? 0.82 : 0.95,
+  };
 
   return (
-    <mesh geometry={geometry}>
-      <meshStandardMaterial
-        color={color}
-        emissive={emissiveColor || color}
-        emissiveIntensity={isDashed ? 0.9 : 0.6}
-        roughness={0.2}
-        metalness={0.8}
-        transparent={isDashed}
-        opacity={isDashed ? 0.75 : 0.95}
-      />
-    </mesh>
+    <group>
+      {solidGeoms.map((geom, i) => (
+        <mesh key={i} geometry={geom}>
+          <meshStandardMaterial {...materialProps} />
+        </mesh>
+      ))}
+      {dashedGeoms.map((geom, i) => (
+        <mesh key={i} geometry={geom}>
+          <meshStandardMaterial {...materialProps} />
+        </mesh>
+      ))}
+    </group>
   );
 }
+
 
 // Concentric Animated Halo at Pitch Bounce Spot
 function PitchingSpotMarker({ bouncePoint, onSelectPoint }) {
@@ -546,6 +595,56 @@ function Scene({
   );
 }
 
+// Error boundary for WebGL / Canvas failure fallback
+class WebGLErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error("WebGL / Three.js 3D Viewer error:", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <Box sx={{
+          height: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          bgcolor: '#08121e',
+          color: '#cbd5e1',
+          p: 3,
+          textAlign: 'center'
+        }}>
+          <Typography variant="h6" sx={{ color: '#f87171', mb: 1, fontWeight: 700 }}>
+            3D Graphics Unavailable
+          </Typography>
+          <Typography variant="body2" sx={{ maxWidth: 420, mb: 2, color: '#94a3b8', fontSize: '0.85rem' }}>
+            WebGL context could not be initialized or encountered an error. Please verify hardware acceleration is enabled in your browser settings.
+          </Typography>
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={() => this.setState({ hasError: false, error: null })}
+            sx={{ color: '#38bdf8', borderColor: '#38bdf8' }}
+          >
+            Retry 3D View
+          </Button>
+        </Box>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // Master Interactive 3D Viewer Component
 export default function HawkEyeViewer({ trajectoryData, currentTime = 0 }) {
   const [cameraView, setCameraView] = useState('orbit');
@@ -557,21 +656,23 @@ export default function HawkEyeViewer({ trajectoryData, currentTime = 0 }) {
 
   return (
     <Box sx={{ height: '100%', position: 'relative', bgcolor: '#08121e', overflow: 'hidden' }}>
-      <Canvas
-        shadows
-        camera={{ position: [7, 5, 5], fov: 48, near: 0.1, far: 120 }}
-      >
-        <color attach="background" args={['#08121e']} />
-        <fog attach="fog" args={['#08121e', 35, 75]} />
-        <Scene
-          trajectoryData={trajectoryData}
-          currentTime={currentTime}
-          cameraView={cameraView}
-          showExtrapolation={showExtrapolation}
-          showZones={showZones}
-          onSelectPoint={(p) => setSelectedPoint(p)}
-        />
-      </Canvas>
+      <WebGLErrorBoundary>
+        <Canvas
+          shadows
+          camera={{ position: [7, 5, 5], fov: 48, near: 0.1, far: 120 }}
+        >
+          <color attach="background" args={['#08121e']} />
+          <fog attach="fog" args={['#08121e', 35, 75]} />
+          <Scene
+            trajectoryData={trajectoryData}
+            currentTime={currentTime}
+            cameraView={cameraView}
+            showExtrapolation={showExtrapolation}
+            showZones={showZones}
+            onSelectPoint={(p) => setSelectedPoint(p)}
+          />
+        </Canvas>
+      </WebGLErrorBoundary>
 
       {/* Header Overlay: DRS Live Badge & Delivery Type */}
       <Box sx={{

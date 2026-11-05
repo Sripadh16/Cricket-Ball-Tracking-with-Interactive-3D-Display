@@ -1,7 +1,20 @@
 version: '3.8'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STATUS: Docker path is provided for reference and is NOT verified to work
+# end-to-end. The primary (tested) path is local SQLite — see README.md.
+# If you use Docker, verify the init.sql schema matches the ORM before running.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Env-var names are aligned with config.py (backend/src/config.py):
+#   DATABASE_URL, UPLOAD_DIR, JWT_SECRET_KEY, JWT_ALGORITHM,
+#   JWT_ACCESS_TOKEN_EXPIRE_MINUTES, CORS_ORIGINS, MAX_UPLOAD_SIZE_MB
+#
+# Redis is NOT used by the application — removed from backend depends_on.
+# Redis service kept only as an optional cache sidecar (profile: optional).
+
 services:
-  # PostgreSQL Database
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
     container_name: drs-postgres
@@ -22,21 +35,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # Redis for caching (optional)
-  redis:
-    image: redis:7-alpine
-    container_name: drs-redis
-    ports:
-      - "6379:6379"
-    networks:
-      - drs-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Backend API
+  # ── Backend API ────────────────────────────────────────────────────────────
   backend:
     build:
       context: .
@@ -44,13 +43,19 @@ services:
       target: backend-builder
     container_name: drs-backend
     environment:
+      # Aligned with config.py env var names
       - DATABASE_URL=postgresql://drs_user:drs_password@db:5432/drs_db
-      - REDIS_URL=redis://redis:6379
-      - SECRET_KEY=your-super-secret-key-change-in-production
-      - ALGORITHM=HS256
-      - ACCESS_TOKEN_EXPIRE_MINUTES=30
       - UPLOAD_DIR=/app/uploads
+      - MAX_UPLOAD_SIZE_MB=500
+      # JWT — config.py reads JWT_SECRET_KEY, JWT_ALGORITHM, JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+      - JWT_SECRET_KEY=change-this-before-any-non-local-use
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+      # CORS — comma-separated origins
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:80
       - LOG_LEVEL=INFO
+      - MAX_PROCESSING_FRAMES=300
+      # REDIS_URL is NOT read by config.py — omitted intentionally
     volumes:
       - ./backend:/app/backend
       - uploads:/app/uploads
@@ -62,8 +67,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+      # redis removed — not used by application code
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
@@ -72,10 +76,10 @@ services:
     command: >
       sh -c "
         cd /app/backend &&
-        PYTHONPATH=/app/backend/src uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+        PYTHONPATH=/app/backend/src uvicorn main:app --host 0.0.0.0 --port 8000
       "
 
-  # Frontend
+  # ── Frontend ───────────────────────────────────────────────────────────────
   frontend:
     build:
       context: .
@@ -84,25 +88,19 @@ services:
     container_name: drs-frontend
     environment:
       - REACT_APP_API_URL=http://localhost:8000
-      - REACT_APP_WS_URL=ws://localhost:8000
     ports:
       - "3000:3000"
     networks:
       - drs-network
     depends_on:
       - backend
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     command: >
       sh -c "
         cd /app/frontend &&
         npm start
       "
 
-  # Nginx Reverse Proxy (Production)
+  # ── Nginx (production profile only) ───────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: drs-nginx
@@ -121,34 +119,21 @@ services:
     profiles:
       - production
 
-  # MinIO for file storage (alternative to local storage)
-  minio:
-    image: minio/minio:latest
-    container_name: drs-minio
-    environment:
-      MINIO_ACCESS_KEY: drs_access_key
-      MINIO_SECRET_KEY: drs_secret_key
-    volumes:
-      - minio_data:/data
+  # ── Redis (optional, not used by application code) ────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: drs-redis
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "6379:6379"
     networks:
       - drs-network
-    command: server /data --console-address ":9001"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     profiles:
-      - storage
+      - optional   # opt-in only; backend does not require it
 
 volumes:
   postgres_data:
   uploads:
   logs:
-  minio_data:
 
 networks:
   drs-network:

@@ -7,6 +7,8 @@ from config import BALL_TRACKING, PITCH_CONFIG, STUMP_CONFIG, MAX_PROCESSING_FRA
 
 logger = logging.getLogger(__name__)
 
+MAX_PREDICTION_GAP_S = 0.2  # Max gap (seconds) to fill with predicted positions
+
 class BallTrackingService:
     def __init__(self):
         # Ball detection parameters from config
@@ -67,7 +69,9 @@ class BallTrackingService:
             'timestamps': [],
             'frame_data': [],
             'last_ball_position': None,
-            'ball_velocity': None
+            'ball_velocity': None,
+            'consecutive_predictions': 0,
+            'last_real_detection_time': None
         }
 
         # First pass: Analyze pitch and find static elements
@@ -106,50 +110,74 @@ class BallTrackingService:
             if frame_data['ball_position'] is not None and frame_data['ball_position']['confidence'] > self.min_confidence:
                 ball_pos = frame_data['ball_position']
 
-                # Check temporal consistency - ball shouldn't jump too far
+                # Check temporal consistency in 2D pixel space where max_velocity (px/s) is defined
                 if tracking_data['last_ball_position'] is not None:
                     last_pos = tracking_data['last_ball_position']
-                    distance = np.sqrt((ball_pos['x'] - last_pos['x'])**2 + (ball_pos['y'] - last_pos['y'])**2)
+                    
+                    # Pixel coordinates
+                    curr_px = ball_pos.get('pixel_x', ball_pos['x'])
+                    curr_py = ball_pos.get('pixel_y', ball_pos['y'])
+                    last_px = last_pos.get('pixel_x', last_pos['x'])
+                    last_py = last_pos.get('pixel_y', last_pos['y'])
+                    
+                    pixel_distance = float(np.sqrt((curr_px - last_px)**2 + (curr_py - last_py)**2))
 
-                    # Calculate expected maximum distance based on time and typical ball speed
-                    time_diff = current_time - last_pos.get('t', current_time - 0.1)
-                    max_expected_distance = time_diff * self.max_velocity
+                    # Calculate expected maximum distance based on elapsed time and typical ball speed in px/s
+                    time_diff = max(1e-4, current_time - last_pos.get('t', current_time - 0.033))
+                    max_expected_distance = max(time_diff * self.max_velocity, float(self.prediction_tolerance))
 
-                    # Check velocity consistency
+                    # Check velocity consistency in pixel space
                     velocity_consistent = True
-                    if tracking_data['ball_velocity'] is not None and time_diff > 0:
-                        expected_x = last_pos['x'] + tracking_data['ball_velocity']['vx'] * time_diff
-                        expected_y = last_pos['y'] + tracking_data['ball_velocity']['vy'] * time_diff
-                        prediction_error = np.sqrt((ball_pos['x'] - expected_x)**2 + (ball_pos['y'] - expected_y)**2)
-                        velocity_consistent = prediction_error < self.prediction_tolerance
+                    if tracking_data.get('ball_pixel_velocity') is not None and time_diff > 0:
+                        expected_px = last_px + tracking_data['ball_pixel_velocity']['vx'] * time_diff
+                        expected_py = last_py + tracking_data['ball_pixel_velocity']['vy'] * time_diff
+                        prediction_error = float(np.sqrt((curr_px - expected_px)**2 + (curr_py - expected_py)**2))
+                        velocity_consistent = prediction_error < (self.prediction_tolerance * 2.0)
 
-                    # If ball moved too far or velocity is inconsistent, it might be a false positive
-                    if distance > max_expected_distance or not velocity_consistent:
-                        logger.debug(f"Ball position inconsistent at frame {frame_idx}, skipping")
+                    # If ball moved too far in pixel space or velocity is inconsistent, skip as false positive
+                    if pixel_distance > max_expected_distance or not velocity_consistent:
+                        logger.debug(f"Ball position inconsistent at frame {frame_idx} (dist={pixel_distance:.1f}px, max={max_expected_distance:.1f}px), skipping")
                     else:
-                        # Update velocity estimate
+                        # Update velocity estimates
                         if time_diff > 0:
                             vx = (ball_pos['x'] - last_pos['x']) / time_diff
                             vy = (ball_pos['y'] - last_pos['y']) / time_diff
                             vz = (ball_pos['z'] - last_pos['z']) / time_diff
                             tracking_data['ball_velocity'] = {'vx': vx, 'vy': vy, 'vz': vz}
 
+                            pvx = (curr_px - last_px) / time_diff
+                            pvy = (curr_py - last_py) / time_diff
+                            tracking_data['ball_pixel_velocity'] = {'vx': pvx, 'vy': pvy}
+
                         ball_pos['t'] = current_time
+                        ball_pos['is_predicted'] = False
+                        ball_pos['frame_idx'] = frame_idx
                         tracking_data['ball_trajectory'].append(ball_pos)
                         tracking_data['last_ball_position'] = ball_pos
+                        tracking_data['last_real_detection_time'] = current_time
+                        tracking_data['consecutive_predictions'] = 0
                 else:
-                    # First detection - initialize velocity as zero
-                    tracking_data['ball_velocity'] = {'vx': 0, 'vy': 0, 'vz': 0}
+                    # First detection - initialize velocities as zero
+                    tracking_data['ball_velocity'] = {'vx': 0.0, 'vy': 0.0, 'vz': 0.0}
+                    tracking_data['ball_pixel_velocity'] = {'vx': 0.0, 'vy': 0.0}
                     ball_pos['t'] = current_time
+                    ball_pos['is_predicted'] = False
+                    ball_pos['frame_idx'] = frame_idx
                     tracking_data['ball_trajectory'].append(ball_pos)
                     tracking_data['last_ball_position'] = ball_pos
+                    tracking_data['last_real_detection_time'] = current_time
+                    tracking_data['consecutive_predictions'] = 0
 
             elif frame_data['ball_position'] is None and len(tracking_data['ball_trajectory']) > 0:
-                # No detection but we have previous trajectory - try to predict
-                predicted_pos = self._predict_ball_position(tracking_data, current_time)
-                if predicted_pos:
-                    tracking_data['ball_trajectory'].append(predicted_pos)
-                    tracking_data['last_ball_position'] = predicted_pos
+                # No detection but we have previous trajectory - try to predict within gap limits
+                time_since_real = current_time - (tracking_data.get('last_real_detection_time') or current_time)
+                if time_since_real <= MAX_PREDICTION_GAP_S and tracking_data.get('consecutive_predictions', 0) < 5:
+                    predicted_pos = self._predict_ball_position(tracking_data, current_time)
+                    if predicted_pos:
+                        predicted_pos['frame_idx'] = frame_idx
+                        tracking_data['ball_trajectory'].append(predicted_pos)
+                        tracking_data['last_ball_position'] = predicted_pos
+                        tracking_data['consecutive_predictions'] = tracking_data.get('consecutive_predictions', 0) + 1
 
             # Update positions
             if frame_data['bowler_position']:
@@ -212,7 +240,18 @@ class BallTrackingService:
             "debug_info": {
                 "frames_processed": len(tracking_data['frame_data']),
                 "ball_detections": len(tracking_data['ball_trajectory']),
-                "pitch_detected": pitch_info is not None
+                "pitch_detected": pitch_info is not None and pitch_info.get('boundaries', {}).get('method') not in ('default', 'error_fallback'),
+                "stumps_detected": (
+                    tracking_data.get('stumps_position') is not None and
+                    tracking_data['stumps_position'].get('method') not in ('default', 'default_fallback', 'error_fallback') and
+                    tracking_data['stumps_position'].get('confidence', 0) > 0.5
+                ),
+                "geometry_source": {
+                    "pitch": pitch_info.get('boundaries', {}).get('method', 'detected') if pitch_info else 'none',
+                    "stumps": tracking_data.get('stumps_position', {}).get('method', 'detected') if tracking_data.get('stumps_position') else 'none',
+                },
+                "predicted_points": sum(1 for p in tracking_data['ball_trajectory'] if p.get('is_predicted', False)),
+                "measured_points": sum(1 for p in tracking_data['ball_trajectory'] if not p.get('is_predicted', False)),
             }
         }
 
@@ -328,7 +367,8 @@ class BallTrackingService:
                 'area': float(width * height * 0.5),
                 'center_x': float(width / 2),
                 'center_y': float(height / 2),
-                'method': 'default'
+                'method': 'default',
+                'geometry_source': 'assumed'
             }
 
         except Exception as e:
@@ -340,7 +380,8 @@ class BallTrackingService:
                 'area': float(width * height * 0.5),
                 'center_x': float(width / 2),
                 'center_y': float(height / 2),
-                'method': 'error_fallback'
+                'method': 'error_fallback',
+                'geometry_source': 'assumed'
             }
 
     def _detect_stumps(self, frame):
@@ -380,7 +421,8 @@ class BallTrackingService:
                     'position_3d': stumps_3d,
                     'confidence': 0.3,
                     'stump_count': 3,
-                    'method': 'default'
+                    'method': 'default',
+                    'geometry_source': 'assumed'
                 }
 
             # Group nearby detections (they might be detecting the same stumps)
@@ -490,7 +532,8 @@ class BallTrackingService:
                 'position_3d': stumps_3d,
                 'confidence': 0.25,
                 'stump_count': 3,
-                'method': 'default_fallback'
+                'method': 'default_fallback',
+                'geometry_source': 'assumed'
             }
 
         except Exception as e:
@@ -786,7 +829,12 @@ class BallTrackingService:
                 'x': ball_3d[0],
                 'y': ball_3d[1],
                 'z': ball_3d[2],
-                'confidence': ball_pos['confidence']
+                'confidence': float(ball_pos['confidence']),
+                'pixel_x': float(ball_pos['x']),
+                'pixel_y': float(ball_pos['y']),
+                'pixel_radius': float(ball_pos.get('radius', 0.0)),
+                'detector_score': float(ball_pos.get('confidence', 0.0)),
+                'frame_idx': frame_idx,
             }
 
         # Detect bowler (usually moving towards the batsman)
@@ -1282,11 +1330,13 @@ class BallTrackingService:
             }
 
     def _pixel_to_3d(self, x_pixel, y_pixel, frame_width, frame_height):
-        """Convert 2D pixel coordinates to 3D world coordinates in meters"""
+        """Convert 2D pixel coordinates to 3D world coordinates in meters.
+        NOTE: This is a heuristic linear lift from image space. It does NOT use
+        calibrated camera projection. Results are illustrative estimates only."""
         try:
-            # Cricket pitch dimensions
-            PITCH_LENGTH = 20.12  # 22 yards in meters
-            PITCH_WIDTH = 3.05    # 10 feet in meters
+            # Use canonical dimensions from config (not hardcoded)
+            PITCH_LENGTH = PITCH_CONFIG["length_m"]   # 20.12 m
+            PITCH_WIDTH = PITCH_CONFIG["width_m"]     # 3.05 m
             
             # Normalize pixel coordinates to [0, 1]
             x_norm = x_pixel / frame_width
@@ -1358,60 +1408,87 @@ class BallTrackingService:
         return tracking_data
 
     def _apply_kalman_filter(self, trajectory):
-        """Apply Kalman filter to smooth trajectory with improved robustness"""
+        """Apply Kalman filter to smooth trajectory.
+
+        Uses a constant-velocity transition matrix F(dt) where position is
+        coupled to velocity via the actual inter-frame dt — so varying frame
+        rates and dropped frames are handled correctly.
+        State vector: [x, y, z, vx, vy, vz]
+        """
         if len(trajectory) < 2:
             return trajectory
 
         try:
-            # Initialize Kalman filter with better parameters
-            kalman = cv2.KalmanFilter(6, 3)  # 6 state (x,y,z,vx,vy,vz), 3 measurements (x,y,z)
+            kalman = cv2.KalmanFilter(6, 3)  # 6-state, 3 measurements (x,y,z)
 
-            # State: [x, y, z, vx, vy, vz]
-            kalman.transitionMatrix = np.eye(6, dtype=np.float32)
-            kalman.measurementMatrix = np.array([[1,0,0,0,0,0], [0,1,0,0,0,0], [0,0,1,0,0,0]], np.float32)
+            # H: observe position only
+            kalman.measurementMatrix = np.array(
+                [[1,0,0,0,0,0],
+                 [0,1,0,0,0,0],
+                 [0,0,1,0,0,0]], np.float32
+            )
 
-            # Process noise - adjust based on expected ball movement
-            kalman.processNoiseCov = np.eye(6, dtype=np.float32) * 0.03  # Reduced from 0.01
+            # Q: process noise — larger for velocity states (ball can accelerate/swing)
+            kalman.processNoiseCov = np.diag([
+                0.01, 0.01, 0.01,   # position states
+                0.1,  0.1,  0.1     # velocity states
+            ]).astype(np.float32)
 
-            # Measurement noise - higher for less accurate detections
-            kalman.measurementNoiseCov = np.eye(3, dtype=np.float32) * 0.2  # Increased from 0.1
+            # R: measurement noise (heuristic detections are noisy)
+            kalman.measurementNoiseCov = np.eye(3, dtype=np.float32) * 0.25
 
-            # Initialize state with first measurement
-            first_point = trajectory[0]
-            kalman.statePost = np.array([
-                [first_point['x']], [first_point['y']], [first_point['z']],
-                [0], [0], [0]  # Initial velocities
-            ], dtype=np.float32)
+            # Initialise with first point, zero velocity
+            p0 = trajectory[0]
+            kalman.statePost = np.array(
+                [[p0['x']], [p0['y']], [p0['z']], [0.0], [0.0], [0.0]],
+                dtype=np.float32
+            )
+            kalman.errorCovPost = np.eye(6, dtype=np.float32)
 
-            smoothed_points = [first_point]  # Keep original first point
+            smoothed_points = [{**p0}]  # shallow copy preserves all metadata
 
             for i in range(1, len(trajectory)):
-                point = trajectory[i]
+                pt = trajectory[i]
+                prev_t = trajectory[i-1]['t']
+                dt = max(1e-4, pt['t'] - prev_t)  # guard against zero dt
 
-                # Create measurement
-                measurement = np.array([[point['x']], [point['y']], [point['z']]], np.float32)
+                # Build F(dt): constant-velocity model
+                # [ I3  dt*I3 ]
+                # [ 0   I3   ]
+                F = np.eye(6, dtype=np.float32)
+                F[0, 3] = dt
+                F[1, 4] = dt
+                F[2, 5] = dt
+                kalman.transitionMatrix = F
 
-                # Predict
-                prediction = kalman.predict()
+                kalman.predict()
 
-                # Update with measurement
-                corrected = kalman.correct(measurement)
-
-                # Create smoothed point
-                smoothed_point = {
-                    'x': float(corrected[0][0]),
-                    'y': float(corrected[1][0]),
-                    'z': float(corrected[2][0]),
-                    't': point['t'],
-                    'confidence': point['confidence']
-                }
-                smoothed_points.append(smoothed_point)
+                meas = np.array([[pt['x']], [pt['y']], [pt['z']]], np.float32)
+                # Skip Kalman correction for predicted (gap-filled) points —
+                # treat them as missing measurements.
+                if pt.get('is_predicted', False):
+                    state = kalman.statePost
+                    smoothed = {
+                        **pt,
+                        'x': float(state[0][0]),
+                        'y': float(state[1][0]),
+                        'z': max(0.0, float(state[2][0])),
+                    }
+                else:
+                    corrected = kalman.correct(meas)
+                    smoothed = {
+                        **pt,
+                        'x': float(corrected[0][0]),
+                        'y': float(corrected[1][0]),
+                        'z': max(0.0, float(corrected[2][0])),
+                    }
+                smoothed_points.append(smoothed)
 
             return smoothed_points
 
         except Exception as e:
             logger.error(f"Error in Kalman filtering: {e}")
-            return trajectory  # Return original trajectory if filtering fails
+            return trajectory
 
     def _remove_outliers(self, trajectory):
         """Remove outlier points using multiple statistical methods"""
@@ -1535,16 +1612,37 @@ class BallTrackingService:
         predicted_y = last_point['y'] + vy * time_diff
         predicted_z = last_point['z'] + vz * time_diff
 
+        # Predict pixel position if available
+        pred_px = None
+        pred_py = None
+        last_px = last_point.get('pixel_x')
+        second_px = second_last.get('pixel_x')
+        last_py = last_point.get('pixel_y')
+        second_py = second_last.get('pixel_y')
+        if last_px is not None and second_px is not None and dt > 0:
+            pvx = (last_px - second_px) / dt
+            pvy = (last_py - second_py) / dt
+            pred_px = float(last_px + pvx * time_diff)
+            pred_py = float(last_py + pvy * time_diff)
+
         # Reduce confidence for predictions
         predicted_confidence = last_point['confidence'] * 0.7
 
-        return {
+        result = {
             'x': predicted_x,
             'y': predicted_y,
             'z': predicted_z,
             't': current_time,
-            'confidence': predicted_confidence
+            'confidence': predicted_confidence,
+            'is_predicted': True,
+            'detector_score': 0.0,
         }
+        if pred_px is not None and pred_py is not None:
+            result['pixel_x'] = pred_px
+            result['pixel_y'] = pred_py
+            result['pixel_radius'] = float(last_point.get('pixel_radius', 0.0))
+
+        return result
 
     def _analyze_lbw_decisions(self, tracking_data):
         """Analyze LBW decisions with complete Hawk-Eye DRS physics extrapolation"""
@@ -1557,8 +1655,8 @@ class BallTrackingService:
             "impact_point": None,
             "stump_plane_target": None,
             "drs_evaluation": None,
-            "release_speed_kmh": 130.0,
-            "bounce_speed_kmh": 105.0,
+            "release_speed_kmh": None,
+            "bounce_speed_kmh": None,
             "length_zone": "Good Length"
         }
 
@@ -1603,8 +1701,8 @@ class BallTrackingService:
             else:
                 vx, vy, vz = 0.0, 30.0, 1.5
 
-            # Hawk-Eye Physics Extrapolation to Stumps plane (Y = 10.06m)
-            STUMP_Y = 10.06
+            # Hawk-Eye Physics Extrapolation to Stumps plane (Y = pitch_length / 2)
+            STUMP_Y = self.pitch_length / 2.0
             extrapolated = []
             curr_x, curr_y, curr_z = impact_point['x'], impact_point['y'], max(0.05, impact_point['z'])
             curr_t = impact_point['t']
@@ -1636,10 +1734,10 @@ class BallTrackingService:
                     stump_target_z = ep['z']
                     break
 
-            # Evaluate DRS ICC criteria
-            STUMP_WIDTH = 0.2286
-            stump_half_w = STUMP_WIDTH / 2
-            stump_top = 0.74
+            # Evaluate DRS ICC criteria using canonical constants from config
+            STUMP_WIDTH = PITCH_CONFIG.get("stump_width_m", 0.2286)
+            stump_half_w = STUMP_WIDTH / 2.0
+            stump_top = PITCH_CONFIG.get("stump_height_m", 0.711)
 
             # Pitching
             if abs(bounce_point['x']) <= stump_half_w:
@@ -1710,8 +1808,9 @@ class BallTrackingService:
                 )
                 total_t = max(0.01, trajectory[-1]['t'] - trajectory[0]['t'])
                 speed_kmh = round(float((total_dist / total_t) * 3.6), 1)
-                drs_data["release_speed_kmh"] = max(80.0, min(160.0, speed_kmh))
-                drs_data["bounce_speed_kmh"] = round(float(drs_data["release_speed_kmh"] * 0.78), 1)
+                # NOTE: speed from real video is an uncalibrated estimate - not a measured value
+                drs_data["release_speed_kmh"] = round(float(speed_kmh), 1)
+                drs_data["bounce_speed_kmh"] = None  # Cannot estimate from uncalibrated footage
 
             # Length zone
             dist_from_stumps = STUMP_Y - bounce_point['y']

@@ -16,6 +16,29 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _build_additional_data(trajectory_data: dict) -> dict:
+    """Extract all DRS/analytics fields from tracking result for consistent storage."""
+    return {
+        "stumps_position": trajectory_data.get("stumps_position"),
+        "bowler_position": trajectory_data.get("bowler_position"),
+        "batter_position": trajectory_data.get("batter_position"),
+        "lbw_analysis": trajectory_data.get("lbw_analysis", []),
+        "debug_info": trajectory_data.get("debug_info", {}),
+        "pitch_info": trajectory_data.get("pitch_info"),
+        "pre_bounce_points": trajectory_data.get("pre_bounce_points"),
+        "post_bounce_points": trajectory_data.get("post_bounce_points"),
+        "extrapolated_points": trajectory_data.get("extrapolated_points"),
+        "bounce_point": trajectory_data.get("bounce_point"),
+        "impact_point": trajectory_data.get("impact_point"),
+        "stump_plane_target": trajectory_data.get("stump_plane_target"),
+        "drs_evaluation": trajectory_data.get("drs_evaluation"),
+        "release_speed_kmh": trajectory_data.get("release_speed_kmh"),
+        "bounce_speed_kmh": trajectory_data.get("bounce_speed_kmh"),
+        "length_zone": trajectory_data.get("length_zone"),
+    }
+
+
 @router.get("/presets")
 async def get_preset_deliveries():
     """Return all available physical preset deliveries for interactive demo"""
@@ -49,9 +72,9 @@ async def list_videos(
             "videos": [
                 {
                     "id": video.id,
-                    "filename": video.file_path.split('/')[-1] if video.file_path else video.filename,  # Extract filename from path (UUID-prefixed)
+                    "filename": Path(video.file_path).name if video.file_path else video.filename,  # Use pathlib for cross-platform path handling
                     "original_filename": video.filename,
-                    "file_path": video.file_path,
+                    # file_path not returned to clients for security
                     "status": video.status,
                     "created_at": video.upload_date.isoformat() if video.upload_date else None,
                     "processed_at": video.processing_completed_at.isoformat() if video.processing_completed_at else None,
@@ -74,34 +97,52 @@ async def upload_video(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_optional)
 ):
-    """Upload a video file for ball tracking analysis"""
-    # Validate file type
-    file_ext = file.filename.lower()[file.filename.rfind('.'):] if '.' in file.filename else ''
+    """Upload a video file for ball tracking analysis.
+    Streams the file in chunks so oversized uploads are rejected before reading
+    the full content into memory.
+    """
+    # Validate file extension before reading any bytes
+    safe_name = Path(file.filename or "upload").name  # strip any path component
+    file_ext = Path(safe_name).suffix.lower()
     if file_ext not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"
+            detail=f"Invalid file type '{file_ext}'. Allowed: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"
         )
 
-    # Read and validate file size
-    content = await file.read()
-    file_size = len(content)
-
-    if file_size > MAX_UPLOAD_SIZE_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f}MB"
-        )
-
-    # Save file with unique ID
+    # Stream upload enforcing byte limit so large files are rejected without
+    # buffering the whole payload in RAM.
     file_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{file_id}_{file.filename}"
+    # Use only the sanitized basename in the stored filename to prevent path traversal
+    file_path = UPLOAD_DIR / f"{file_id}_{safe_name}"
+    CHUNK = 1024 * 1024  # 1 MB chunks
 
     try:
-        with open(file_path, "wb") as f:
-            f.write(content)
-        logger.info(f"Video uploaded: {file_path}")
+        file_size = 0
+        with open(file_path, "wb") as out:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                file_size += len(chunk)
+                if file_size > MAX_UPLOAD_SIZE_BYTES:
+                    # Clean up partial file before rejecting
+                    out.close()
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE_BYTES // (1024*1024)} MB"
+                    )
+                out.write(chunk)
+        logger.info(f"Video uploaded: {file_path} ({file_size:,} bytes)")
+    except HTTPException:
+        raise
     except Exception as e:
+        # Clean up any partial file
+        try:
+            file_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         logger.error(f"Failed to save video file: {e}")
         raise HTTPException(status_code=500, detail="Failed to save video file")
 
@@ -116,33 +157,27 @@ async def upload_video(
         file_size=file_size
     )
 
-    # Immediately start ball tracking after upload
+    # Immediately start ball tracking after upload.
+    # Run in a thread pool so the async event loop is not blocked by CPU-heavy OpenCV work.
     logger.info(f"Starting automatic ball tracking for video: {video.id}")
     video_service.update_video_status(video.id, "processing")
-    
+
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    _executor = ThreadPoolExecutor(max_workers=1)
+
+    async def _run_tracking():
+        loop = asyncio.get_event_loop()
+        def _track():
+            tracking_service = BallTrackingService()
+            return tracking_service.track_ball(str(file_path))
+        return await loop.run_in_executor(_executor, _track)
+
     try:
-        tracking_service = BallTrackingService()
-        trajectory_data = tracking_service.track_ball(str(file_path))
-        
+        trajectory_data = await _run_tracking()
+
         # Save trajectory
-        additional_data = {
-            "stumps_position": trajectory_data.get("stumps_position"),
-            "bowler_position": trajectory_data.get("bowler_position"),
-            "batter_position": trajectory_data.get("batter_position"),
-            "lbw_analysis": trajectory_data.get("lbw_analysis", []),
-            "debug_info": trajectory_data.get("debug_info", {}),
-            "pitch_info": trajectory_data.get("pitch_info"),
-            "pre_bounce_points": trajectory_data.get("pre_bounce_points"),
-            "post_bounce_points": trajectory_data.get("post_bounce_points"),
-            "extrapolated_points": trajectory_data.get("extrapolated_points"),
-            "bounce_point": trajectory_data.get("bounce_point"),
-            "impact_point": trajectory_data.get("impact_point"),
-            "stump_plane_target": trajectory_data.get("stump_plane_target"),
-            "drs_evaluation": trajectory_data.get("drs_evaluation"),
-            "release_speed_kmh": trajectory_data.get("release_speed_kmh"),
-            "bounce_speed_kmh": trajectory_data.get("bounce_speed_kmh"),
-            "length_zone": trajectory_data.get("length_zone")
-        }
+        additional_data = _build_additional_data(trajectory_data)
 
         trajectory = Trajectory(
             video_id=video.id,
@@ -154,24 +189,26 @@ async def upload_video(
         )
         db.add(trajectory)
         db.commit()
-        
+
         # Update video status to processed
         video_service.update_video_status(video.id, "processed")
         logger.info(f"Video processed successfully: {video.id}")
-        
+
     except Exception as e:
         logger.error(f"Error processing video {video.id}: {e}")
         video_service.update_video_status(video.id, "error")
 
     return {
         "id": video.id,
-        "filename": file_path.name,  # Return stored filename with UUID for playback
+        "filename": file_path.name,   # Stored UUID filename for playback URL
         "original_filename": video.filename,
-        "file_path": video.file_path,
+        # file_path not returned to clients for security
         "status": video.status,
         "upload_date": video.upload_date.isoformat() if video.upload_date else None,
         "file_size": video.file_size
     }
+
+
 
 @router.post("/{video_id}/reprocess")
 async def reprocess_video(
@@ -189,26 +226,19 @@ async def reprocess_video(
         
         logger.info(f"Reprocessing video: {video_id}")
         
-        # Delete existing trajectory
-        db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
-        db.commit()
+        # 2. Set status to 'processing' (old trajectory still intact)
+        video_service.update_video_status(video_id, "processing")
         
-        # Reset video status
-        video_service.update_video_status(video_id, "uploaded")
-        
-        # Start tracking again
+        # 3. Run tracking FIRST - before touching existing trajectory
         tracking_service = BallTrackingService()
         trajectory_data = tracking_service.track_ball(video.file_path)
         
-        # Save new trajectory
-        additional_data = {
-            "stumps_position": trajectory_data.get("stumps_position"),
-            "bowler_position": trajectory_data.get("bowler_position"),
-            "batter_position": trajectory_data.get("batter_position"),
-            "lbw_analysis": trajectory_data.get("lbw_analysis", []),
-            "debug_info": trajectory_data.get("debug_info", {}),
-            "pitch_info": trajectory_data.get("pitch_info")
-        }
+        # 4. Tracking succeeded - now safe to replace old trajectory
+        db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
+        db.commit()
+
+        # Save new trajectory using consistent helper
+        additional_data = _build_additional_data(trajectory_data)
 
         trajectory = Trajectory(
             video_id=video_id,
@@ -221,7 +251,7 @@ async def reprocess_video(
         db.add(trajectory)
         db.commit()
         
-        # Update video status
+        # Update video status to processed
         video_service.update_video_status(video_id, "processed")
         
         logger.info(f"Video reprocessed successfully: {video_id}")
@@ -230,12 +260,15 @@ async def reprocess_video(
             "message": "Video reprocessed successfully",
             "video_id": video_id,
             "ball_detected": trajectory_data.get('ball_detected', False),
-            "points_detected": len(trajectory_data.get('ball_trajectory', []))
+            "points_detected": len(trajectory_data.get('points', []))
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error reprocessing video {video_id}: {e}")
-        video_service.update_video_status(video_id, "error")
+        # 5. Tracking failed - restore 'processed' status so old trajectory is still accessible
+        video_service.update_video_status(video_id, "processed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/{video_id}/track")
@@ -273,14 +306,7 @@ async def track_video(
         trajectory_data = tracking_service.track_ball(video.file_path)
 
         # Save trajectory
-        additional_data = {
-            "stumps_position": trajectory_data.get("stumps_position"),
-            "bowler_position": trajectory_data.get("bowler_position"),
-            "batter_position": trajectory_data.get("batter_position"),
-            "lbw_analysis": trajectory_data.get("lbw_analysis", []),
-            "debug_info": trajectory_data.get("debug_info", {}),
-            "pitch_info": trajectory_data.get("pitch_info")
-        }
+        additional_data = _build_additional_data(trajectory_data)
 
         trajectory = Trajectory(
             video_id=video_id,

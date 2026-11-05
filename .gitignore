@@ -181,7 +181,8 @@ dist
 
 # Gatsby files
 .cache/
-public
+# Note: frontend/public/ contains the React HTML entry point and must be tracked.
+# Only the Gatsby/Next.js .cache/public directories should be ignored (covered by .cache/ above).
 
 # Storybook build outputs
 .out

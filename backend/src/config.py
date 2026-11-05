@@ -55,11 +55,14 @@ BALL_TRACKING = {
 
 # Pitch Configuration (meters)
 PITCH_CONFIG = {
-    "length_m": 22.0,  # 22 yards
-    "width_m": 3.05,   # 10 feet
+    "length_m": 20.12,  # 22 yards (corrected from 22.0 which was in yards, not metres)
+    "width_m": 3.05,    # 10 feet
     "camera_height_m": 1.5,
     "camera_angle_deg": 15,
     "focal_length_px": 1000,
+    "stump_height_m": 0.711,   # ICC regulation stump height
+    "stump_width_m": 0.2286,   # ICC regulation stump span (3 stumps + bails)
+    "ball_radius_m": 0.036,    # ICC regulation ball radius
 }
 
 # Stump Detection Configuration
