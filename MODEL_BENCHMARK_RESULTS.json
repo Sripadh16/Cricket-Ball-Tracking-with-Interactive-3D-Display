@@ -1,0 +1,89 @@
+{
+  "timestamp": "2026-11-05T12:07:38Z",
+  "device": "cpu",
+  "hardware": "CPU",
+  "dataset": "C:\\Users\\Sreekar_Tirumala\\Documents\\College\\ICG\\ICG-PROJECT\\Cricket Dataset.v5i.yolov8\\data.yaml",
+  "split": "test",
+  "models": {
+    "yolov8n.pt": {
+      "model_name": "yolov8n.pt",
+      "model_path": "C:\\Users\\Sreekar_Tirumala\\Documents\\College\\ICG\\ICG-PROJECT\\yolov8n.pt",
+      "classes_in_model": 80,
+      "split": "test",
+      "total_images": 551,
+      "val_duration_seconds": 51.84,
+      "overall_metrics": {
+        "precision": 0.0122,
+        "recall": 0.1043,
+        "f1_score": 0.0219,
+        "mAP50": 0.0011,
+        "mAP50_95": 0.0005
+      },
+      "latency_ms": {
+        "preprocess_ms": 1.78,
+        "inference_ms": 77.04,
+        "postprocess_ms": 2.0,
+        "total_latency_ms": 80.82,
+        "throughput_fps": 12.4
+      },
+      "class_metrics": {
+        "ball": {
+          "class_id": 0,
+          "precision": 0.004,
+          "recall": 0.1818,
+          "f1_score": 0.0078,
+          "mAP50": 0.0008,
+          "mAP50_95": 0.0003
+        },
+        "stump": {
+          "class_id": 1,
+          "precision": 0.0205,
+          "recall": 0.0268,
+          "f1_score": 0.0232,
+          "mAP50": 0.0015,
+          "mAP50_95": 0.0007
+        }
+      }
+    },
+    "best.pt": {
+      "model_name": "best.pt",
+      "model_path": "C:\\Users\\Sreekar_Tirumala\\Documents\\College\\ICG\\ICG-PROJECT\\Cricket-Ball-Tracking-with-Interactive-3D-Display\\backend\\src\\models\\best.pt",
+      "classes_in_model": 2,
+      "split": "test",
+      "total_images": 551,
+      "val_duration_seconds": 55.59,
+      "overall_metrics": {
+        "precision": 0.502,
+        "recall": 0.2125,
+        "f1_score": 0.2986,
+        "mAP50": 0.2098,
+        "mAP50_95": 0.0997
+      },
+      "latency_ms": {
+        "preprocess_ms": 2.02,
+        "inference_ms": 84.39,
+        "postprocess_ms": 2.57,
+        "total_latency_ms": 88.99,
+        "throughput_fps": 11.2
+      },
+      "class_metrics": {
+        "ball": {
+          "class_id": 0,
+          "precision": 0.5443,
+          "recall": 0.2464,
+          "f1_score": 0.3392,
+          "mAP50": 0.2712,
+          "mAP50_95": 0.1216
+        },
+        "stump": {
+          "class_id": 1,
+          "precision": 0.4596,
+          "recall": 0.1786,
+          "f1_score": 0.2572,
+          "mAP50": 0.1483,
+          "mAP50_95": 0.0778
+        }
+      }
+    }
+  }
+}

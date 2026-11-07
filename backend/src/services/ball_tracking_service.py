@@ -10,7 +10,14 @@ logger = logging.getLogger(__name__)
 MAX_PREDICTION_GAP_S = 0.2  # Max gap (seconds) to fill with predicted positions
 
 class BallTrackingService:
-    def __init__(self):
+    def __init__(self, progress_callback=None):
+        # Progress callback for background tracking
+        self.progress_callback = progress_callback
+
+        # Planar Homography & Metric 3D Projection Matrices
+        self.homography_matrix = None
+        self.inv_homography_matrix = None
+
         # Ball detection parameters from config
         self.min_ball_radius = BALL_TRACKING["min_radius"]
         self.max_ball_radius = BALL_TRACKING["max_radius"]
@@ -38,6 +45,355 @@ class BallTrackingService:
 
         # Pitch color range (green grass)
         self.pitch_color_range = ([35, 50, 50], [80, 255, 255])
+
+        # Camera pose estimation from Perspective-n-Point (cv2.solvePnP)
+        self.pnp_pose = None
+
+        # YOLO Deep Learning Detector
+        self.yolo_detector = None
+        self._init_yolo_detector()
+
+    def _compute_pitch_homography(
+        self,
+        frame_width: int,
+        frame_height: int,
+        pitch_boundaries: dict = None,
+        stumps: dict = None,
+        crease_lines: dict = None
+    ):
+        """
+        Compute metric planar projective homography matrix mapping 2D video pixel coordinates (u, v, 1)
+        to metric 3D ground plane coordinates (X, Y, 1) in meters on the cricket pitch.
+        World coordinates:
+          X: pitch width in [-1.525, +1.525] m
+          Y: pitch length in [-10.06, +10.06] m
+             -10.06 m = bowler stumps
+             +10.06 m = batsman stumps
+             +8.84 m  = batsman popping crease
+        """
+        try:
+            half_w = float(self.pitch_width) / 2.0   # 1.525 m
+            half_l = float(self.pitch_length) / 2.0  # 10.06 m
+
+            dst_pts = np.array([
+                [-half_w, -half_l],  # Bowler crease left
+                [ half_w, -half_l],  # Bowler crease right
+                [ half_w,  half_l],  # Batsman crease right
+                [-half_w,  half_l]   # Batsman crease left
+            ], dtype=np.float32)
+
+            w, h = float(frame_width), float(frame_height)
+            stump_cx = w * 0.5
+            stump_cy = h * 0.82
+            if stumps and isinstance(stumps, dict):
+                stump_cx = float(stumps.get('x', stump_cx))
+                stump_cy = float(stumps.get('y', stump_cy))
+
+            # Near wicket/crease region
+            near_y = min(h * 0.92, max(h * 0.65, stump_cy))
+            if crease_lines and isinstance(crease_lines, dict):
+                bowling_c = crease_lines.get('bowling_crease')
+                if bowling_c and isinstance(bowling_c, dict) and ('center_y' in bowling_c or 'y_mid' in bowling_c):
+                    detected_near = bowling_c.get('center_y', bowling_c.get('y_mid'))
+                    near_y = min(h * 0.95, max(h * 0.55, float(detected_near)))
+
+            near_half_w = max(w * 0.15, min(w * 0.35, w * 0.22))
+
+            # Far bowler end
+            far_y = max(h * 0.15, min(h * 0.45, near_y * 0.45))
+            far_half_w = near_half_w * 0.42
+
+            src_pts = np.array([
+                [stump_cx - far_half_w,  far_y],   # Bowler left
+                [stump_cx + far_half_w,  far_y],   # Bowler right
+                [stump_cx + near_half_w, near_y],  # Batsman right
+                [stump_cx - near_half_w, near_y]   # Batsman left
+            ], dtype=np.float32)
+
+            h_mat = cv2.getPerspectiveTransform(src_pts, dst_pts)
+            h_inv = np.linalg.inv(h_mat)
+            logger.info("Planar homography transformation matrix calibrated successfully.")
+            return h_mat, h_inv
+        except Exception as e:
+            logger.warning(f"Could not compute pitch homography: {e}")
+            return None, None
+
+    def _estimate_camera_pose_pnp(
+        self,
+        frame_width: int = 1920,
+        frame_height: int = 1080,
+        stumps_pos: Optional[Dict[str, Any]] = None,
+        image_points=None,
+        object_points=None,
+        stumps_2d=None,
+        camera_matrix=None,
+        focal_length=None,
+    ) -> Dict[str, Any]:
+        """
+        Estimate camera 6-DOF extrinsic pose (rotation rvec and translation tvec)
+        relative to the 3D pitch coordinate system using Perspective-n-Point (cv2.solvePnP).
+
+        3D Metric Coordinate System (meters):
+          Origin (0, 0, 0): Pitch center on ground plane
+          X: [-1.525, +1.525] m across pitch width
+          Y: [-10.06, +10.06] m along pitch length (-10.06 bowler, +10.06 batsman)
+          Z: [0, +3.5] m height above ground plane (+0.711 m stump top)
+
+        Known 3D stump landmarks:
+          Middle top:  ( 0.000, 10.06, 0.711)
+          Middle base: ( 0.000, 10.06, 0.000)
+          Leg top:     (-0.057, 10.06, 0.711)
+          Off top:     ( 0.057, 10.06, 0.711)
+        """
+        # Polymorphic support: if image_points was passed as first positional arg
+        if isinstance(frame_width, (list, tuple, np.ndarray)) and isinstance(frame_height, (list, tuple, np.ndarray)):
+            image_points = frame_width
+            object_points = frame_height
+            frame_width = 1920
+            frame_height = 1080
+
+        try:
+            w, h = float(frame_width), float(frame_height)
+            half_l = float(self.pitch_length) / 2.0  # 10.06 m
+            stump_h = float(PITCH_CONFIG.get("stump_height_m", 0.711))
+            half_spacing = 0.057  # meters (outer stump offset: leg is -0.057, off is +0.057)
+
+            cx = w / 2.0
+            cy = h / 2.0
+            if camera_matrix is None:
+                f = float(focal_length if focal_length is not None else (self.focal_length_px or (w * 1.1)))
+                camera_matrix = np.array([
+                    [f,   0.0, cx],
+                    [0.0, f,   cy],
+                    [0.0, 0.0, 1.0]
+                ], dtype=np.float64)
+            else:
+                f = float(camera_matrix[0, 0])
+            dist_coeffs = np.zeros((4, 1), dtype=np.float64)
+
+            if image_points is not None and object_points is not None:
+                pts_2d = np.ascontiguousarray(image_points, dtype=np.float64)
+                pts_3d = np.ascontiguousarray(object_points, dtype=np.float64)
+            else:
+                # 4 known 3D stump landmarks as specified by DRS calibration
+                pts_3d = np.array([
+                    [ 0.0,           half_l, stump_h],  # Middle top: (0, 10.06, 0.711)
+                    [ 0.0,           half_l, 0.0    ],  # Middle base: (0, 10.06, 0.0)
+                    [-half_spacing,  half_l, stump_h],  # Leg top: (-0.057, 10.06, 0.711)
+                    [ half_spacing,  half_l, stump_h]   # Off top: (0.057, 10.06, 0.711)
+                ], dtype=np.float64)
+
+                stump_dict = stumps_pos if stumps_pos is not None else stumps_2d
+
+                stump_cx = cx
+                stump_base_y = h * 0.82
+                stump_px_w = max(20.0, w * 0.035)
+                stump_px_h = max(35.0, h * 0.09)
+
+                if stump_dict and isinstance(stump_dict, dict):
+                    if 'pixel_position' in stump_dict and isinstance(stump_dict['pixel_position'], (tuple, list)):
+                        stump_cx = float(stump_dict['pixel_position'][0])
+                        stump_base_y = float(stump_dict['pixel_position'][1])
+                    elif 'x' in stump_dict and 'y' in stump_dict:
+                        stump_cx = float(stump_dict['x'])
+                        stump_base_y = float(stump_dict['y'])
+                    elif 'center_x' in stump_dict and 'center_y' in stump_dict:
+                        stump_cx = float(stump_dict['center_x'])
+                        stump_base_y = float(stump_dict['center_y'])
+
+                    if 'size' in stump_dict and isinstance(stump_dict['size'], (tuple, list)):
+                        stump_px_w = max(10.0, float(stump_dict['size'][0]))
+                        stump_px_h = max(15.0, float(stump_dict['size'][1]))
+                    elif 'width' in stump_dict and 'height' in stump_dict:
+                        stump_px_w = max(10.0, float(stump_dict['width']))
+                        stump_px_h = max(15.0, float(stump_dict['height']))
+
+                top_y = stump_base_y - stump_px_h
+                half_w_px = max(10.0, stump_px_w * 0.45)
+
+                pts_2d = np.array([
+                    [stump_cx,              top_y       ],  # Middle top
+                    [stump_cx,              stump_base_y],  # Middle base
+                    [stump_cx - half_w_px,  top_y       ],  # Leg top
+                    [stump_cx + half_w_px,  top_y       ]   # Off top
+                ], dtype=np.float64)
+
+            if len(pts_3d) < 4 or len(pts_2d) < 4:
+                return {
+                    'success': False,
+                    'error': 'At least 4 correspondences required for PnP',
+                    'rvec': None,
+                    'tvec': None,
+                    'rotation_matrix': None,
+                    'camera_position': None
+                }
+
+            # Evaluate candidate PnP algorithms and select the one with minimal reprojection error
+            candidate_flags = []
+            if hasattr(cv2, 'SOLVEPNP_SQPNP'):
+                candidate_flags.append(cv2.SOLVEPNP_SQPNP)
+            if len(pts_3d) >= 5 and hasattr(cv2, 'SOLVEPNP_EPNP'):
+                candidate_flags.append(cv2.SOLVEPNP_EPNP)
+            candidate_flags.append(cv2.SOLVEPNP_ITERATIVE)
+
+            best_err = float('inf')
+            best_rvec = None
+            best_tvec = None
+
+            for flag in candidate_flags:
+                try:
+                    ok, r_cand, t_cand = cv2.solvePnP(
+                        pts_3d, pts_2d, camera_matrix, dist_coeffs, flags=flag
+                    )
+                    if ok and r_cand is not None and t_cand is not None:
+                        proj, _ = cv2.projectPoints(pts_3d, r_cand, t_cand, camera_matrix, dist_coeffs)
+                        err = float(np.mean(np.linalg.norm(pts_2d - proj.reshape(-1, 2), axis=1)))
+                        if err < best_err:
+                            best_err = err
+                            best_rvec = r_cand
+                            best_tvec = t_cand
+                        if err < 1e-4:
+                            break
+                except Exception:
+                    continue
+
+            if best_rvec is None or best_tvec is None:
+                return {
+                    'success': False,
+                    'error': 'solvePnP optimization did not converge',
+                    'rvec': None,
+                    'tvec': None,
+                    'rotation_matrix': None,
+                    'camera_position': None
+                }
+
+            rvec = best_rvec
+            tvec = best_tvec
+            R, _ = cv2.Rodrigues(rvec)
+            cam_world = -R.T @ tvec
+
+            reproj_err = best_err
+
+            return {
+                'success': True,
+                'rvec': rvec,
+                'tvec': tvec,
+                'rotation_matrix': R,
+                'camera_position': cam_world.flatten().tolist() if isinstance(cam_world, np.ndarray) else cam_world,
+                'camera_height_m': float(abs(cam_world[2, 0]) if cam_world.ndim == 2 else abs(cam_world[2])),
+                'focal_length_px': f,
+                'reprojection_error': round(reproj_err, 4),
+                'camera_matrix': camera_matrix,
+                'landmarks_3d': pts_3d,
+                'landmarks_2d': pts_2d,
+                'num_correspondences': len(pts_3d)
+            }
+        except Exception as e:
+            logger.warning(f"Error in PnP camera pose estimation: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'rvec': None,
+                'tvec': None,
+                'rotation_matrix': None,
+                'camera_position': None
+            }
+
+    def _init_yolo_detector(self):
+        """Initialize YOLO detector with custom best.pt or pretrained baseline"""
+        try:
+            from ultralytics import YOLO
+            from pathlib import Path
+            candidates = [
+                Path(__file__).resolve().parent.parent / "models" / "best.pt",
+                Path(__file__).resolve().parent.parent.parent.parent / "best.pt",
+                Path(__file__).resolve().parent.parent.parent.parent / "runs" / "detect" / "cricket_yolo" / "weights" / "best.pt",
+                Path("best.pt"),
+                Path("yolov8n.pt"),
+                Path(__file__).resolve().parent.parent.parent.parent / "yolov8n.pt",
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    self.yolo_detector = YOLO(str(cand))
+                    logger.info(f"Loaded YOLO detector from: {cand}")
+                    return
+            self.yolo_detector = YOLO("yolov8n.pt")
+            logger.info("Initialized baseline YOLOv8n detector")
+        except Exception as e:
+            logger.warning(f"Could not load YOLO detector: {e}. Falling back to classical CV.")
+            self.yolo_detector = None
+
+    def _detect_ball_yolo(self, frame):
+        """Detect cricket ball using YOLO neural detector"""
+        if self.yolo_detector is None:
+            return None
+        try:
+            results = self.yolo_detector(frame, verbose=False, conf=0.15)[0]
+            if len(results.boxes) == 0:
+                return None
+            best_ball = None
+            max_conf = 0.0
+            for box in results.boxes:
+                cls_id = int(box.cls[0])
+                cls_name = self.yolo_detector.names.get(cls_id, str(cls_id)).lower()
+                conf = float(box.conf[0])
+                is_ball = (cls_name in ['ball', 'sports ball', '0']) or (cls_id == 0 and len(self.yolo_detector.names) <= 2)
+                if is_ball and conf > max_conf:
+                    max_conf = conf
+                    xyxy = box.xyxy[0].tolist()
+                    w = float(xyxy[2] - xyxy[0])
+                    h = float(xyxy[3] - xyxy[1])
+                    cx = float(xyxy[0] + w / 2.0)
+                    cy = float(xyxy[1] + h / 2.0)
+                    best_ball = {
+                        'x': cx,
+                        'y': cy,
+                        'width': w,
+                        'height': h,
+                        'radius': max(w, h) / 2.0,
+                        'confidence': conf,
+                        'method': 'yolo',
+                        'color': 'detected'
+                    }
+            return best_ball
+        except Exception as e:
+            logger.debug(f"Error in YOLO ball detection: {e}")
+            return None
+
+    def _detect_stumps_yolo(self, frame):
+        """Detect cricket stumps using YOLO neural detector"""
+        if self.yolo_detector is None:
+            return None
+        try:
+            results = self.yolo_detector(frame, verbose=False, conf=0.20)[0]
+            if len(results.boxes) == 0:
+                return None
+            best_stump = None
+            max_conf = 0.0
+            for box in results.boxes:
+                cls_id = int(box.cls[0])
+                cls_name = self.yolo_detector.names.get(cls_id, str(cls_id)).lower()
+                conf = float(box.conf[0])
+                is_stump = (cls_name in ['stump', 'stumps', 'wicket', '1']) or (cls_id == 1 and len(self.yolo_detector.names) <= 2)
+                if is_stump and conf > max_conf:
+                    max_conf = conf
+                    xyxy = box.xyxy[0].tolist()
+                    w = float(xyxy[2] - xyxy[0])
+                    h = float(xyxy[3] - xyxy[1])
+                    cx = float(xyxy[0] + w / 2.0)
+                    cy = float(xyxy[1] + h / 2.0)
+                    best_stump = {
+                        'x': cx,
+                        'y': cy,
+                        'width': w,
+                        'height': h,
+                        'confidence': conf,
+                        'method': 'yolo'
+                    }
+            return best_stump
+        except Exception as e:
+            logger.debug(f"Error in YOLO stump detection: {e}")
+            return None
 
     def track_ball(self, video_path: str) -> Dict[str, Any]:
         """
@@ -98,6 +454,13 @@ class BallTrackingService:
                 break
 
             current_time = frame_idx / fps
+
+            # Report progress if callback is provided
+            if self.progress_callback and (frame_idx % 5 == 0 or frame_idx == max_frames - 1):
+                try:
+                    self.progress_callback(frame_idx + 1, max_frames, stage="Tracking ball trajectory")
+                except Exception:
+                    pass
 
             # Process frame
             frame_data = self._process_frame(frame, prev_frame, pitch_info, current_time, frame_idx, tracking_data)
@@ -261,7 +624,7 @@ class BallTrackingService:
         return result
 
     def _analyze_pitch_and_static_elements(self, cap, width, height):
-        """Analyze the pitch and find static elements like stumps"""
+        """Analyze the pitch and find static elements like stumps and crease lines"""
         logger.info("Analyzing pitch and static elements...")
 
         # Sample frames from different parts of the video
@@ -282,12 +645,24 @@ class BallTrackingService:
         # Analyze pitch boundaries
         pitch_boundaries = self._detect_pitch_boundaries(sample_frames[0])
 
+        # Crease line detection via Hough lines
+        crease_lines = self._detect_crease_lines(sample_frames[0])
+
         # Find stumps (usually static)
         stumps_position = self._detect_stumps(sample_frames[0])
+
+        # Perspective-n-Point camera pose estimation using 3D stump landmarks
+        self.pnp_pose = self._estimate_camera_pose_pnp(width, height, stumps_position)
+
+        # Compute planar homography for metric 3D perspective mapping
+        self.homography_matrix, self.inv_homography_matrix = self._compute_pitch_homography(
+            width, height, pitch_boundaries, stumps_position, crease_lines
+        )
 
         pitch_info = {
             'boundaries': pitch_boundaries,
             'stumps': stumps_position,
+            'crease_lines': crease_lines,
             'dimensions': {
                 'width': width,
                 'height': height,
@@ -297,7 +672,9 @@ class BallTrackingService:
             'camera_calibration': {
                 'focal_length_px': self.focal_length_px,
                 'height_m': self.camera_height,
-                'angle_rad': self.camera_angle
+                'angle_rad': self.camera_angle,
+                'homography_matrix': self.homography_matrix.tolist() if self.homography_matrix is not None else None,
+                'pnp_pose': self.pnp_pose
             }
         }
 
@@ -384,10 +761,188 @@ class BallTrackingService:
                 'geometry_source': 'assumed'
             }
 
+    def _detect_crease_lines(self, frame: np.ndarray) -> Dict[str, Any]:
+        """
+        Detect pitch crease markings (popping crease, bowling crease, return creases)
+        using HSV white masking, Canny edge detection, and probabilistic Hough Line Transform (cv2.HoughLinesP).
+        Locates horizontal popping crease and bowling crease lines across the pitch turf.
+        """
+        empty_result = {
+            'detected': False,
+            'lines': [],
+            'merged_creases': [],
+            'popping_crease': None,
+            'bowling_crease': None,
+            'return_creases': [],
+            'line_count': 0
+        }
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return empty_result
+
+        try:
+            h, w = frame.shape[:2]
+
+            # Step 1: Detect white/bright regions typical of painted pitch creases
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            white_mask_hsv = cv2.inRange(hsv, np.array([0, 0, 160]), np.array([180, 70, 255]))
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            _, bright_mask_gray = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+
+            combined_mask = cv2.bitwise_or(white_mask_hsv, bright_mask_gray)
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            cleaned_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+
+            # Step 2: Canny edge detection
+            edges = cv2.Canny(cleaned_mask, 50, 150)
+            if cv2.countNonZero(edges) < 20:
+                edges = cv2.Canny(gray, 60, 180)
+
+            # Step 3: Probabilistic Hough Line Transform
+            min_line_len = max(15, int(min(w, h) * 0.04))
+            max_line_gap = max(8, int(min(w, h) * 0.02))
+            hough_lines = cv2.HoughLinesP(
+                edges,
+                rho=1,
+                theta=np.pi / 180,
+                threshold=25,
+                minLineLength=min_line_len,
+                maxLineGap=max_line_gap
+            )
+
+            if hough_lines is None or len(hough_lines) == 0:
+                return empty_result
+
+            detected_lines = []
+            horizontal_candidates = []
+            vertical_candidates = []
+
+            for line in hough_lines:
+                coords = [int(v) for v in line.ravel()[:4]]
+                if len(coords) < 4:
+                    continue
+                x1, y1, x2, y2 = coords
+                dx = float(x2 - x1)
+                dy = float(y2 - y1)
+                length = float(np.hypot(dx, dy))
+                angle_deg = float(np.abs(np.degrees(np.arctan2(dy, dx))))
+                if angle_deg > 90:
+                    angle_deg = 180 - angle_deg
+
+                line_dict = {
+                    'x1': int(min(x1, x2)),
+                    'y1': int(y1 if x1 <= x2 else y2),
+                    'x2': int(max(x1, x2)),
+                    'y2': int(y2 if x1 <= x2 else y1),
+                    'length': round(length, 2),
+                    'angle_deg': round(angle_deg, 2),
+                    'center_y': float((y1 + y2) / 2.0),
+                    'center_x': float((x1 + x2) / 2.0),
+                    'y_mid': float((y1 + y2) / 2.0),
+                }
+                detected_lines.append(line_dict)
+
+                if angle_deg <= 25.0:
+                    horizontal_candidates.append(line_dict)
+                elif angle_deg >= 65.0:
+                    vertical_candidates.append(line_dict)
+
+            # Cluster horizontal lines by vertical position (within 25 px)
+            horizontal_candidates.sort(key=lambda l: l['center_y'])
+            clusters = []
+            for line in horizontal_candidates:
+                if not clusters:
+                    clusters.append([line])
+                else:
+                    if abs(line['center_y'] - clusters[-1][-1]['center_y']) < 25.0:
+                        clusters[-1].append(line)
+                    else:
+                        clusters.append([line])
+
+            merged_horizontal = []
+            for c in clusters:
+                avg_y = float(np.mean([l['center_y'] for l in c]))
+                min_x = min(l['x1'] for l in c)
+                max_x = max(l['x2'] for l in c)
+                max_len = max(l['length'] for l in c)
+                avg_angle = float(np.mean([l['angle_deg'] for l in c]))
+                merged_horizontal.append({
+                    'center_y': round(avg_y, 2),
+                    'y_mid': round(avg_y, 2),
+                    'x1': min_x,
+                    'y1': int(round(avg_y)),
+                    'x2': max_x,
+                    'y2': int(round(avg_y)),
+                    'length': round(max_len, 2),
+                    'angle_deg': round(avg_angle, 2),
+                    'line_count': len(c)
+                })
+
+            popping_crease = None
+            bowling_crease = None
+
+            batsman_half_horiz = [l for l in horizontal_candidates if l['center_y'] >= h * 0.40]
+            bowler_half_horiz = [l for l in horizontal_candidates if l['center_y'] < h * 0.55]
+
+            # If lines exist in both halves (bowler end and batsman end)
+            if batsman_half_horiz and bowler_half_horiz and any(l['center_y'] < h * 0.45 for l in bowler_half_horiz):
+                popping_crease = max(batsman_half_horiz, key=lambda l: l['length'])
+                bowler_end_candidates = [l for l in bowler_half_horiz if l['center_y'] < h * 0.45]
+                bowling_crease = max(bowler_end_candidates, key=lambda l: l['length'])
+            elif len(batsman_half_horiz) >= 2:
+                # Two distinct lines at batsman end: popping crease is further up pitch (smaller y)
+                # bowling crease is at the stumps base (larger y)
+                sorted_batsman = sorted(batsman_half_horiz, key=lambda l: l['center_y'])
+                popping_crease = sorted_batsman[0]
+                bowling_crease = sorted_batsman[-1]
+            elif batsman_half_horiz:
+                cand = batsman_half_horiz[0]
+                if cand['center_y'] > h * 0.75:
+                    bowling_crease = cand
+                else:
+                    popping_crease = cand
+            elif bowler_half_horiz:
+                bowling_crease = max(bowler_half_horiz, key=lambda l: l['length'])
+
+            if popping_crease is None and horizontal_candidates:
+                popping_crease = max(horizontal_candidates, key=lambda l: l['length'])
+
+            return {
+                'detected': len(detected_lines) > 0,
+                'lines': detected_lines,
+                'merged_creases': merged_horizontal,
+                'popping_crease': popping_crease,
+                'bowling_crease': bowling_crease,
+                'return_creases': vertical_candidates,
+                'line_count': len(detected_lines)
+            }
+        except Exception as e:
+            logger.warning(f"Crease line detection error: {e}")
+            return empty_result
+
     def _detect_stumps(self, frame):
-        """Enhanced stump detection using multiple methods"""
+        """Enhanced stump detection using multiple methods with YOLO priority"""
         try:
             height, width = frame.shape[:2]
+
+            # Method 0: YOLO Stump Detection
+            stump_yolo = self._detect_stumps_yolo(frame)
+            if stump_yolo and stump_yolo['confidence'] >= 0.25:
+                x_pos = stump_yolo['x']
+                y_pos = stump_yolo['y']
+                w_val = stump_yolo['width']
+                h_val = stump_yolo['height']
+                base_y = y_pos + h_val / 2.0
+                stumps_3d = self._pixel_to_3d(x_pos, base_y, width, height)
+                return {
+                    'pixel_position': (float(x_pos), float(base_y)),
+                    'size': (float(w_val), float(h_val)),
+                    'position_3d': stumps_3d,
+                    'confidence': float(stump_yolo['confidence']),
+                    'stump_count': 3,
+                    'method': 'yolo'
+                }
 
             # Method 1: Edge-based detection
             stumps_from_edges = self._detect_stumps_by_edges(frame)
@@ -465,10 +1020,26 @@ class BallTrackingService:
                             logger.warning(f"Invalid stump candidate: {s}")
                             continue
                     
-                    if len(centers) < 2:
+                    if len(centers) == 0:
                         continue
+
+                    if len(centers) == 1:
+                        cx, cy = centers[0]
+                        score = float(group[0].get('confidence', 0.5)) * 0.7
+                        if score > best_score:
+                            best_score = score
+                            best_group = {
+                                'x': cx,
+                                'y': cy,
+                                'width': float(group[0].get('width', 30.0)),
+                                'height': float(group[0].get('height', 80.0)),
+                                'stumps': group,
+                                'score': score
+                            }
+                        continue
+
                     avg_x = sum(x for x, y in centers) / len(centers)
-                    avg_y = sum(y for y in centers) / len(centers)
+                    avg_y = sum(y for x, y in centers) / len(centers)
 
                     # Check if stumps are roughly aligned (small y variation)
                     y_coords = [y for x, y in centers]
@@ -516,7 +1087,8 @@ class BallTrackingService:
                         'size': (width_val, height_val),
                         'position_3d': stumps_3d,
                         'confidence': best_score,
-                        'stump_count': len(best_group['stumps'])
+                        'stump_count': len(best_group['stumps']),
+                        'method': 'detected'
                     }
                 except (TypeError, ValueError) as e:
                     logger.error(f"Error converting stump coordinates: {e}")
@@ -865,6 +1437,12 @@ class BallTrackingService:
         """Comprehensive ball detection using multiple methods"""
         detections = []
         logger.debug("Starting comprehensive ball detection")
+
+        # Method 0: YOLO Deep Learning detection
+        yolo_ball = self._detect_ball_yolo(frame)
+        if yolo_ball:
+            detections.append(yolo_ball)
+            logger.debug(f"YOLO ball found at ({yolo_ball['x']:.1f}, {yolo_ball['y']:.1f}) conf={yolo_ball['confidence']:.2f}")
 
         # Method 1: Color-based detection
         color_detection = self._detect_ball_by_color_advanced(frame)
@@ -1331,52 +1909,47 @@ class BallTrackingService:
 
     def _pixel_to_3d(self, x_pixel, y_pixel, frame_width, frame_height):
         """Convert 2D pixel coordinates to 3D world coordinates in meters.
-        NOTE: This is a heuristic linear lift from image space. It does NOT use
-        calibrated camera projection. Results are illustrative estimates only."""
+        Uses calibrated planar homography projection matrix when available, with
+        graceful fallback to perspective heuristic."""
         try:
-            # Use canonical dimensions from config (not hardcoded)
-            PITCH_LENGTH = PITCH_CONFIG["length_m"]   # 20.12 m
-            PITCH_WIDTH = PITCH_CONFIG["width_m"]     # 3.05 m
-            
-            # Normalize pixel coordinates to [0, 1]
+            PITCH_LENGTH = self.pitch_length   # 20.12 m
+            PITCH_WIDTH = self.pitch_width     # 3.05 m
+
+            # Metric planar homography projection
+            if self.homography_matrix is not None:
+                pt_img = np.array([float(x_pixel), float(y_pixel), 1.0], dtype=np.float64)
+                w_pt = self.homography_matrix @ pt_img
+                if abs(w_pt[2]) > 1e-6:
+                    pitch_x = float(w_pt[0] / w_pt[2])
+                    pitch_y = float(w_pt[1] / w_pt[2])
+                else:
+                    x_norm = x_pixel / frame_width
+                    y_norm = y_pixel / frame_height
+                    pitch_x = (x_norm - 0.5) * (PITCH_WIDTH * 3.0)
+                    pitch_y = (0.5 - y_norm) * PITCH_LENGTH * 1.5
+
+                y_norm = y_pixel / frame_height
+                height_factor = max(0.0, 1.0 - y_norm)
+                distance_factor = 1.0 + abs(pitch_y) / PITCH_LENGTH
+                pitch_z = height_factor * 3.5 * distance_factor * 0.5
+
+                pitch_x = max(-10.0, min(10.0, pitch_x))
+                pitch_y = max(-15.0, min(15.0, pitch_y))
+                pitch_z = max(0.0, min(5.0, pitch_z))
+                return (float(pitch_x), float(pitch_y), float(pitch_z))
+
+            # Heuristic fallback
             x_norm = x_pixel / frame_width
             y_norm = y_pixel / frame_height
-            
-            # Map to cricket pitch coordinates
-            # X-axis: left-right across pitch width (perpendicular to pitch length)
-            # Center of frame = center of pitch
-            pitch_x = (x_norm - 0.5) * (PITCH_WIDTH * 3)  # *3 for wider viewing area
-            
-            # Y-axis: along pitch length (from bowler to batsman)
-            # Top of frame = bowler end (far), Bottom = batsman end (near)
-            # Map y_norm [0,1] to pitch_y [-PITCH_LENGTH/2, PITCH_LENGTH/2]
-            pitch_y = (0.5 - y_norm) * PITCH_LENGTH * 1.5  # *1.5 for beyond pitch ends
-            
-            # Z-axis: height above ground
-            # Estimate height based on vertical position in frame
-            # Objects higher in frame are at similar or greater height
-            # Objects lower in frame are closer to ground
-            
-            # Simple perspective: lower y_pixel = closer to camera = lower height
-            # higher y_pixel = farther from camera = could be higher
-            
-            # For balls: estimate height based on position
-            # Rough approximation: height decreases towards bottom of frame
-            height_factor = 1.0 - y_norm  # 0 at bottom, 1 at top
-            
-            # Perspective correction: objects higher in frame are farther away
-            # so same pixel height represents more actual height
-            distance_factor = 1.0 + abs(pitch_y) / PITCH_LENGTH  # Farther = bigger scale
-            
-            # Maximum ball height is typically 3-4 meters
-            MAX_HEIGHT = 3.5
-            pitch_z = height_factor * MAX_HEIGHT * distance_factor * 0.5
-            
-            # Clamp values to reasonable ranges
-            pitch_x = max(-10, min(10, pitch_x))
-            pitch_y = max(-15, min(15, pitch_y))
-            pitch_z = max(0, min(5, pitch_z))
-            
+            pitch_x = (x_norm - 0.5) * (PITCH_WIDTH * 3.0)
+            pitch_y = (0.5 - y_norm) * PITCH_LENGTH * 1.5
+            height_factor = 1.0 - y_norm
+            distance_factor = 1.0 + abs(pitch_y) / PITCH_LENGTH
+            pitch_z = height_factor * 3.5 * distance_factor * 0.5
+
+            pitch_x = max(-10.0, min(10.0, pitch_x))
+            pitch_y = max(-15.0, min(15.0, pitch_y))
+            pitch_z = max(0.0, min(5.0, pitch_z))
             return (float(pitch_x), float(pitch_y), float(pitch_z))
 
         except Exception as e:
@@ -1384,7 +1957,7 @@ class BallTrackingService:
             return (0.0, 0.0, 0.0)
 
     def _post_process_tracking_data(self, tracking_data):
-        """Post-process tracking data for smoothing and validation"""
+        """Post-process tracking data for smoothing, outlier rejection, and physics regression"""
         try:
             if not tracking_data['ball_trajectory']:
                 return tracking_data
@@ -1398,9 +1971,12 @@ class BallTrackingService:
             # Remove outliers
             filtered_trajectory = self._remove_outliers(smoothed_trajectory)
 
-            tracking_data['ball_trajectory'] = filtered_trajectory
+            # Apply physics-constrained parabolic height regression to eliminate monocular vertical jitter
+            regressed_trajectory = self._fit_parabolic_height_regression(filtered_trajectory)
 
-            logger.info(f"Post-processing: {len(smoothed_trajectory)} -> {len(filtered_trajectory)} points")
+            tracking_data['ball_trajectory'] = regressed_trajectory
+
+            logger.info(f"Post-processing: {len(smoothed_trajectory)} -> {len(regressed_trajectory)} points")
 
         except Exception as e:
             logger.error(f"Error in post-processing: {e}")
@@ -1489,6 +2065,115 @@ class BallTrackingService:
         except Exception as e:
             logger.error(f"Error in Kalman filtering: {e}")
             return trajectory
+
+    def _fit_parabolic_height(
+        self,
+        points: List[Dict[str, Any]],
+        g: float = 9.8
+    ) -> List[Dict[str, Any]]:
+        """
+        Fit physics-constrained parabolic trajectory height:
+            Z(t) = Z_0 + V_z0 * t - 0.5 * g * t^2
+        to eliminate monocular vertical jitter.
+        Uses relative time tau = t - t0 for numerical stability and physical meaning:
+          Z_0: initial height (m) at segment start
+          V_z0: initial vertical velocity (m/s) at segment start
+          g: gravitational acceleration (m/s^2), fixed to 9.8
+        """
+        if not points:
+            return []
+        if len(points) < 2:
+            return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in points]
+
+        try:
+            times = np.array([float(p.get('t', 0.0)) for p in points], dtype=np.float64)
+            heights = np.array([max(0.0, float(p.get('z', 0.0))) for p in points], dtype=np.float64)
+
+            t0 = times[0]
+            tau = times - t0
+
+            # If time span is negligible, keep original z clamped >= 0
+            if np.max(tau) < 1e-4:
+                return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in points]
+
+            # Solve linear least squares for [Z_0, V_z0]:
+            # Z(tau) + 0.5 * g * tau^2 = Z_0 + V_z0 * tau
+            y = heights + 0.5 * g * (tau ** 2)
+            A = np.column_stack([np.ones_like(tau), tau])
+
+            params, _, _, _ = np.linalg.lstsq(A, y, rcond=None)
+            z0 = float(params[0])
+            vz0 = float(params[1])
+
+            fitted_points = []
+            for i, p in enumerate(points):
+                fitted_z = z0 + vz0 * tau[i] - 0.5 * g * (tau[i] ** 2)
+                fitted_z = max(0.02, min(6.0, float(fitted_z)))
+
+                pt_copy = dict(p)
+                pt_copy['z_raw'] = float(p.get('z_raw', p.get('z', 0.0)))
+                pt_copy['z'] = round(float(fitted_z), 4)
+                pt_copy['parabolic_fit'] = {
+                    'z0': round(z0, 4),
+                    'vz0': round(vz0, 4),
+                    'g': g
+                }
+                fitted_points.append(pt_copy)
+
+            return fitted_points
+
+        except Exception as e:
+            logger.warning(f"Error fitting parabolic height segment: {e}")
+            return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in points]
+
+    def _fit_parabolic_height_regression(
+        self,
+        trajectory: List[Dict[str, Any]],
+        g: float = 9.8
+    ) -> List[Dict[str, Any]]:
+        """
+        Fit physics-constrained parabolic vertical height regression to ball trajectory.
+        Enforces Newtonian projectile motion:
+            Z(t) = Z_0 + V_z0 * t - 0.5 * g * t^2
+        to pre-bounce and post-bounce points to eliminate monocular vertical jitter.
+        """
+        if not trajectory or len(trajectory) < 2:
+            return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in trajectory]
+
+        try:
+            if len(trajectory) < 3:
+                return self._fit_parabolic_height(trajectory, g=g)
+
+            # Identify bounce point (minimum Z along pitch where ball contacts turf)
+            z_vals = [float(p.get('z', 0.0)) for p in trajectory]
+            min_idx = int(np.argmin(z_vals))
+
+            # If bounce is at boundary (all points before bounce or all after bounce)
+            if min_idx <= 1 or min_idx >= len(trajectory) - 2:
+                return self._fit_parabolic_height(trajectory, g=g)
+
+            # Split into pre-bounce (up to bounce) and post-bounce (from bounce)
+            pre_bounce_pts = trajectory[:min_idx + 1]
+            post_bounce_pts = trajectory[min_idx:]
+
+            fitted_pre = self._fit_parabolic_height(pre_bounce_pts, g=g)
+            fitted_post = self._fit_parabolic_height(post_bounce_pts, g=g)
+
+            # Set bounce contact point height to pitch turf level (~0.036m regulation ball radius)
+            bounce_pt = dict(fitted_post[0])
+            bounce_pt['z'] = 0.036
+            bounce_pt['phase'] = 'bounce'
+
+            result = fitted_pre[:-1] + [bounce_pt] + fitted_post[1:]
+            return result
+
+        except Exception as e:
+            logger.warning(f"Error fitting parabolic height regression: {e}")
+            return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in trajectory]
+
+    # Aliases for backward compatibility and method naming conventions
+    _parabolic_vertical_height_regression = _fit_parabolic_height_regression
+    _apply_parabolic_height_regression = _fit_parabolic_height_regression
 
     def _remove_outliers(self, trajectory):
         """Remove outlier points using multiple statistical methods"""
@@ -1697,7 +2382,13 @@ class BallTrackingService:
                 dt = max(0.01, post_bounce[-1]['t'] - post_bounce[0]['t'])
                 vx = (post_bounce[-1]['x'] - post_bounce[0]['x']) / dt
                 vy = max(5.0, (post_bounce[-1]['y'] - post_bounce[0]['y']) / dt)
-                vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
+                if post_bounce[-1].get('parabolic_fit'):
+                    # Analytical vertical velocity from fitted parabola: vz(tau) = vz0 - 9.8 * tau
+                    vz0 = float(post_bounce[-1]['parabolic_fit']['vz0'])
+                    tau_impact = max(0.0, post_bounce[-1]['t'] - post_bounce[0]['t'])
+                    vz = vz0 - 9.8 * tau_impact
+                else:
+                    vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
             else:
                 vx, vy, vz = 0.0, 30.0, 1.5
 

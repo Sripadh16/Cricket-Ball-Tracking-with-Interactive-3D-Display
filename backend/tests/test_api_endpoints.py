@@ -109,3 +109,38 @@ def test_trajectory_404_for_unknown_video(client):
     assert resp.status_code == 404, (
         f"Expected 404 for unknown video, got {resp.status_code}: {resp.text}"
     )
+
+
+def test_get_video_progress_not_found(client):
+    """GET /videos/{id}/progress for non-existent video returns 404."""
+    resp = client.get("/videos/nonexistent-id-9999/progress")
+    assert resp.status_code == 404
+
+
+def test_drs_review_lifecycle(client):
+    """Test full DRS review lifecycle: create review record, fetch review, list reviews."""
+    payload = {
+        "video_id": "test-video-uuid-1234",
+        "decisions": [
+            {
+                "type": "lbw",
+                "outcome": "OUT",
+                "timestamp": 1.45,
+                "confidence": 0.98
+            }
+        ],
+        "notes": "Official DRS Review: OUT"
+    }
+    create_resp = client.post("/reviews/", json=payload)
+    assert create_resp.status_code == 200, f"Create review failed: {create_resp.text}"
+    review_data = create_resp.json()
+    assert "id" in review_data
+    review_id = review_data["id"]
+
+    get_resp = client.get(f"/reviews/{review_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["id"] == review_id
+
+    list_resp = client.get("/reviews/")
+    assert list_resp.status_code == 200
+    assert len(list_resp.json()) >= 1

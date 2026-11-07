@@ -1,6 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query
 from sqlalchemy.orm import Session
-from database import get_db
+from database import get_db, SessionLocal
 from services.video_service import VideoService
 from services.ball_tracking_service import BallTrackingService
 from models.trajectory import Trajectory
@@ -8,6 +8,8 @@ from api.auth import get_current_user_optional
 from models.user import User
 from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS
 from services.sample_generator import DeliveryPhysicsSimulator
+from services.ball_physics_engine import BallPhysicsEngine
+from typing import Optional
 import uuid
 import logging
 import os
@@ -16,6 +18,68 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+
+# In-memory progress tracking: video_id -> { progress, current_frame, total_frames, status, stage }
+video_progress = {}
+
+
+def process_video_background(video_id: str, file_path: str):
+    """Background worker to run BallTrackingService without holding HTTP request open."""
+    db = SessionLocal()
+    video_service = VideoService(db)
+    try:
+        def on_progress(frame_idx, total_frames, stage="Tracking ball trajectory"):
+            pct = int((frame_idx / max(1, total_frames)) * 100)
+            video_progress[video_id] = {
+                "progress": pct,
+                "current_frame": frame_idx,
+                "total_frames": total_frames,
+                "status": "processing",
+                "stage": stage
+            }
+
+        tracking_service = BallTrackingService(progress_callback=on_progress)
+        trajectory_data = tracking_service.track_ball(str(file_path))
+
+        additional_data = _build_additional_data(trajectory_data)
+
+        # Clear existing trajectory for this video if any
+        db.query(Trajectory).filter(Trajectory.video_id == video_id).delete()
+        trajectory = Trajectory(
+            video_id=video_id,
+            points=trajectory_data.get("points", []),
+            confidence_score=trajectory_data.get("confidence_score", 0),
+            ball_detected=trajectory_data.get("ball_detected", False),
+            timestamps=trajectory_data.get("timestamps", []),
+            additional_data=additional_data
+        )
+        db.add(trajectory)
+        db.commit()
+
+        video_service.update_video_status(video_id, "processed")
+        video_progress[video_id] = {
+            "progress": 100,
+            "current_frame": len(trajectory_data.get("points", [])),
+            "total_frames": len(trajectory_data.get("points", [])),
+            "status": "processed",
+            "stage": "Tracking Complete"
+        }
+        logger.info(f"Video {video_id} background tracking completed successfully.")
+    except Exception as e:
+        logger.error(f"Error processing video {video_id} in background: {e}")
+        try:
+            video_service.update_video_status(video_id, "error")
+        except Exception:
+            pass
+        video_progress[video_id] = {
+            "progress": 100,
+            "status": "error",
+            "error": str(e),
+            "stage": "Failed"
+        }
+    finally:
+        db.close()
 
 def _build_additional_data(trajectory_data: dict) -> dict:
     """Extract all DRS/analytics fields from tracking result for consistent storage."""
@@ -41,16 +105,25 @@ def _build_additional_data(trajectory_data: dict) -> dict:
 
 @router.get("/presets")
 async def get_preset_deliveries():
-    """Return all available physical preset deliveries for interactive demo"""
+    """Return all available physical preset deliveries and pitch surface profiles for interactive demo"""
     return {
-        "presets": DeliveryPhysicsSimulator.get_all_preset_deliveries()
+        "presets": DeliveryPhysicsSimulator.get_all_preset_deliveries(),
+        "pitch_types": BallPhysicsEngine.get_available_pitch_types()
     }
 
 @router.get("/presets/{delivery_type}")
-async def get_preset_delivery_trajectory(delivery_type: str):
-    """Generate and return full 3D physics trajectory & DRS data for a preset delivery"""
+async def get_preset_delivery_trajectory(
+    delivery_type: str,
+    pitch_type: str = Query("standard_hard", description="Pitch surface type: standard_hard, green_seamer, dry_dusty, damp_clay"),
+    rpm: Optional[float] = Query(None, description="Custom spin RPM (e.g. 800 - 3000)")
+):
+    """Generate and return full 3D physics trajectory & DRS data with Magnus aerodynamics and pitch restitution"""
     try:
-        data = DeliveryPhysicsSimulator.generate_delivery(delivery_type=delivery_type)
+        data = DeliveryPhysicsSimulator.generate_delivery(
+            delivery_type=delivery_type,
+            pitch_type=pitch_type,
+            rpm=rpm
+        )
         return data
     except Exception as e:
         logger.error(f"Error generating preset delivery: {e}")
@@ -94,12 +167,13 @@ async def list_videos(
 @router.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    sync: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_optional)
 ):
     """Upload a video file for ball tracking analysis.
-    Streams the file in chunks so oversized uploads are rejected before reading
-    the full content into memory.
+    Supports asynchronous background processing via background_tasks and progress polling.
     """
     # Validate file extension before reading any bytes
     safe_name = Path(file.filename or "upload").name  # strip any path component
@@ -157,46 +231,27 @@ async def upload_video(
         file_size=file_size
     )
 
-    # Immediately start ball tracking after upload.
-    # Run in a thread pool so the async event loop is not blocked by CPU-heavy OpenCV work.
-    logger.info(f"Starting automatic ball tracking for video: {video.id}")
+    # Start ball tracking (Background task or Synchronous fallback)
+    logger.info(f"Initiating ball tracking for video: {video.id} (sync={sync})")
     video_service.update_video_status(video.id, "processing")
+    video_progress[video.id] = {
+        "progress": 0,
+        "current_frame": 0,
+        "total_frames": 0,
+        "status": "processing",
+        "stage": "Queued for tracking"
+    }
 
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-    _executor = ThreadPoolExecutor(max_workers=1)
-
-    async def _run_tracking():
-        loop = asyncio.get_event_loop()
-        def _track():
-            tracking_service = BallTrackingService()
-            return tracking_service.track_ball(str(file_path))
-        return await loop.run_in_executor(_executor, _track)
-
-    try:
-        trajectory_data = await _run_tracking()
-
-        # Save trajectory
-        additional_data = _build_additional_data(trajectory_data)
-
-        trajectory = Trajectory(
-            video_id=video.id,
-            points=trajectory_data.get("points", []),
-            confidence_score=trajectory_data.get("confidence_score", 0),
-            ball_detected=trajectory_data.get("ball_detected", False),
-            timestamps=trajectory_data.get("timestamps", []),
-            additional_data=additional_data
-        )
-        db.add(trajectory)
-        db.commit()
-
-        # Update video status to processed
-        video_service.update_video_status(video.id, "processed")
-        logger.info(f"Video processed successfully: {video.id}")
-
-    except Exception as e:
-        logger.error(f"Error processing video {video.id}: {e}")
-        video_service.update_video_status(video.id, "error")
+    if not sync and background_tasks is not None:
+        background_tasks.add_task(process_video_background, video.id, str(file_path))
+    else:
+        # Run synchronous processing
+        try:
+            process_video_background(video.id, str(file_path))
+            video = video_service.get_video(video.id)
+        except Exception as e:
+            logger.error(f"Synchronous tracking failed for video {video.id}: {e}")
+            video_service.update_video_status(video.id, "error")
 
     return {
         "id": video.id,
@@ -207,6 +262,34 @@ async def upload_video(
         "upload_date": video.upload_date.isoformat() if video.upload_date else None,
         "file_size": video.file_size
     }
+
+@router.get("/{video_id}/progress")
+async def get_video_progress(
+    video_id: str,
+    db: Session = Depends(get_db)
+):
+    """Retrieve real-time processing progress for an uploaded video."""
+    video_service = VideoService(db)
+    video = video_service.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    prog = video_progress.get(video_id, {
+        "progress": 100 if video.status == "processed" else 0,
+        "current_frame": 0,
+        "total_frames": 0,
+        "status": video.status,
+        "stage": video.status.capitalize()
+    })
+    return {
+        "video_id": video_id,
+        "status": video.status,
+        "progress": prog.get("progress", 0),
+        "current_frame": prog.get("current_frame", 0),
+        "total_frames": prog.get("total_frames", 0),
+        "stage": prog.get("stage", video.status)
+    }
+
 
 
 

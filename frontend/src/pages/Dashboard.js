@@ -225,17 +225,29 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
     loadVideos();
   }, []);
 
-  const loadVideos = async () => {
-    setLoading(true);
+  const loadVideos = async (showSpinner = true) => {
+    if (showSpinner) setLoading(true);
     try {
       const response = await api.get('/videos');
       setVideos(response.data.videos || []);
     } catch (err) {
-      setError('Failed to load videos');
+      if (showSpinner) setError('Failed to load videos');
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   };
+
+  // Poll video status automatically when any video is processing in the background
+  useEffect(() => {
+    const hasProcessing = videos.some(v => v.status === 'processing') || reprocessingId !== null;
+    if (!hasProcessing) return;
+
+    const timer = setInterval(() => {
+      loadVideos(false);
+    }, 2500);
+
+    return () => clearInterval(timer);
+  }, [videos, reprocessingId]);
 
   const uploadVideo = async (file) => {
     setUploading(true);
