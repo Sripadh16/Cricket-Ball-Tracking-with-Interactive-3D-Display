@@ -38,15 +38,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
     return auth_service.get_current_user(token)
 
 async def get_current_user_optional(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> Optional[User]:
-    """Get current user if authenticated, otherwise return None"""
+    """Get current user if authenticated; returns None if no token provided. Rejects invalid tokens with 401."""
     if not token:
         return None
-    try:
-        auth_service = AuthService(db)
-        return auth_service.get_current_user(token)
-    except Exception as e:
-        logger.warning(f"Optional auth failed: {e}")
-        return None
+    # If a token is provided, it MUST be valid. Do not downgrade invalid credentials to anonymous.
+    auth_service = AuthService(db)
+    return auth_service.get_current_user(token)
 
 @router.post("/register", response_model=Token)
 async def register(user: UserCreate, db: Session = Depends(get_db)):

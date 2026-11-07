@@ -700,7 +700,7 @@ function Scene({
         y: Math.max(0.036, (p.z !== undefined ? p.z : 0.1)),
         z: p.y !== undefined ? p.y : 0,
         t: p.t || 0,
-        speed_kmh: p.speed_kmh || 135,
+        speed_kmh: p.speed_kmh != null ? p.speed_kmh : null,
         phase: p.phase || 'trajectory'
       };
     };
@@ -1450,11 +1450,13 @@ export default function HawkEyeViewer({
           <Typography variant="body2" sx={{ fontSize: '0.75rem', color: '#cbd5e1' }}>
             Height (Y): <strong>{selectedPoint.y?.toFixed(2)} m</strong>
           </Typography>
-          {selectedPoint.speed_kmh && (
-            <Typography variant="body2" sx={{ fontSize: '0.75rem', color: '#4ade80', fontWeight: 600 }}>
-              Speed: {selectedPoint.speed_kmh} km/h
-            </Typography>
-          )}
+          <Typography variant="body2" sx={{ fontSize: '0.75rem', color: '#cbd5e1' }}>
+            Speed: {selectedPoint.speed_kmh != null ? (
+              <strong style={{ color: '#4ade80' }}>{selectedPoint.speed_kmh} km/h</strong>
+            ) : (
+              <span style={{ color: '#94a3b8' }}>— (Uncalibrated)</span>
+            )}
+          </Typography>
         </Paper>
       )}
 

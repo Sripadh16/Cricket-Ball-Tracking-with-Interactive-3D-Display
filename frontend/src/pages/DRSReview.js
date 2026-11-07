@@ -2,11 +2,13 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   Box, IconButton, Typography, Chip, Slider, ToggleButton, ToggleButtonGroup,
   Paper, Button, Select, MenuItem, FormControl, Divider, CircularProgress,
+  Switch, FormControlLabel,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Snackbar, Alert,
   Tooltip
 } from '@mui/material';
 import {
   ArrowBack, PlayArrow, Pause, Replay, Speed, Gavel, SkipPrevious, SkipNext,
+  Assessment,
   DataObject, TableChart, CameraAlt, GpsFixed, Visibility, VisibilityOff,
   TrendingUp, Timeline, AccountTree, Article
 } from '@mui/icons-material';
@@ -36,6 +38,8 @@ export default function DRSReview({
   const videoContainerRef = useRef(null);
   const animFrameRef = useRef(null);
   const lastTimeRef = useRef(null);
+  // Request ID ref to prevent out-of-order async preset/video responses from overwriting active trajectory
+  const activeDeliveryFetchId = useRef(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -45,6 +49,7 @@ export default function DRSReview({
   const [currentDeliveryType, setCurrentDeliveryType] = useState(video ? 'video' : 'inswinger_lbw');
   const [activeTrajectory, setActiveTrajectory] = useState(initialTrajectory);
   const [loadingPreset, setLoadingPreset] = useState(false);
+  const [showCvOverlay, setShowCvOverlay] = useState(true);
 
   // Official DRS Review Session State
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
@@ -92,7 +97,7 @@ export default function DRSReview({
     }
   };
 
-  // Sync activeTrajectory when parent updates (e.g. user switches clips)
+  // Sync activeTrajectory when the parent's trajectory prop updates
   useEffect(() => {
     if (currentDeliveryType === 'video') {
       setActiveTrajectory(initialTrajectory);
@@ -103,8 +108,9 @@ export default function DRSReview({
   const [pitchType, setPitchType] = useState('standard_hard');
   const [spinRPM, setSpinRPM] = useState(2100);
 
-  // Load preset delivery data with aerodynamics & pitch restitution parameters
+  // Load preset delivery data with aerodynamics & pitch restitution parameters and request guard
   const loadPresetDelivery = useCallback(async (deliveryType, pType = pitchType, rpm = spinRPM) => {
+    const fetchId = ++activeDeliveryFetchId.current;
     setLoadingPreset(true);
     try {
       const response = await api.get(`/videos/presets/${deliveryType}`, {
@@ -113,19 +119,25 @@ export default function DRSReview({
           rpm: rpm || undefined
         }
       });
+      if (fetchId !== activeDeliveryFetchId.current) return;
       setActiveTrajectory(response.data);
       setDuration(response.data.video_duration || 1.5);
       setCurrentTime(0);
       setIsPlaying(true);
     } catch (err) {
-      console.error('Failed to load preset delivery:', err);
+      if (fetchId === activeDeliveryFetchId.current) {
+        console.error('Failed to load preset delivery:', err);
+      }
     } finally {
-      setLoadingPreset(false);
+      if (fetchId === activeDeliveryFetchId.current) {
+        setLoadingPreset(false);
+      }
     }
   }, [pitchType, spinRPM]);
 
   // Handle switching delivery presets
   const handleDeliveryChange = (newType) => {
+    activeDeliveryFetchId.current++;
     setCurrentDeliveryType(newType);
     if (newType === 'video') {
       setActiveTrajectory(initialTrajectory);
@@ -153,21 +165,24 @@ export default function DRSReview({
     }
   };
 
-  // Load default preset if there's no video and no trajectory loading in flight
+  // Load initial preset if no video is loaded
   useEffect(() => {
     if (!video && !initialTrajectory && !trajectoryLoading) {
       loadPresetDelivery('inswinger_lbw');
     }
   }, [video, initialTrajectory, trajectoryLoading, loadPresetDelivery]);
 
-  // Video event listeners
+  // Video event listeners: attached once whenever video element is available
   useEffect(() => {
-    if (currentDeliveryType !== 'video') return;
     const vid = videoRef.current;
     if (!vid) return;
 
     const onTimeUpdate = () => setCurrentTime(vid.currentTime);
-    const onLoadedMetadata = () => setDuration(vid.duration);
+    const onLoadedMetadata = () => {
+      if (vid.duration && !isNaN(vid.duration)) {
+        setDuration(vid.duration);
+      }
+    };
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
 
@@ -182,7 +197,7 @@ export default function DRSReview({
       vid.removeEventListener('play', onPlay);
       vid.removeEventListener('pause', onPause);
     };
-  }, [currentDeliveryType, viewMode]);
+  }, [video]);
 
   // Simulated animation clock for 3D physics presets
   useEffect(() => {
@@ -214,7 +229,7 @@ export default function DRSReview({
     };
   }, [isPlaying, playbackRate, duration, currentDeliveryType]);
 
-  // Handle play/pause
+  // Authoritative Play/Pause control (works in 3D-only, Split, and Video view modes)
   const togglePlay = () => {
     if (currentDeliveryType === 'video' && videoRef.current) {
       if (isPlaying) {
@@ -238,7 +253,7 @@ export default function DRSReview({
 
   const handleRateChange = (rate) => {
     setPlaybackRate(rate);
-    if (currentDeliveryType === 'video' && videoRef.current) {
+    if (videoRef.current) {
       videoRef.current.playbackRate = rate;
     }
   };
@@ -247,12 +262,16 @@ export default function DRSReview({
     setCurrentTime(0);
     if (currentDeliveryType === 'video' && videoRef.current) {
       videoRef.current.currentTime = 0;
+      videoRef.current.play().catch(() => {});
+    } else {
+      setIsPlaying(true);
     }
   };
 
+  // Accurate frame step using source video FPS when available
   const stepFrame = (direction) => {
+    const fps = activeTrajectory?.video_info?.fps || 30;
     if (currentDeliveryType === 'video' && videoRef.current) {
-      const fps = 30;
       const step = direction / fps;
       const clamped = Math.max(0, Math.min(duration, videoRef.current.currentTime + step));
       videoRef.current.currentTime = clamped;
@@ -269,11 +288,15 @@ export default function DRSReview({
     return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
   };
 
-  const videoUrl = video?.filename
-    ? `${API_BASE_URL}/uploads/${encodeURIComponent(video.filename)}`
+  // Authenticated video stream URL with token query parameter for HTML5 video
+  const token = localStorage.getItem('token');
+  const videoUrl = video?.id
+    ? `${API_BASE_URL}/videos/${video.id}/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
     : '';
 
   const drs = activeTrajectory?.drs_evaluation;
+  const debugInfo = activeTrajectory?.debug_info;
+  const videoInfo = activeTrajectory?.video_info;
   const isVideoMode = currentDeliveryType === 'video';
   const isSimulation = !isVideoMode;
 
@@ -700,6 +723,23 @@ export default function DRSReview({
       alert('Could not capture snapshot: ' + err.message);
     }
   };
+  // Closest trajectory point for observable CV video overlay
+  const currentTrackPoint = useMemo(() => {
+    if (!activeTrajectory?.points || activeTrajectory.points.length === 0) return null;
+    const pts = activeTrajectory.points;
+    let closest = pts[0];
+    let minDiff = Math.abs((pts[0].t || 0) - currentTime);
+    for (let i = 1; i < pts.length; i++) {
+      const diff = Math.abs((pts[i].t || 0) - currentTime);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = pts[i];
+      }
+    }
+    if (minDiff > 0.15) return null;
+    return closest;
+  }, [activeTrajectory, currentTime]);
+
 
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#060d17', color: 'white' }}>
@@ -897,24 +937,28 @@ export default function DRSReview({
         flex: 1,
         display: 'flex',
         flexDirection: { xs: 'column', md: 'row' },
-        overflow: { xs: 'auto', md: 'hidden' }
+        overflow: { xs: 'auto', md: 'hidden' },
+        position: 'relative'
       }}>
-        {/* Video Panel with Synchronous 2D Tracking Reticle Overlay */}
-        {video && (viewMode === 'video' || viewMode === 'split') && (
+        {/* Video Panel: ALWAYS mounted in DOM to maintain authoritative playback clock across all view modes */}
+        {video && (
           <Box
             ref={videoContainerRef}
             sx={{
-              flex: viewMode === 'split' ? 1 : 'auto',
-              height: { xs: 260, md: 'auto' },
-              minHeight: { xs: 220, md: 'auto' },
-              position: 'relative',
+              flex: viewMode === 'split' ? 1 : (viewMode === 'video' ? 1.5 : 'none'),
+              height: viewMode === '3d' ? 0 : { xs: 260, md: 'auto' },
+              minHeight: viewMode === '3d' ? 0 : { xs: 220, md: 'auto' },
+              width: viewMode === '3d' ? 0 : 'auto',
+              overflow: 'hidden',
+              visibility: viewMode === '3d' ? 'hidden' : 'visible',
+              position: viewMode === '3d' ? 'absolute' : 'relative',
+              pointerEvents: viewMode === '3d' ? 'none' : 'auto',
               bgcolor: 'black',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              borderRight: { xs: 'none', md: '1px solid rgba(255,255,255,0.1)' },
-              borderBottom: { xs: '1px solid rgba(255,255,255,0.1)', md: 'none' },
-              overflow: 'hidden'
+              borderRight: { xs: 'none', md: viewMode === '3d' ? 'none' : '1px solid rgba(255,255,255,0.1)' },
+              borderBottom: { xs: viewMode === '3d' ? 'none' : '1px solid rgba(255,255,255,0.1)', md: 'none' }
             }}
           >
             <video
@@ -923,6 +967,64 @@ export default function DRSReview({
               style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
               playsInline
             />
+
+            {/* Observable CV 2D Ball Overlay Layer (SVG) */}
+            {showCvOverlay && currentTrackPoint && currentTrackPoint.pixel_x != null && videoInfo?.width && (
+              <Box sx={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                height: '100%',
+                pointerEvents: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <svg
+                  viewBox={`0 0 ${videoInfo.width || 1280} ${videoInfo.height || 720}`}
+                  style={{ width: '100%', height: '100%', position: 'absolute' }}
+                >
+                  {/* Crosshair & target ring */}
+                  <circle
+                    cx={currentTrackPoint.pixel_x}
+                    cy={currentTrackPoint.pixel_y}
+                    r={currentTrackPoint.pixel_radius ? Math.max(12, currentTrackPoint.pixel_radius * 1.5) : 16}
+                    fill="none"
+                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                    strokeWidth={3}
+                    strokeDasharray={currentTrackPoint.is_predicted ? '4 4' : 'none'}
+                  />
+                  <line
+                    x1={currentTrackPoint.pixel_x - 22}
+                    y1={currentTrackPoint.pixel_y}
+                    x2={currentTrackPoint.pixel_x + 22}
+                    y2={currentTrackPoint.pixel_y}
+                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                    strokeWidth={1.5}
+                  />
+                  <line
+                    x1={currentTrackPoint.pixel_x}
+                    y1={currentTrackPoint.pixel_y - 22}
+                    x2={currentTrackPoint.pixel_x}
+                    y2={currentTrackPoint.pixel_y + 22}
+                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                    strokeWidth={1.5}
+                  />
+                  {/* Detection Badge Text */}
+                  <text
+                    x={currentTrackPoint.pixel_x + 18}
+                    y={currentTrackPoint.pixel_y - 12}
+                    fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                    fontSize={14}
+                    fontWeight="bold"
+                    fontFamily="monospace"
+                  >
+                    {currentTrackPoint.is_predicted ? 'KF Predicted' : `Detected (${Math.round((currentTrackPoint.confidence || 0.8) * 100)}%)`}
+                  </text>
+                </svg>
+              </Box>
+            )}
 
             {/* Top-Left Video Badges: Playback Rate & 2D Tracking Reticle Toggle */}
             <Box sx={{ position: 'absolute', top: 12, left: 12, display: 'flex', gap: 1, zIndex: 12 }}>
@@ -1263,7 +1365,7 @@ export default function DRSReview({
             </Paper>
           )}
 
-          {/* 3-Box Official DRS Evaluation */}
+          {/* Official DRS Evaluation Card (Only when verified event evidence exists) */}
           {!trajectoryLoading && (
             <>
               {drs ? (
@@ -1361,19 +1463,14 @@ export default function DRSReview({
                       {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
                     </Typography>
                   </Box>
-
-                  {/* Source label for video mode */}
-                  {isVideoMode && (
-                    <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.68rem', textAlign: 'center' }}>
-                      ⚠ Illustrative estimate — uncalibrated single-camera footage
-                    </Typography>
-                  )}
                 </Paper>
               ) : (
                 !trajectoryError && (
                   <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
-                    <Typography variant="body2" sx={{ color: '#94a3b8' }}>
-                      {isVideoMode ? 'No trajectory data available.' : 'Upload a video or pick a preset to view DRS evaluation.'}
+                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                      {isVideoMode
+                        ? 'DRS LBW decision unavailable: uncalibrated single-camera footage with no verified pad impact event.'
+                        : 'Pick a delivery preset above to view DRS evaluation.'}
                     </Typography>
                   </Paper>
                 )
@@ -1414,6 +1511,22 @@ export default function DRSReview({
             </Box>
 
             {/* 1. Release Speed Gauge & Bounce Speed */}
+            {isVideoMode && activeTrajectory?.release_speed_kmh == null ? (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8', fontWeight: 600 }}>Metric Speed</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 700, color: 'white' }}>— (Uncalibrated)</Typography>
+                </Box>
+                {activeTrajectory?.release_speed_px_per_sec != null && (
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <Typography variant="caption" sx={{ color: '#94a3b8' }}>Pixel Speed</Typography>
+                    <Typography variant="caption" sx={{ fontWeight: 700, color: '#38bdf8' }}>
+                      {activeTrajectory.release_speed_px_per_sec} px/s
+                    </Typography>
+                  </Box>
+                )}
+              </Box>
+            ) : (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontWeight: 600 }}>
@@ -1452,6 +1565,7 @@ export default function DRSReview({
                 </Typography>
               </Box>
             </Box>
+            )}
 
             <Divider sx={{ borderColor: 'rgba(255,255,255,0.08)' }} />
 
@@ -1681,6 +1795,7 @@ export default function DRSReview({
               >
                 Export CSV
               </Button>
+
             </Box>
 
             <Button
@@ -1700,6 +1815,79 @@ export default function DRSReview({
             >
               Capture 3D View (PNG)
             </Button>
+          </Paper>
+
+          {/* Observable Computer Vision Diagnostics Panel */}
+          <Paper sx={{
+            p: 2,
+            bgcolor: '#0f2137',
+            borderRadius: 2,
+            border: '1px solid rgba(255,255,255,0.12)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 1.2
+          }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Assessment sx={{ color: '#a78bfa', fontSize: 20 }} />
+                <Typography variant="caption" sx={{ fontWeight: 700, color: '#a78bfa', textTransform: 'uppercase' }}>
+                  Observable CV Diagnostics
+                </Typography>
+              </Box>
+              {video && (
+                <FormControlLabel
+                  control={
+                    <Switch
+                      size="small"
+                      checked={showCvOverlay}
+                      onChange={(e) => setShowCvOverlay(e.target.checked)}
+                      sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' } }}
+                    />
+                  }
+                  label={<Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem' }}>Overlay</Typography>}
+                  sx={{ m: 0 }}
+                />
+              )}
+            </Box>
+
+            {debugInfo ? (
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8' }}>Frames Analyzed</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: 'white' }}>
+                    {debugInfo.frames_processed ?? '—'}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8' }}>CV Detections (Measured)</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#4ade80' }}>
+                    {debugInfo.measured_points ?? debugInfo.ball_detections ?? '—'}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8' }}>KF Gap Predictions</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#fbbf24' }}>
+                    {debugInfo.predicted_points ?? 0}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8' }}>Pitch Detection</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: debugInfo.pitch_detected ? '#4ade80' : '#fbbf24' }}>
+                    {debugInfo.pitch_detected ? 'Detected (HSV Green)' : 'Default Assumed'}
+                  </Typography>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8' }}>Video Metadata</Typography>
+                  <Typography variant="caption" sx={{ fontWeight: 600, color: '#38bdf8' }}>
+                    {videoInfo?.width ? `${videoInfo.width}×${videoInfo.height} @ ${videoInfo.fps || 30}fps` : 'Standard 30 fps'}
+                  </Typography>
+                </Box>
+              </Box>
+            ) : (
+              <Typography variant="caption" sx={{ color: '#64748b' }}>
+                {isSimulation ? 'Physics simulation delivery — analytical aerodynamics model.' : 'No CV diagnostics available for this clip.'}
+              </Typography>
+            )}
           </Paper>
 
           {/* Interactive Instructions Card */}
@@ -1761,7 +1949,7 @@ export default function DRSReview({
         </Box>
 
         {/* Playback & Speed Controls */}
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
             <IconButton onClick={restart} sx={{ color: 'white' }} aria-label="Restart">
               <Replay fontSize="small" />
@@ -1817,7 +2005,7 @@ export default function DRSReview({
                   }
                 }}
               >
-                {rate === 1 ? '1x' : `${rate}x`}
+                {rate}x
               </Button>
             ))}
           </Box>

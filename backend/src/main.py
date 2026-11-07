@@ -28,12 +28,8 @@ app = FastAPI(
     description="Cricket Decision Review System with Ball Tracking"
 )
 
-# Mount static files for video uploads
-if UPLOAD_DIR.exists():
-    app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
-    logger.info(f"Mounted uploads directory: {UPLOAD_DIR}")
-else:
-    logger.warning(f"Uploads directory not found: {UPLOAD_DIR}")
+# Note: Media files are securely streamed via the authenticated /videos/{video_id}/stream
+# endpoint to enforce user ownership and prevent unauthenticated public media access.
 
 # CORS middleware
 app.add_middleware(

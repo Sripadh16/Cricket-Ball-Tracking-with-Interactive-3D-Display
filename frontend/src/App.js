@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import Dashboard from './pages/Dashboard';
 import AuthPage from './pages/AuthPage';
@@ -67,7 +67,11 @@ function App() {
     setCurrentView('dashboard');
   }, []);
 
+  // Ref to cancel/ignore stale async trajectory fetches when user rapidly switches videos
+  const activeVideoFetchId = useRef(0);
+
   const handleVideoSelect = useCallback(async (video) => {
+    const fetchId = ++activeVideoFetchId.current;
     // Navigate immediately so user sees the video panel while trajectory loads
     setSelectedVideo(video);
     setTrajectoryData(null);
@@ -77,18 +81,23 @@ function App() {
 
     try {
       const response = await api.get(`/videos/${video.id}/trajectory`);
+      if (fetchId !== activeVideoFetchId.current) return;
       setTrajectoryData(response.data);
     } catch (err) {
+      if (fetchId !== activeVideoFetchId.current) return;
       console.error('Failed to load trajectory:', err);
       setTrajectoryData(null);
       // 404 = video not yet processed; anything else = real error
       setTrajectoryError(err.response?.status === 404 ? 'not_processed' : 'load_error');
     } finally {
-      setTrajectoryLoading(false);
+      if (fetchId === activeVideoFetchId.current) {
+        setTrajectoryLoading(false);
+      }
     }
   }, []);
 
   const handleLaunchDemo = useCallback(() => {
+    activeVideoFetchId.current++;
     setSelectedVideo(null);
     setTrajectoryData(null);
     setTrajectoryLoading(false);
@@ -97,6 +106,7 @@ function App() {
   }, []);
 
   const handleBackToDashboard = useCallback(() => {
+    activeVideoFetchId.current++;
     setCurrentView('dashboard');
     setSelectedVideo(null);
     setTrajectoryData(null);

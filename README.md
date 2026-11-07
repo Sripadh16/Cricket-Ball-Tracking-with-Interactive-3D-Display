@@ -88,7 +88,7 @@ Backend (FastAPI + SQLite)
 5. **Gap filling** — predict up to `MAX_PREDICTION_GAP_S = 0.2 s` / 5 consecutive frames
 6. **`is_predicted` tagging** — smoothed predicted points vs real measurements are stored separately
 7. **LBW analysis** — bounce detection, extrapolation to stump plane, illustrative verdict
-8. **debug_info** — `pitch_detected`, `stumps_detected`, `geometry_source`, `predicted_points`, `measured_points` all stored and returned to frontend
+8. **debug_info & Observable CV** — `pitch_detected`, `stumps_detected`, `geometry_source`, `predicted_points`, `measured_points` all stored and returned; interactive 2D SVG ball tracking overlay on video plus Observable CV Diagnostics panel in UI
 
 **Known CV limitations:**
 - `_pixel_to_3d` is a heuristic linear lift — not a calibrated camera projection. Speed, height and 3D position are illustrative estimates for uncalibrated single-camera footage.
@@ -108,7 +108,7 @@ Backend (FastAPI + SQLite)
 3. Orbit the scene (drag), zoom in on stumps, switch to Batsman POV camera
 4. Show the three DRS boxes: Pitching / Impact / Wickets → decision banner
 5. Switch to "Sharp Bouncer – Missing Stumps" — note "NOT OUT" verdict, different trajectory arc
-6. > *"These use a parametric physics model — inswing, seam, bounce. Same model as Hawk-Eye's teaching demos. This is what lets us show clean geometry without needing a perfect video."*
+6. > *"These use a parametric physics model based on classical flight dynamics equations — inswing, seam, bounce. This is what lets us demonstrate clean geometry and DRS decision boundaries without needing a studio multi-camera setup."*
 
 ### 2 – Upload and CV analysis (90 s)
 1. Go back to Dashboard → **Upload Video** → select your test clip
@@ -131,7 +131,7 @@ Backend (FastAPI + SQLite)
 ### 5 – Results summary (30 s)
 | Metric | Value |
 |--------|-------|
-| Backend tests | 23 / 23 pass |
+| Backend tests | 48 / 48 pass |
 | Frontend build | 0 errors |
 | Simulation presets | 4 (inswinger, off-cutter, bouncer, leg spin) |
 | Real-video tracking | Accuracy depends on footage — uncalibrated, single camera |

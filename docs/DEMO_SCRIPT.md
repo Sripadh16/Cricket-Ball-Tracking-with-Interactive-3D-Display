@@ -42,7 +42,12 @@ This five-minute script walks through the system for an evaluation or viva prese
 3. Select an existing processed video or upload a short bowling clip:
    - Watch the upload progress and in-flight tracking processing.
 4. In the **Split View**:
-   - The synchronized 2D video appears on the left, 3D Hawk-Eye on the right.
+   - The synchronized 2D video appears on the left with an **interactive SVG Ball Tracking Overlay** (showing real-time detected crosshairs, confidence scores, and Kalman predictions).
+   - Show the **Observable CV Diagnostics panel** below the video:
+     - Frames analyzed and measured vs predicted point breakdown.
+     - Pitch and stumps boundary detection source (`detected` vs `assumed`).
+     - Video metadata (source FPS, dimensions, frame count).
+     - "Show Tracking Overlay" toggle to inspect raw footage vs CV tracking annotations.
    - Drag the timeline scrubber to view simultaneous frame progression and 3D ball location.
    - Point out the amber **ILLUSTRATIVE** chip in the Ball Telemetry sidebar.
    - Highlight: *"Speed from single-camera video is an uncalibrated estimate, so we report illustrative pixel velocity without fabricating metric certitude."*
@@ -53,7 +58,8 @@ This five-minute script walks through the system for an evaluation or viva prese
 - **Pixel-Space Gating**: Show `ball_tracking_service.py` lines where candidate distance and velocity gating are performed in 2D image pixel space before lifting to 3D.
 - **dt-Coupled Kalman Filter**: Show the variable-$\Delta t$ transition matrix in `_apply_kalman_filter` that preserves point metadata (`is_predicted`, `pixel_x`, `pixel_y`, `frame_idx`).
 - **Resilience & Fallback**: Show `WebGLErrorBoundary` in `HawkEyeViewer.js` protecting the UI from Canvas context failures.
-- **Transactional Reprocessing**: Show how the backend preserves existing trajectories in SQLite if re-tracking fails.
+- **Transactional Reprocessing**: Show how the backend executes replacement in a single atomic transaction and rolls back to preserve existing trajectories if tracking or persistence fails.
+- **Access Boundary & Secure Media Streaming**: Show that `GET /videos/{id}/stream` enforces user ownership (supporting both Bearer tokens and `?token=` query parameters for standard HTML5 `<video>` tags), preventing unauthorized access to private clips.
 
 ---
 
@@ -64,11 +70,14 @@ This five-minute script walks through the system for an evaluation or viva prese
    .venv\Scripts\python.exe scripts/evaluate_tracking.py --demo
    ```
 2. Display the printed benchmark report:
-   - **Precision & Recall**: Evaluated against ground-truth frame centers within a 15 px threshold.
-   - **Mean & RMSE Center Error**: Quantifying pixel localization accuracy.
-   - **Predicted Frame Fraction**: Transparently accounting for gap-filling vs measured CV points.
+   - **Section 1: Raw CV Detector Performance**: Evaluates strictly measured detections against ground-truth frames (Precision, Recall, F1, RMSE).
+   - **Section 2: Tracking Continuity & Gap Filling**: Evaluates combined pipeline performance (Gap filling fraction, max consecutive predictions, combined track recall).
+   - Run evaluation on sample clip annotations:
+     ```bash
+     .venv\Scripts\python.exe scripts/evaluate_tracking.py --ground-truth scripts/data/sample_ground_truth.csv --tracking-result scripts/data/sample_tracking_result.json
+     ```
 3. Conclude:
    ```bash
    .venv\Scripts\python.exe -m pytest tests/ -v
    ```
-   - Show all **41 passed regression and integration tests**.
+   - Show all **48 passed regression, security, and integration tests**.

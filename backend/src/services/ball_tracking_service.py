@@ -2330,7 +2330,11 @@ class BallTrackingService:
         return result
 
     def _analyze_lbw_decisions(self, tracking_data):
-        """Analyze LBW decisions with complete Hawk-Eye DRS physics extrapolation"""
+        """
+        Analyze delivery trajectory for bounce, impact, and DRS decisions.
+        Leaves physical event semantics unknown unless verified by curvature evidence
+        or explicitly provided (e.g. from physics simulation or annotations).
+        """
         lbw_analysis = []
         drs_data = {
             "pre_bounce_points": [],
@@ -2342,7 +2346,8 @@ class BallTrackingService:
             "drs_evaluation": None,
             "release_speed_kmh": None,
             "bounce_speed_kmh": None,
-            "length_zone": "Good Length"
+            "release_speed_px_per_sec": None,
+            "length_zone": None
         }
 
         try:
@@ -2350,171 +2355,215 @@ class BallTrackingService:
             if not trajectory or len(trajectory) < 3:
                 return lbw_analysis, drs_data
 
-            # 1. Identify Bounce Point (minimum z along pitch)
-            min_z = float('inf')
-            min_idx = 0
-            for i, p in enumerate(trajectory):
-                if p['z'] < min_z:
-                    min_z = p['z']
-                    min_idx = i
+            is_simulation = tracking_data.get('is_simulation', False)
+            has_pad_impact = tracking_data.get('pad_impact_verified', False) or is_simulation
 
-            bounce_point = {
-                "x": round(float(trajectory[min_idx]['x']), 4),
-                "y": round(float(trajectory[min_idx]['y']), 4),
-                "z": 0.036,
-                "t": round(float(trajectory[min_idx]['t']), 4),
-                "phase": "bounce"
-            }
-            drs_data["bounce_point"] = bounce_point
+            # 1. Physical Bounce Detection
+            # A real pitch bounce requires curvature evidence: downward descent before,
+            # upward ascent after, at an interior trajectory point near pitch level.
+            bounce_idx = None
+            if len(trajectory) >= 5:
+                # Find candidate minimum z among interior points (skip endpoints)
+                min_z = float('inf')
+                cand_idx = None
+                for i in range(1, len(trajectory) - 1):
+                    if trajectory[i]['z'] < min_z:
+                        min_z = trajectory[i]['z']
+                        cand_idx = i
 
-            # Pre-bounce and Post-bounce segmentation
-            pre_bounce = [dict(p, phase="pre_bounce") for p in trajectory[:min_idx]]
-            post_bounce = [dict(p, phase="post_bounce") for p in trajectory[min_idx:]]
-            drs_data["pre_bounce_points"] = pre_bounce
-            drs_data["post_bounce_points"] = post_bounce
+                if cand_idx is not None and cand_idx >= 1 and cand_idx <= len(trajectory) - 2:
+                    z_curr = trajectory[cand_idx]['z']
+                    z_prev = trajectory[cand_idx - 1]['z']
+                    z_next = trajectory[cand_idx + 1]['z']
+                    # Verify downward descent into minimum and upward ascent out of minimum
+                    descending = (z_prev - z_curr) > 0.03
+                    ascending = (z_next - z_curr) > 0.03
+                    near_ground = z_curr <= 0.45  # within 45 cm of pitch
 
-            # Impact point: last tracked ball position
-            impact_point = dict(post_bounce[-1], phase="impact") if post_bounce else dict(trajectory[-1], phase="impact")
-            drs_data["impact_point"] = impact_point
+                    if (descending and ascending and near_ground) or is_simulation:
+                        bounce_idx = cand_idx
 
-            # Calculate velocities for extrapolation
-            if len(post_bounce) >= 2:
-                dt = max(0.01, post_bounce[-1]['t'] - post_bounce[0]['t'])
-                vx = (post_bounce[-1]['x'] - post_bounce[0]['x']) / dt
-                vy = max(5.0, (post_bounce[-1]['y'] - post_bounce[0]['y']) / dt)
-                if post_bounce[-1].get('parabolic_fit'):
-                    # Analytical vertical velocity from fitted parabola: vz(tau) = vz0 - 9.8 * tau
-                    vz0 = float(post_bounce[-1]['parabolic_fit']['vz0'])
-                    tau_impact = max(0.0, post_bounce[-1]['t'] - post_bounce[0]['t'])
-                    vz = vz0 - 9.8 * tau_impact
+            if bounce_idx is not None:
+                bounce_point = {
+                    "x": round(float(trajectory[bounce_idx]['x']), 4),
+                    "y": round(float(trajectory[bounce_idx]['y']), 4),
+                    "z": max(0.036, round(float(trajectory[bounce_idx]['z']), 4)),
+                    "t": round(float(trajectory[bounce_idx]['t']), 4),
+                    "phase": "bounce"
+                }
+                drs_data["bounce_point"] = bounce_point
+                drs_data["pre_bounce_points"] = [dict(p, phase="pre_bounce") for p in trajectory[:bounce_idx]]
+                drs_data["post_bounce_points"] = [dict(p, phase="post_bounce") for p in trajectory[bounce_idx:]]
+
+                # Length zone calculation
+                STUMP_Y = self.pitch_length / 2.0
+                dist_from_stumps = STUMP_Y - bounce_point['y']
+                if dist_from_stumps < 2.0:
+                    drs_data["length_zone"] = "Yorker"
+                elif dist_from_stumps < 4.0:
+                    drs_data["length_zone"] = "Full"
+                elif dist_from_stumps < 7.0:
+                    drs_data["length_zone"] = "Good Length"
+                elif dist_from_stumps < 9.5:
+                    drs_data["length_zone"] = "Short of Length"
                 else:
-                    vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
+                    drs_data["length_zone"] = "Bouncer"
             else:
-                vx, vy, vz = 0.0, 30.0, 1.5
+                # No verified pitch bounce — treat entire track as unsegmented trajectory
+                drs_data["bounce_point"] = None
+                drs_data["pre_bounce_points"] = [dict(p, phase="trajectory") for p in trajectory]
+                drs_data["post_bounce_points"] = []
+                drs_data["length_zone"] = None
 
-            # Hawk-Eye Physics Extrapolation to Stumps plane (Y = pitch_length / 2)
-            STUMP_Y = self.pitch_length / 2.0
-            extrapolated = []
-            curr_x, curr_y, curr_z = impact_point['x'], impact_point['y'], max(0.05, impact_point['z'])
-            curr_t = impact_point['t']
-            step_dt = 0.016
+            # 2. Impact Point & DRS Evaluation
+            # Only evaluate LBW if there is verified pad impact evidence or explicit simulation
+            if has_pad_impact and drs_data["bounce_point"] is not None:
+                post_bounce = drs_data["post_bounce_points"]
+                impact_point = dict(post_bounce[-1], phase="impact") if post_bounce else dict(trajectory[-1], phase="impact")
+                drs_data["impact_point"] = impact_point
 
-            while curr_y <= STUMP_Y + 0.2:
-                extrapolated.append({
-                    "x": round(float(curr_x), 4),
-                    "y": round(float(curr_y), 4),
-                    "z": round(float(max(0.02, curr_z)), 4),
-                    "t": round(float(curr_t), 4),
-                    "phase": "extrapolated",
-                    "confidence": 0.85
-                })
-                vz -= 9.81 * step_dt
-                curr_x += vx * step_dt
-                curr_y += vy * step_dt
-                curr_z += vz * step_dt
-                curr_t += step_dt
+                if len(post_bounce) >= 2:
+                    dt = max(0.01, post_bounce[-1]['t'] - post_bounce[0]['t'])
+                    vx = (post_bounce[-1]['x'] - post_bounce[0]['x']) / dt
+                    vy = max(5.0, (post_bounce[-1]['y'] - post_bounce[0]['y']) / dt)
+                    if post_bounce[-1].get('parabolic_fit'):
+                        # Analytical vertical velocity from fitted parabola: vz(tau) = vz0 - 9.8 * tau
+                        vz0 = float(post_bounce[-1]['parabolic_fit']['vz0'])
+                        tau_impact = max(0.0, post_bounce[-1]['t'] - post_bounce[0]['t'])
+                        vz = vz0 - 9.8 * tau_impact
+                    else:
+                        vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
+                else:
+                    vx, vy, vz = 0.0, 30.0, 1.5
 
-            drs_data["extrapolated_points"] = extrapolated
+                STUMP_Y = self.pitch_length / 2.0
+                extrapolated = []
+                curr_x, curr_y, curr_z = impact_point['x'], impact_point['y'], max(0.05, impact_point['z'])
+                curr_t = impact_point['t']
+                step_dt = 0.016
 
-            # Stumps plane target
-            stump_target_x = curr_x
-            stump_target_z = max(0.02, curr_z)
-            for ep in extrapolated:
-                if ep['y'] >= STUMP_Y:
-                    stump_target_x = ep['x']
-                    stump_target_z = ep['z']
-                    break
+                while curr_y <= STUMP_Y + 0.2:
+                    extrapolated.append({
+                        "x": round(float(curr_x), 4),
+                        "y": round(float(curr_y), 4),
+                        "z": round(float(max(0.02, curr_z)), 4),
+                        "t": round(float(curr_t), 4),
+                        "phase": "extrapolated",
+                        "confidence": 0.85
+                    })
+                    vz -= 9.81 * step_dt
+                    curr_x += vx * step_dt
+                    curr_y += vy * step_dt
+                    curr_z += vz * step_dt
+                    curr_t += step_dt
 
-            # Evaluate DRS ICC criteria using canonical constants from config
-            STUMP_WIDTH = PITCH_CONFIG.get("stump_width_m", 0.2286)
-            stump_half_w = STUMP_WIDTH / 2.0
-            stump_top = PITCH_CONFIG.get("stump_height_m", 0.711)
+                drs_data["extrapolated_points"] = extrapolated
 
-            # Pitching
-            if abs(bounce_point['x']) <= stump_half_w:
-                pitching_v = "IN LINE"
-            elif bounce_point['x'] > stump_half_w:
-                pitching_v = "OUTSIDE OFF"
+                # Stumps plane target
+                stump_target_x = curr_x
+                stump_target_z = max(0.02, curr_z)
+                for ep in extrapolated:
+                    if ep['y'] >= STUMP_Y:
+                        stump_target_x = ep['x']
+                        stump_target_z = ep['z']
+                        break
+
+                STUMP_WIDTH = PITCH_CONFIG.get("stump_width_m", 0.2286)
+                stump_half_w = STUMP_WIDTH / 2.0
+                stump_top = PITCH_CONFIG.get("stump_height_m", 0.711)
+
+                # Pitching
+                if abs(drs_data["bounce_point"]['x']) <= stump_half_w:
+                    pitching_v = "IN LINE"
+                elif drs_data["bounce_point"]['x'] > stump_half_w:
+                    pitching_v = "OUTSIDE OFF"
+                else:
+                    pitching_v = "OUTSIDE LEG"
+
+                # Impact
+                if abs(impact_point['x']) <= stump_half_w:
+                    impact_v = "IN LINE"
+                else:
+                    impact_v = "OUTSIDE"
+
+                # Wickets
+                hit_h = (stump_target_z <= stump_top) and (stump_target_z >= 0.03)
+                clip_h = abs(stump_target_z - stump_top) <= 0.036
+                hit_w = abs(stump_target_x) <= stump_half_w
+                clip_w = abs(abs(stump_target_x) - stump_half_w) <= 0.036
+
+                if hit_h and hit_w:
+                    wickets_v = "HITTING"
+                elif (hit_h and clip_w) or (clip_h and hit_w):
+                    wickets_v = "UMPIRE'S CALL"
+                else:
+                    wickets_v = "MISSING"
+
+                # Overall Decision
+                if pitching_v == "OUTSIDE LEG":
+                    decision = "NOT OUT (Pitched Outside Leg)"
+                elif impact_v == "OUTSIDE":
+                    decision = "NOT OUT (Impact Outside Off)"
+                elif wickets_v == "HITTING":
+                    decision = "OUT"
+                elif wickets_v == "UMPIRE'S CALL":
+                    decision = "UMPIRE'S CALL"
+                else:
+                    decision = "NOT OUT (Missing Wickets)"
+
+                hit_stump = "Middle Stump"
+                if stump_target_x < -0.04:
+                    hit_stump = "Leg Stump"
+                elif stump_target_x > 0.04:
+                    hit_stump = "Off Stump"
+
+                drs_data["stump_plane_target"] = {
+                    "x": round(float(stump_target_x), 4),
+                    "y": STUMP_Y,
+                    "z": round(float(stump_target_z), 4),
+                    "hit_stump": hit_stump
+                }
+
+                drs_data["drs_evaluation"] = {
+                    "decision": decision,
+                    "pitching": pitching_v,
+                    "impact": impact_v,
+                    "wickets": wickets_v,
+                    "hit_stump": hit_stump
+                }
             else:
-                pitching_v = "OUTSIDE LEG"
+                # Unverified impact: do not fabricate LBW verdicts for real video without pad contact
+                drs_data["impact_point"] = None
+                drs_data["extrapolated_points"] = []
+                drs_data["stump_plane_target"] = None
+                drs_data["drs_evaluation"] = None
 
-            # Impact
-            if abs(impact_point['x']) <= stump_half_w:
-                impact_v = "IN LINE"
-            else:
-                impact_v = "OUTSIDE"
-
-            # Wickets
-            hit_h = (stump_target_z <= stump_top) and (stump_target_z >= 0.03)
-            clip_h = abs(stump_target_z - stump_top) <= 0.036
-            hit_w = abs(stump_target_x) <= stump_half_w
-            clip_w = abs(abs(stump_target_x) - stump_half_w) <= 0.036
-
-            if hit_h and hit_w:
-                wickets_v = "HITTING"
-            elif (hit_h and clip_w) or (clip_h and hit_w):
-                wickets_v = "UMPIRE'S CALL"
-            else:
-                wickets_v = "MISSING"
-
-            # Overall Decision
-            if pitching_v == "OUTSIDE LEG":
-                decision = "NOT OUT (Pitched Outside Leg)"
-            elif impact_v == "OUTSIDE":
-                decision = "NOT OUT (Impact Outside Off)"
-            elif wickets_v == "HITTING":
-                decision = "OUT"
-            elif wickets_v == "UMPIRE'S CALL":
-                decision = "UMPIRE'S CALL"
-            else:
-                decision = "NOT OUT (Missing Wickets)"
-
-            hit_stump = "Middle Stump"
-            if stump_target_x < -0.04:
-                hit_stump = "Leg Stump"
-            elif stump_target_x > 0.04:
-                hit_stump = "Off Stump"
-
-            drs_data["stump_plane_target"] = {
-                "x": round(float(stump_target_x), 4),
-                "y": STUMP_Y,
-                "z": round(float(stump_target_z), 4),
-                "hit_stump": hit_stump
-            }
-
-            drs_data["drs_evaluation"] = {
-                "decision": decision,
-                "pitching": pitching_v,
-                "impact": impact_v,
-                "wickets": wickets_v,
-                "hit_stump": hit_stump
-            }
-
-            # Speed calculation
+            # 3. Speed calculation
+            # Real uncalibrated single-camera video cannot measure calibrated km/h speeds.
+            # Leave release_speed_kmh as None for uncalibrated footage.
+            # Compute 2D pixel speed in px/sec if pixel coordinates are available.
             if len(trajectory) >= 2:
-                total_dist = np.sqrt(
-                    (trajectory[-1]['x'] - trajectory[0]['x'])**2 +
-                    (trajectory[-1]['y'] - trajectory[0]['y'])**2 +
-                    (trajectory[-1]['z'] - trajectory[0]['z'])**2
-                )
                 total_t = max(0.01, trajectory[-1]['t'] - trajectory[0]['t'])
-                speed_kmh = round(float((total_dist / total_t) * 3.6), 1)
-                # NOTE: speed from real video is an uncalibrated estimate - not a measured value
-                drs_data["release_speed_kmh"] = round(float(speed_kmh), 1)
-                drs_data["bounce_speed_kmh"] = None  # Cannot estimate from uncalibrated footage
+                first_px = trajectory[0].get('pixel_x')
+                last_px = trajectory[-1].get('pixel_x')
+                first_py = trajectory[0].get('pixel_y')
+                last_py = trajectory[-1].get('pixel_y')
 
-            # Length zone
-            dist_from_stumps = STUMP_Y - bounce_point['y']
-            if dist_from_stumps < 2.0:
-                drs_data["length_zone"] = "Yorker"
-            elif dist_from_stumps < 4.0:
-                drs_data["length_zone"] = "Full"
-            elif dist_from_stumps < 7.0:
-                drs_data["length_zone"] = "Good Length"
-            elif dist_from_stumps < 9.5:
-                drs_data["length_zone"] = "Short of Length"
-            else:
-                drs_data["length_zone"] = "Bouncer"
+                if first_px is not None and last_px is not None and first_py is not None and last_py is not None:
+                    px_dist = np.sqrt((last_px - first_px)**2 + (last_py - first_py)**2)
+                    drs_data["release_speed_px_per_sec"] = round(float(px_dist / total_t), 1)
+
+                if is_simulation:
+                    total_dist = np.sqrt(
+                        (trajectory[-1]['x'] - trajectory[0]['x'])**2 +
+                        (trajectory[-1]['y'] - trajectory[0]['y'])**2 +
+                        (trajectory[-1]['z'] - trajectory[0]['z'])**2
+                    )
+                    drs_data["release_speed_kmh"] = round(float((total_dist / total_t) * 3.6), 1)
+                else:
+                    drs_data["release_speed_kmh"] = None
+
+            drs_data["bounce_speed_kmh"] = None
 
         except Exception as e:
             logger.error(f"Error in Hawk-Eye DRS analysis: {e}")
