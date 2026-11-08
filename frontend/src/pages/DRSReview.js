@@ -50,6 +50,7 @@ export default function DRSReview({
   const [activeTrajectory, setActiveTrajectory] = useState(initialTrajectory);
   const [loadingPreset, setLoadingPreset] = useState(false);
   const [showCvOverlay, setShowCvOverlay] = useState(true);
+  const [showCvTrail, setShowCvTrail] = useState(true);
 
   // Official DRS Review Session State
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
@@ -652,6 +653,36 @@ export default function DRSReview({
     setFeedbackMsg('Trajectory telemetry exported successfully as JSON!');
   };
 
+  const handleExportCVDiagnostics = () => {
+    const payload = {
+      timestamp: new Date().toISOString(),
+      video_id: video?.id || currentDeliveryType,
+      video_info: videoInfo,
+      debug_info: debugInfo,
+      measured_points: debugInfo?.measured_points ?? 0,
+      predicted_points: debugInfo?.predicted_points ?? 0,
+      confidence_score: activeTrajectory?.confidence_score,
+      drs_evaluation: drs,
+      sample_points: (activeTrajectory?.points || []).map(p => ({
+        t: p.t,
+        pixel_x: p.pixel_x,
+        pixel_y: p.pixel_y,
+        is_predicted: p.is_predicted,
+        confidence: p.confidence
+      }))
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `cv_diagnostics_${video?.id || currentDeliveryType}_${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setFeedbackMsg('Observable CV diagnostics exported successfully as JSON!');
+  };
+
   const handleExportCSV = () => {
     if (!activeTrajectory) {
       alert('No trajectory data available to export.');
@@ -969,7 +1000,7 @@ export default function DRSReview({
             />
 
             {/* Observable CV 2D Ball Overlay Layer (SVG) */}
-            {showCvOverlay && currentTrackPoint && currentTrackPoint.pixel_x != null && videoInfo?.width && (
+            {(showCvOverlay || showCvTrail) && videoInfo?.width && (
               <Box sx={{
                 position: 'absolute',
                 top: 0,
@@ -985,43 +1016,62 @@ export default function DRSReview({
                   viewBox={`0 0 ${videoInfo.width || 1280} ${videoInfo.height || 720}`}
                   style={{ width: '100%', height: '100%', position: 'absolute' }}
                 >
+                  {/* Historical 2D pixel trajectory trail breadcrumbs */}
+                  {showCvTrail && activeTrajectory?.points && (
+                    <polyline
+                      points={activeTrajectory.points
+                        .filter(p => (p.t || 0) <= currentTime && p.pixel_x != null && p.pixel_y != null)
+                        .map(p => `${p.pixel_x},${p.pixel_y}`)
+                        .join(' ')}
+                      fill="none"
+                      stroke="rgba(0, 229, 255, 0.75)"
+                      strokeWidth={3}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  )}
+
                   {/* Crosshair & target ring */}
-                  <circle
-                    cx={currentTrackPoint.pixel_x}
-                    cy={currentTrackPoint.pixel_y}
-                    r={currentTrackPoint.pixel_radius ? Math.max(12, currentTrackPoint.pixel_radius * 1.5) : 16}
-                    fill="none"
-                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                    strokeWidth={3}
-                    strokeDasharray={currentTrackPoint.is_predicted ? '4 4' : 'none'}
-                  />
-                  <line
-                    x1={currentTrackPoint.pixel_x - 22}
-                    y1={currentTrackPoint.pixel_y}
-                    x2={currentTrackPoint.pixel_x + 22}
-                    y2={currentTrackPoint.pixel_y}
-                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                    strokeWidth={1.5}
-                  />
-                  <line
-                    x1={currentTrackPoint.pixel_x}
-                    y1={currentTrackPoint.pixel_y - 22}
-                    x2={currentTrackPoint.pixel_x}
-                    y2={currentTrackPoint.pixel_y + 22}
-                    stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                    strokeWidth={1.5}
-                  />
-                  {/* Detection Badge Text */}
-                  <text
-                    x={currentTrackPoint.pixel_x + 18}
-                    y={currentTrackPoint.pixel_y - 12}
-                    fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                    fontSize={14}
-                    fontWeight="bold"
-                    fontFamily="monospace"
-                  >
-                    {currentTrackPoint.is_predicted ? 'KF Predicted' : `Detected (${Math.round((currentTrackPoint.confidence || 0.8) * 100)}%)`}
-                  </text>
+                  {showCvOverlay && currentTrackPoint && currentTrackPoint.pixel_x != null && (
+                    <>
+                      <circle
+                        cx={currentTrackPoint.pixel_x}
+                        cy={currentTrackPoint.pixel_y}
+                        r={currentTrackPoint.pixel_radius ? Math.max(12, currentTrackPoint.pixel_radius * 1.5) : 16}
+                        fill="none"
+                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                        strokeWidth={3}
+                        strokeDasharray={currentTrackPoint.is_predicted ? '4 4' : 'none'}
+                      />
+                      <line
+                        x1={currentTrackPoint.pixel_x - 22}
+                        y1={currentTrackPoint.pixel_y}
+                        x2={currentTrackPoint.pixel_x + 22}
+                        y2={currentTrackPoint.pixel_y}
+                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                        strokeWidth={1.5}
+                      />
+                      <line
+                        x1={currentTrackPoint.pixel_x}
+                        y1={currentTrackPoint.pixel_y - 22}
+                        x2={currentTrackPoint.pixel_x}
+                        y2={currentTrackPoint.pixel_y + 22}
+                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                        strokeWidth={1.5}
+                      />
+                      {/* Detection Badge Text */}
+                      <text
+                        x={currentTrackPoint.pixel_x + 18}
+                        y={currentTrackPoint.pixel_y - 12}
+                        fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
+                        fontSize={14}
+                        fontWeight="bold"
+                        fontFamily="monospace"
+                      >
+                        {currentTrackPoint.is_predicted ? 'KF Predicted' : `Detected (${Math.round((currentTrackPoint.confidence || 0.8) * 100)}%)`}
+                      </text>
+                    </>
+                  )}
                 </svg>
               </Box>
             )}
@@ -1835,18 +1885,32 @@ export default function DRSReview({
                 </Typography>
               </Box>
               {video && (
-                <FormControlLabel
-                  control={
-                    <Switch
-                      size="small"
-                      checked={showCvOverlay}
-                      onChange={(e) => setShowCvOverlay(e.target.checked)}
-                      sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' } }}
-                    />
-                  }
-                  label={<Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem' }}>Overlay</Typography>}
-                  sx={{ m: 0 }}
-                />
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        size="small"
+                        checked={showCvOverlay}
+                        onChange={(e) => setShowCvOverlay(e.target.checked)}
+                        sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' } }}
+                      />
+                    }
+                    label={<Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem' }}>Crosshair</Typography>}
+                    sx={{ m: 0 }}
+                  />
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        size="small"
+                        checked={showCvTrail}
+                        onChange={(e) => setShowCvTrail(e.target.checked)}
+                        sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#a78bfa' } }}
+                      />
+                    }
+                    label={<Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem' }}>Trail</Typography>}
+                    sx={{ m: 0 }}
+                  />
+                </Box>
               )}
             </Box>
 
@@ -1870,6 +1934,27 @@ export default function DRSReview({
                     {debugInfo.predicted_points ?? 0}
                   </Typography>
                 </Box>
+
+                {/* Measured Detection Continuity Bar */}
+                {debugInfo.frames_processed > 0 && (
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.3, my: 0.4 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem' }}>Detector Continuity</Typography>
+                      <Typography variant="caption" sx={{ color: '#00e5ff', fontWeight: 700, fontSize: '0.68rem' }}>
+                        {Math.round(((debugInfo.measured_points || debugInfo.ball_detections || 0) / Math.max(1, debugInfo.frames_processed)) * 100)}% Measured
+                      </Typography>
+                    </Box>
+                    <Box sx={{ width: '100%', height: 5, bgcolor: 'rgba(255,255,255,0.08)', borderRadius: 2.5, overflow: 'hidden' }}>
+                      <Box sx={{
+                        width: `${Math.min(100, Math.round(((debugInfo.measured_points || debugInfo.ball_detections || 0) / Math.max(1, debugInfo.frames_processed)) * 100))}%`,
+                        height: '100%',
+                        bgcolor: '#00e5ff',
+                        borderRadius: 2.5
+                      }} />
+                    </Box>
+                  </Box>
+                )}
+
                 <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                   <Typography variant="caption" sx={{ color: '#94a3b8' }}>Pitch Detection</Typography>
                   <Typography variant="caption" sx={{ fontWeight: 600, color: debugInfo.pitch_detected ? '#4ade80' : '#fbbf24' }}>
@@ -1882,6 +1967,27 @@ export default function DRSReview({
                     {videoInfo?.width ? `${videoInfo.width}×${videoInfo.height} @ ${videoInfo.fps || 30}fps` : 'Standard 30 fps'}
                   </Typography>
                 </Box>
+
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={handleExportCVDiagnostics}
+                  startIcon={<DataObject sx={{ fontSize: 14 }} />}
+                  sx={{
+                    mt: 0.8,
+                    color: '#a78bfa',
+                    borderColor: 'rgba(167, 139, 250, 0.4)',
+                    fontSize: '0.68rem',
+                    py: 0.3,
+                    textTransform: 'none',
+                    '&:hover': {
+                      borderColor: '#a78bfa',
+                      bgcolor: 'rgba(167, 139, 250, 0.1)'
+                    }
+                  }}
+                >
+                  Export CV Diagnostics JSON
+                </Button>
               </Box>
             ) : (
               <Typography variant="caption" sx={{ color: '#64748b' }}>

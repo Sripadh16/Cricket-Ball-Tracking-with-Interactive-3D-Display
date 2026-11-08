@@ -296,6 +296,62 @@ def test_video_streaming_endpoint(client, test_users):
             os.remove(temp_media.name)
 
 
+def test_video_diagnostics_endpoint(client, test_users):
+    """Diagnostics endpoint returns CV observable metrics with two-user ownership isolation."""
+    db = _TestingSessionLocal()
+    user_a = test_users["user_a"]
+    user_b = test_users["user_b"]
+
+    video = Video(
+        id=str(uuid.uuid4()),
+        user_id=user_a["id"],
+        filename="cv_diag_test.mp4",
+        file_path="/tmp/cv_diag_test.mp4",
+        status="processed"
+    )
+    db.add(video)
+    db.commit()
+
+    traj = Trajectory(
+        id=str(uuid.uuid4()),
+        video_id=video.id,
+        points=[
+            {"x": 0.0, "y": 1.0, "z": 0.5, "t": 0.0, "is_predicted": False, "confidence": 0.92, "pixel_x": 320, "pixel_y": 180},
+            {"x": 0.0, "y": 2.0, "z": 0.6, "t": 0.1, "is_predicted": False, "confidence": 0.90, "pixel_x": 325, "pixel_y": 190},
+            {"x": 0.0, "y": 3.0, "z": 0.7, "t": 0.2, "is_predicted": True, "confidence": 0.75, "pixel_x": 330, "pixel_y": 200},
+        ],
+        timestamps=[0.0, 0.1, 0.2],
+        confidence_score=0.91,
+        ball_detected=True,
+        additional_data={
+            "debug_info": {"frames_processed": 3, "ball_detections": 2, "pitch_detected": True, "stumps_detected": True},
+            "video_info": {"fps": 30.0, "width": 1280, "height": 720}
+        }
+    )
+    db.add(traj)
+    db.commit()
+    db.close()
+
+    # 1. Anonymous access -> 401
+    assert client.get(f"/videos/{video.id}/diagnostics").status_code == 401
+
+    # 2. User B access -> 403 Forbidden
+    resp_b = client.get(f"/videos/{video.id}/diagnostics", headers=user_b["headers"])
+    assert resp_b.status_code == 403
+
+    # 3. User A access -> 200 with diagnostics
+    resp_a = client.get(f"/videos/{video.id}/diagnostics", headers=user_a["headers"])
+    assert resp_a.status_code == 200
+    diag = resp_a.json()
+    assert diag["video_id"] == video.id
+    assert diag["measured_points"] == 2
+    assert diag["predicted_points"] == 1
+    assert diag["total_trajectory_points"] == 3
+    assert diag["measured_ratio"] == 0.667
+    assert diag["pitch_detected"] is True
+    assert diag["stumps_detected"] is True
+
+
 def test_review_ownership_isolation(client, test_users):
     """Reviews enforce ownership on creation and retrieval."""
     db = _TestingSessionLocal()

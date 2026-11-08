@@ -539,6 +539,55 @@ async def get_trajectory(
     }
 
 
+@router.get("/{video_id}/diagnostics")
+async def get_video_diagnostics(
+    video_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Retrieve detailed computer vision pipeline diagnostics, Kalman gap analysis, and landmark metrics."""
+    video_service = VideoService(db)
+    video = video_service.get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+
+    trajectory = db.query(Trajectory).filter(Trajectory.video_id == video_id).first()
+    if not trajectory:
+        raise HTTPException(status_code=404, detail="Trajectory not found")
+
+    additional_data = trajectory.additional_data if isinstance(trajectory.additional_data, dict) else {}
+    debug_info = additional_data.get("debug_info", {})
+    video_info = additional_data.get("video_info", {})
+    points = trajectory.points or []
+
+    measured = [p for p in points if not p.get("is_predicted", False)]
+    predicted = [p for p in points if p.get("is_predicted", False)]
+    confidences = [p.get("confidence", 0.0) for p in measured if p.get("confidence") is not None]
+    avg_conf = (sum(confidences) / len(confidences)) if confidences else (trajectory.confidence_score or 0.0)
+
+    return {
+        "video_id": video_id,
+        "filename": video.filename,
+        "frames_processed": debug_info.get("frames_processed", len(points)),
+        "measured_points": len(measured),
+        "predicted_points": len(predicted),
+        "total_trajectory_points": len(points),
+        "measured_ratio": round(len(measured) / max(1, len(points)), 3),
+        "average_confidence": round(float(avg_conf), 3),
+        "pitch_detected": debug_info.get("pitch_detected", False),
+        "stumps_detected": debug_info.get("stumps_detected", False),
+        "video_resolution": f"{video_info.get('width', 1280)}x{video_info.get('height', 720)}",
+        "video_fps": video_info.get("fps", 30.0),
+        "stumps_landmark": additional_data.get("stumps_position"),
+        "pitch_landmarks": additional_data.get("pitch_info"),
+        "length_zone": additional_data.get("length_zone"),
+        "release_speed_kmh": additional_data.get("release_speed_kmh"),
+        "release_speed_px_per_sec": additional_data.get("release_speed_px_per_sec")
+    }
+
+
 @router.get("/{video_id}/stream")
 async def stream_video(
     video_id: str,

@@ -242,6 +242,45 @@ def format_report(metrics: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_markdown_report(metrics: Dict[str, Any]) -> str:
+    """Format evaluation metrics as a structured GitHub Flavored Markdown report."""
+    lines = [
+        "# Cricket Ball Tracking & Computer Vision Evaluation Report",
+        "",
+        f"- **Total Ground Truth Frames**: {metrics.get('total_gt_frames', 0)}",
+        f"- **Total Tracked Output Points**: {metrics.get('total_tracked_points', 0)}",
+        f"  - **Measured Points (CV Detections)**: {metrics.get('measured_points', 0)}",
+        f"  - **Predicted Points (Kalman Gaps)**: {metrics.get('predicted_points', 0)}",
+        f"- **Match Threshold**: {metrics.get('match_threshold_px', 0.0):.1f} px",
+        "",
+        "## Section 1: Raw CV Detector Performance (Measured Points Only)",
+        "",
+        "| Metric | Value |",
+        "| :--- | :--- |",
+        f"| True Positives (TP) | {metrics.get('detector_tp', 0)} |",
+        f"| False Positives (FP) | {metrics.get('detector_fp', 0)} |",
+        f"| False Negatives (FN) | {metrics.get('detector_fn', 0)} |",
+        f"| Detector Precision | {metrics.get('detector_precision', 0.0)*100:.1f}% |",
+        f"| Detector Recall | {metrics.get('detector_recall', 0.0)*100:.1f}% |",
+        f"| Detector F1 Score | {metrics.get('detector_f1', 0.0)*100:.1f}% |",
+        f"| Mean Centre Error | {metrics.get('detector_mean_error_px', 0.0):.2f} px |",
+        f"| RMSE Error | {metrics.get('detector_rmse_px', 0.0):.2f} px |",
+        "",
+        "## Section 2: Tracking Continuity & Gap Filling (Combined Pipeline)",
+        "",
+        "| Metric | Value |",
+        "| :--- | :--- |",
+        f"| Predicted Frame Fraction | {metrics.get('predicted_fraction', 0.0)*100:.1f}% |",
+        f"| Max Consecutive Predictions | {metrics.get('max_consecutive_predicted', 0)} frames |",
+        f"| Combined Track Precision | {metrics.get('combined_precision', 0.0)*100:.1f}% |",
+        f"| Combined Track Recall | {metrics.get('combined_recall', 0.0)*100:.1f}% |",
+        f"| Combined Track F1 Score | {metrics.get('combined_f1', 0.0)*100:.1f}% |",
+        f"| Combined Track RMSE | {metrics.get('combined_rmse_px', 0.0):.2f} px |",
+        ""
+    ]
+    return "\n".join(lines)
+
+
 def run_demo():
     """Runs a demonstration using synthetic delivery ground truth with detection dropouts."""
     print("\nRunning synthetic delivery harness demonstration...")
@@ -294,11 +333,20 @@ def main():
     parser.add_argument("--video", type=str, help="Path to video file to track and evaluate")
     parser.add_argument("--threshold-px", type=float, default=15.0, help="Pixel distance match threshold")
     parser.add_argument("--output-json", type=str, help="Optional path to write metrics JSON")
+    parser.add_argument("--output-markdown", type=str, help="Optional path to write markdown report")
 
     args = parser.parse_args()
 
     if args.demo or (not args.ground_truth and not args.tracking_result and not args.video):
-        run_demo()
+        metrics = run_demo()
+        if args.output_json:
+            with open(args.output_json, 'w') as f:
+                json.dump(metrics, f, indent=2)
+            print(f"Metrics written to: {args.output_json}")
+        if args.output_markdown:
+            with open(args.output_markdown, 'w') as f:
+                f.write(format_markdown_report(metrics))
+            print(f"Markdown report written to: {args.output_markdown}")
         return
 
     if not args.ground_truth:
@@ -328,6 +376,11 @@ def main():
         with open(args.output_json, 'w') as f:
             json.dump(metrics, f, indent=2)
         print(f"Metrics written to: {args.output_json}")
+
+    if args.output_markdown:
+        with open(args.output_markdown, 'w') as f:
+            f.write(format_markdown_report(metrics))
+        print(f"Markdown report written to: {args.output_markdown}")
 
 
 if __name__ == '__main__':
