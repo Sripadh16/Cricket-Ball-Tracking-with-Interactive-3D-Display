@@ -61,10 +61,8 @@ export default function DRSReview({
   const [savedReviewId, setSavedReviewId] = useState(null);
   const [reviewSuccessMsg, setReviewSuccessMsg] = useState('');
 
-  // 2D Video Tracking Reticle & Broadcast HUD Controls
+  // 2D Video Tracking Reticle
   const [showReticle, setShowReticle] = useState(true);
-  const [showBroadcastHUD] = useState(true);
-  const [hudMinimized, setHudMinimized] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState('');
 
   // TV Broadcast Decision Flow HUD & Match Report Card states
@@ -1269,107 +1267,6 @@ export default function DRSReview({
               onOpenFlowHUD={() => setFlowHUDOpen(true)}
               onOpenReportCard={() => setReportCardOpen(true)}
             />
-
-            {/* In-Viewer Television Broadcast Telemetry HUD Overlay */}
-            {showBroadcastHUD && (
-              <Paper sx={{
-                position: 'absolute',
-                top: 14,
-                left: 14,
-                zIndex: 10,
-                bgcolor: 'rgba(10, 22, 38, 0.88)',
-                backdropFilter: 'blur(10px)',
-                border: '1px solid rgba(56, 189, 248, 0.35)',
-                borderRadius: 2.5,
-                p: 1.5,
-                minWidth: 260,
-                maxWidth: 320,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6), 0 0 16px rgba(56, 189, 248, 0.15)'
-              }}>
-                {/* Header with TV broadcast LIVE badge & minimize */}
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                    <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#ef4444', boxShadow: '0 0 8px #ef4444' }} />
-                    <Typography variant="caption" sx={{ fontWeight: 800, letterSpacing: 0.8, color: '#38bdf8', textTransform: 'uppercase', fontSize: '0.68rem' }}>
-                      HAWK-EYE BROADCAST HUD
-                    </Typography>
-                  </Box>
-                  <IconButton
-                    size="small"
-                    onClick={() => setHudMinimized(!hudMinimized)}
-                    sx={{ color: '#94a3b8', p: 0.2 }}
-                    aria-label="Toggle HUD details"
-                  >
-                    {hudMinimized ? <Visibility sx={{ fontSize: 16 }} /> : <VisibilityOff sx={{ fontSize: 16 }} />}
-                  </IconButton>
-                </Box>
-
-                {!hudMinimized && (
-                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                    {/* Release & Bounce Speed */}
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                      <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Speed (Rel / Bnc)</Typography>
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: '#f8fafc', fontSize: '0.82rem' }}>
-                        <span style={{ color: '#38bdf8' }}>{releaseSpeed}</span> km/h <span style={{ color: '#64748b' }}>|</span> {bounceSpeed} km/h
-                      </Typography>
-                    </Box>
-
-                    {/* Deviation Angle */}
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Deviation Angle</Typography>
-                      <Chip
-                        label={`${deviationAngle >= 0 ? '+' : ''}${deviationAngle}°`}
-                        size="small"
-                        sx={{
-                          height: 20,
-                          fontSize: '0.68rem',
-                          fontWeight: 800,
-                          bgcolor: 'rgba(56, 189, 248, 0.15)',
-                          color: '#38bdf8',
-                          border: '1px solid rgba(56, 189, 248, 0.35)'
-                        }}
-                      />
-                    </Box>
-
-                    {/* Length Zone */}
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Length Zone</Typography>
-                      <Chip
-                        label={lengthZone}
-                        size="small"
-                        sx={{
-                          height: 20,
-                          fontSize: '0.68rem',
-                          fontWeight: 800,
-                          bgcolor: `${lengthZoneColor}25`,
-                          color: lengthZoneColor,
-                          border: `1px solid ${lengthZoneColor}80`
-                        }}
-                      />
-                    </Box>
-
-                    {/* LBW Impact Probability Bar */}
-                    <Box sx={{ mt: 0.3 }}>
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.3 }}>
-                        <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem' }}>LBW Impact Meter</Typography>
-                        <Typography variant="caption" sx={{ fontWeight: 800, color: lbwColor, fontSize: '0.72rem' }}>
-                          {lbwProbability}% Hitting
-                        </Typography>
-                      </Box>
-                      <Box sx={{ width: '100%', height: 6, bgcolor: 'rgba(255,255,255,0.1)', borderRadius: 3, overflow: 'hidden' }}>
-                        <Box sx={{
-                          width: `${lbwProbability}%`,
-                          height: '100%',
-                          bgcolor: lbwColor,
-                          boxShadow: `0 0 8px ${lbwColor}`,
-                          transition: 'width 0.4s ease'
-                        }} />
-                      </Box>
-                    </Box>
-                  </Box>
-                )}
-              </Paper>
-            )}
           </Box>
         )}
 
@@ -1498,19 +1395,25 @@ export default function DRSReview({
 
                   <Divider sx={{ borderColor: 'rgba(255,255,255,0.1)', my: 0.5 }} />
 
-                  {/* Final Big Decision Banner */}
+                  {/* Final Big Official Broadcast Decision Banner */}
                   <Box sx={{
                     textAlign: 'center',
-                    py: 1.2,
-                    borderRadius: 1.5,
+                    py: 1.4,
+                    borderRadius: 2,
                     bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                      ? '#e63946'
+                      ? '#dc2626'
                       : drs.decision.includes('UMPIRE')
-                      ? '#f59e0b'
-                      : '#2a9d8f'
+                      ? '#d97706'
+                      : '#16a34a',
+                    boxShadow: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
+                      ? '0 0 20px rgba(220,38,38,0.5)'
+                      : drs.decision.includes('UMPIRE')
+                      ? '0 0 20px rgba(217,119,6,0.5)'
+                      : '0 0 20px rgba(22,163,74,0.5)',
+                    border: '1px solid rgba(255,255,255,0.2)'
                   }}>
-                    <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 1.5, color: 'white' }}>
-                      {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
+                    <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 2, color: 'white', textTransform: 'uppercase' }}>
+                      {drs.decision}
                     </Typography>
                   </Box>
                 </Paper>

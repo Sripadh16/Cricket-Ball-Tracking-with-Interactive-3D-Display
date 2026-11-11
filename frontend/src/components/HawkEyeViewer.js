@@ -3,12 +3,14 @@ import { Canvas, useFrame } from '@react-three/fiber';
 import {
   Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
   FormControlLabel, Switch, Paper, Tooltip, IconButton, Button,
-  Menu, MenuItem, ListItemIcon, ListItemText, Select, FormControl
+  Menu, MenuItem, ListItemIcon, ListItemText, Select, FormControl,
+  Popover, Divider
 } from '@mui/material';
 import {
   SportsCricket, Palette, Whatshot, WbSunny, LiveTv,
   GraphicEq, AutoAwesome, Close, ExpandMore, AccountTree, Article,
-  SlowMotionVideo, FlightTakeoff, RestartAlt, FlashOn
+  SlowMotionVideo, FlightTakeoff, RestartAlt, FlashOn,
+  ThreeSixty, Videocam, Visibility, Person, Tune, Layers, Speed, Timeline, Check
 } from '@mui/icons-material';
 import DecisionFlowHUD from './DecisionFlowHUD';
 import * as THREE from 'three';
@@ -1003,8 +1005,12 @@ export default function HawkEyeViewer({
   const [showZones, setShowZones] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState(null);
 
-  // 3D Aerodynamic Force Vectors & Physics HUD State
-  const [showForceVectors, setShowForceVectors] = useState(true);
+  // 3D Aerodynamic Force Vectors & Physics HUD State (default false for clean canvas)
+  const [showForceVectors, setShowForceVectors] = useState(false);
+
+  // Menu Anchors for Clean Grouped Controls
+  const [moreViewsAnchorEl, setMoreViewsAnchorEl] = useState(null);
+  const [batterAnchorEl, setBatterAnchorEl] = useState(null);
 
   // Real-time Physics Telemetry computed for HUD overlay and 3D vector arrows
   const currentTelemetry = useMemo(() => {
@@ -1185,80 +1191,16 @@ export default function HawkEyeViewer({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'flex-end',
-        gap: 1,
+        gap: 0.8,
         zIndex: 10
       }}>
-        {/* Quick Toolbar: Theme Selector Button & UltraEdge Toggle & Decision Flow */}
+        {/* Quick Toolbar: Theme Selector Button & UltraEdge Toggle */}
         <Box sx={{ display: 'flex', gap: 0.8, alignItems: 'center' }}>
-          {/* Decision Flow HUD Button */}
-          <Tooltip title="TV 3-Stage Decision Flowchart (Pitching → Impact → Wickets)">
-            <Button
-              size="small"
-              variant={showFlowHUDOverlay ? 'contained' : 'outlined'}
-              startIcon={<AccountTree sx={{ fontSize: 15 }} />}
-              onClick={() => {
-                if (onOpenFlowHUD) {
-                  onOpenFlowHUD();
-                } else {
-                  setShowFlowHUDOverlay(!showFlowHUDOverlay);
-                }
-              }}
-              sx={{
-                bgcolor: showFlowHUDOverlay ? 'rgba(56, 189, 248, 0.9)' : 'rgba(10,22,40,0.85)',
-                color: showFlowHUDOverlay ? '#020617' : '#38bdf8',
-                borderColor: 'rgba(56, 189, 248, 0.4)',
-                backdropFilter: 'blur(8px)',
-                fontWeight: 700,
-                fontSize: '0.72rem',
-                textTransform: 'none',
-                py: 0.4,
-                px: 1.1,
-                borderRadius: 2,
-                '&:hover': {
-                  bgcolor: showFlowHUDOverlay ? '#38bdf8' : 'rgba(56, 189, 248, 0.15)',
-                  borderColor: '#38bdf8'
-                }
-              }}
-            >
-              Flow HUD
-            </Button>
-          </Tooltip>
-
-          {/* Match Report Card Button */}
-          {onOpenReportCard && (
-            <Tooltip title="Official Hawk-Eye Match Certificate & Report Card">
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<Article sx={{ fontSize: 15 }} />}
-                onClick={onOpenReportCard}
-                sx={{
-                  bgcolor: 'rgba(10,22,40,0.85)',
-                  color: '#4ade80',
-                  borderColor: 'rgba(74, 222, 128, 0.4)',
-                  backdropFilter: 'blur(8px)',
-                  fontWeight: 700,
-                  fontSize: '0.72rem',
-                  textTransform: 'none',
-                  py: 0.4,
-                  px: 1.1,
-                  borderRadius: 2,
-                  '&:hover': {
-                    bgcolor: 'rgba(74, 222, 128, 0.15)',
-                    borderColor: '#4ade80'
-                  }
-                }}
-              >
-                Report
-              </Button>
-            </Tooltip>
-          )}
-
           <Tooltip title="Toggle Ultra-Edge / Snickometer Soundwave Drawer">
             <Button
               size="small"
               variant={showUltraEdge ? 'contained' : 'outlined'}
-              startIcon={<GraphicEq sx={{ fontSize: 16 }} />}
+              startIcon={<GraphicEq sx={{ fontSize: 15 }} />}
               onClick={() => setShowUltraEdge(!showUltraEdge)}
               sx={{
                 bgcolor: showUltraEdge ? 'rgba(56, 189, 248, 0.9)' : 'rgba(10,22,40,0.85)',
@@ -1268,8 +1210,8 @@ export default function HawkEyeViewer({
                 fontWeight: 700,
                 fontSize: '0.72rem',
                 textTransform: 'none',
-                py: 0.4,
-                px: 1.2,
+                py: 0.35,
+                px: 1.1,
                 borderRadius: 2,
                 '&:hover': {
                   bgcolor: showUltraEdge ? '#38bdf8' : 'rgba(56, 189, 248, 0.15)',
@@ -1281,40 +1223,11 @@ export default function HawkEyeViewer({
             </Button>
           </Tooltip>
 
-          {/* Interactive Shatter / Re-erect Zing Stumps Button */}
-          <Tooltip title={isShattered ? "Re-erect Stumps (Reset)" : "Interactive Shatter Stumps & Bails (Physics)"}>
-            <Button
-              size="small"
-              variant={isShattered ? 'contained' : 'outlined'}
-              startIcon={isShattered ? <RestartAlt sx={{ fontSize: 15 }} /> : <FlashOn sx={{ fontSize: 15 }} />}
-              onClick={toggleShatterAction}
-              sx={{
-                bgcolor: isShattered ? 'rgba(239, 68, 68, 0.9)' : 'rgba(10,22,40,0.85)',
-                color: isShattered ? '#ffffff' : '#f87171',
-                borderColor: isShattered ? '#ef4444' : 'rgba(239, 68, 68, 0.5)',
-                backdropFilter: 'blur(8px)',
-                fontWeight: 700,
-                fontSize: '0.72rem',
-                textTransform: 'none',
-                py: 0.4,
-                px: 1.1,
-                borderRadius: 2,
-                boxShadow: isShattered ? '0 0 14px rgba(239, 68, 68, 0.65)' : 'none',
-                '&:hover': {
-                  bgcolor: isShattered ? '#dc2626' : 'rgba(239, 68, 68, 0.2)',
-                  borderColor: '#ef4444'
-                }
-              }}
-            >
-              {isShattered ? 'Reset Wickets' : 'Shatter Stumps'}
-            </Button>
-          </Tooltip>
-
           <Button
             size="small"
             variant="outlined"
-            startIcon={<Palette sx={{ fontSize: 16, color: theme.ui.accent }} />}
-            endIcon={<ExpandMore sx={{ fontSize: 16 }} />}
+            startIcon={<Palette sx={{ fontSize: 15, color: theme.ui.accent }} />}
+            endIcon={<ExpandMore sx={{ fontSize: 15 }} />}
             onClick={(e) => setThemeAnchorEl(e.currentTarget)}
             sx={{
               bgcolor: 'rgba(10,22,40,0.85)',
@@ -1324,8 +1237,8 @@ export default function HawkEyeViewer({
               fontWeight: 700,
               fontSize: '0.72rem',
               textTransform: 'none',
-              py: 0.4,
-              px: 1.2,
+              py: 0.35,
+              px: 1.1,
               borderRadius: 2,
               '&:hover': {
                 borderColor: theme.ui.accent,
@@ -1383,33 +1296,34 @@ export default function HawkEyeViewer({
           </MenuItem>
         </Menu>
 
-        {/* Trajectory Color Legend */}
+        {/* Trajectory Color Legend (Sleek Horizontal Pill) */}
         <Paper sx={{
-          bgcolor: theme.ui.panelBg || 'rgba(10,22,40,0.85)',
+          bgcolor: 'rgba(10,22,40,0.85)',
           backdropFilter: 'blur(8px)',
           border: `1px solid ${theme.ui.borderColor}`,
           borderRadius: 2,
-          p: 1.2,
+          px: 1.2,
+          py: 0.5,
           display: 'flex',
-          flexDirection: 'column',
-          gap: 0.6
+          alignItems: 'center',
+          gap: 1.2
         }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Box sx={{ width: 14, height: 4, bgcolor: theme.trajectory.preBounce, borderRadius: 1 }} />
-            <Typography variant="caption" sx={{ color: '#e2e8f0', fontSize: '0.7rem' }}>Pre-Bounce Arc</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+            <Box sx={{ width: 10, height: 3.5, bgcolor: theme.trajectory.preBounce, borderRadius: 1 }} />
+            <Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.65rem', fontWeight: 600 }}>Pre-Bounce</Typography>
           </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Box sx={{ width: 14, height: 4, bgcolor: theme.trajectory.postBounce, borderRadius: 1 }} />
-            <Typography variant="caption" sx={{ color: '#e2e8f0', fontSize: '0.7rem' }}>Post-Bounce Arc</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+            <Box sx={{ width: 10, height: 3.5, bgcolor: theme.trajectory.postBounce, borderRadius: 1 }} />
+            <Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.65rem', fontWeight: 600 }}>Post-Bounce</Typography>
           </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Box sx={{ width: 14, height: 4, bgcolor: theme.trajectory.extrapolated, borderRadius: 1 }} />
-            <Typography variant="caption" sx={{ color: '#e2e8f0', fontSize: '0.7rem' }}>Projected Path</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+            <Box sx={{ width: 10, height: 3.5, bgcolor: theme.trajectory.extrapolated, borderRadius: 1 }} />
+            <Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.65rem', fontWeight: 600 }}>Projected</Typography>
           </Box>
           {ghostPreset !== 'none' && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Box sx={{ width: 14, height: 4, bgcolor: '#00f5ff', borderRadius: 1, boxShadow: '0 0 6px #a855f7' }} />
-              <Typography variant="caption" sx={{ color: '#00f5ff', fontSize: '0.7rem', fontWeight: 700 }}>Ghost Trajectory</Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6 }}>
+              <Box sx={{ width: 10, height: 3.5, bgcolor: '#00f5ff', borderRadius: 1, boxShadow: '0 0 6px #a855f7' }} />
+              <Typography variant="caption" sx={{ color: '#00f5ff', fontSize: '0.65rem', fontWeight: 700 }}>Ghost</Typography>
             </Box>
           )}
         </Paper>
@@ -1503,38 +1417,42 @@ export default function HawkEyeViewer({
         </Box>
       )}
 
-      {/* Bottom Center: Interactive Camera Switcher & Toggles */}
+      {/* Bottom Center: Professional Broadcast Camera & Controls Dock */}
       <Box sx={{
         position: 'absolute',
         bottom: 14,
         left: '50%',
         transform: 'translateX(-50%)',
-        bgcolor: theme.ui.panelBg || 'rgba(10,22,40,0.88)',
-        backdropFilter: 'blur(10px)',
+        bgcolor: 'rgba(8, 18, 32, 0.92)',
+        backdropFilter: 'blur(12px)',
         border: `1px solid ${theme.ui.borderColor}`,
         borderRadius: 3,
-        p: 0.8,
+        p: 0.6,
         display: 'flex',
         alignItems: 'center',
-        gap: 1.5,
-        boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-        zIndex: 10
+        gap: 1,
+        boxShadow: '0 8px 32px rgba(0,0,0,0.65)',
+        zIndex: 10,
+        maxWidth: '96vw',
+        overflowX: 'auto'
       }}>
-        {/* Camera Views */}
+        {/* Core Camera Views */}
         <ToggleButtonGroup
           size="small"
-          value={cameraView}
+          value={['orbit', 'chase', 'batsman', 'umpire'].includes(cameraView) ? cameraView : null}
           exclusive
           onChange={(_, v) => v && setCameraView(v)}
           sx={{
+            height: 30,
             '& .MuiToggleButton-root': {
               color: '#cbd5e1',
               borderColor: 'rgba(255,255,255,0.15)',
               fontSize: '0.72rem',
               fontWeight: 600,
               px: 1.2,
-              py: 0.5,
-              textTransform: 'none'
+              py: 0.3,
+              textTransform: 'none',
+              gap: 0.5
             },
             '& .Mui-selected': {
               bgcolor: `${theme.ui.accent} !important`,
@@ -1543,146 +1461,211 @@ export default function HawkEyeViewer({
             }
           }}
         >
-          <ToggleButton value="orbit">Free Orbit</ToggleButton>
-          <ToggleButton value="chase">Chase Cam</ToggleButton>
-          <ToggleButton value="batsman">Batsman POV</ToggleButton>
-          <ToggleButton value="umpire">Umpire</ToggleButton>
-          <ToggleButton value="bowler">Bowler</ToggleButton>
-          <ToggleButton value="side">Side Arc</ToggleButton>
-          <ToggleButton value="aerial">Pitch Map</ToggleButton>
-          <ToggleButton value="impact">Impact Zoom</ToggleButton>
-          <ToggleButton
-            value="bullet_time"
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              bgcolor: cameraView === 'bullet_time' ? 'rgba(168,85,247,0.35) !important' : 'inherit',
-              color: cameraView === 'bullet_time' ? '#c084fc !important' : 'inherit'
-            }}
-          >
-            <SlowMotionVideo sx={{ fontSize: 15 }} />
-            Bullet Time
+          <ToggleButton value="orbit">
+            <ThreeSixty sx={{ fontSize: 15 }} />
+            Orbit
           </ToggleButton>
-          <ToggleButton
-            value="drone_flythrough"
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              bgcolor: cameraView === 'drone_flythrough' ? 'rgba(6,182,212,0.35) !important' : 'inherit',
-              color: cameraView === 'drone_flythrough' ? '#38bdf8 !important' : 'inherit'
-            }}
-          >
-            <FlightTakeoff sx={{ fontSize: 15 }} />
-            Drone Cam
+          <ToggleButton value="chase">
+            <Videocam sx={{ fontSize: 15 }} />
+            Chase
+          </ToggleButton>
+          <ToggleButton value="batsman">
+            <Visibility sx={{ fontSize: 15 }} />
+            Batter
+          </ToggleButton>
+          <ToggleButton value="umpire">
+            <SportsCricket sx={{ fontSize: 15 }} />
+            Umpire
           </ToggleButton>
         </ToggleButtonGroup>
 
-        {/* Ghost Delivery Selection Dropdown */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, borderLeft: '1px solid rgba(255,255,255,0.2)', pl: 1 }}>
-          <Tooltip title="Compare delivery side-by-side with an ethereal Ghost Trajectory (e.g. Inswinger vs Outswinger, Leg-break vs Googly)">
-            <FormControl size="small" sx={{ minWidth: 140 }}>
-              <Select
-                value={ghostPreset}
-                onChange={(e) => setGhostPreset(e.target.value)}
-                displayEmpty
-                size="small"
-                sx={{
-                  color: '#e2e8f0',
-                  bgcolor: ghostPreset !== 'none' ? 'rgba(168,85,247,0.22)' : 'rgba(255,255,255,0.06)',
-                  fontSize: '0.70rem',
-                  fontWeight: 700,
-                  height: 30,
-                  borderRadius: 2,
-                  border: ghostPreset !== 'none' ? '1px solid rgba(168,85,247,0.6)' : '1px solid rgba(255,255,255,0.15)',
-                  '& .MuiSelect-select': { py: 0.4, px: 1, display: 'flex', alignItems: 'center', gap: 0.6 },
-                  '& .MuiSvgIcon-root': { color: '#c084fc', fontSize: 17 }
-                }}
-              >
-                <MenuItem value="none" sx={{ fontSize: '0.72rem' }}>
-                  <em>Ghost: None</em>
-                </MenuItem>
-                {GHOST_PRESETS.map((p) => (
-                  <MenuItem key={p.id} value={p.id} sx={{ fontSize: '0.72rem' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: p.color }} />
-                      <span>{p.name}</span>
-                    </Box>
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+        {/* More Camera Angles Dropdown */}
+        <Button
+          size="small"
+          variant={!['orbit', 'chase', 'batsman', 'umpire'].includes(cameraView) ? 'contained' : 'outlined'}
+          endIcon={<ExpandMore sx={{ fontSize: 16 }} />}
+          onClick={(e) => setMoreViewsAnchorEl(e.currentTarget)}
+          sx={{
+            height: 30,
+            fontSize: '0.72rem',
+            fontWeight: 600,
+            textTransform: 'none',
+            px: 1,
+            borderRadius: 1.5,
+            bgcolor: !['orbit', 'chase', 'batsman', 'umpire'].includes(cameraView) ? theme.ui.accent : 'rgba(255,255,255,0.06)',
+            color: !['orbit', 'chase', 'batsman', 'umpire'].includes(cameraView) ? '#020617' : '#cbd5e1',
+            borderColor: !['orbit', 'chase', 'batsman', 'umpire'].includes(cameraView) ? theme.ui.accent : 'rgba(255,255,255,0.18)'
+          }}
+        >
+          {cameraView === 'bowler' ? 'Bowler POV' :
+           cameraView === 'side' ? 'Side Arc' :
+           cameraView === 'aerial' ? 'Pitch Map' :
+           cameraView === 'impact' ? 'Impact Zoom' :
+           cameraView === 'bullet_time' ? 'Bullet Time' :
+           cameraView === 'drone_flythrough' ? 'Drone Cam' : 'More Angles'}
+        </Button>
+
+        <Menu
+          anchorEl={moreViewsAnchorEl}
+          open={Boolean(moreViewsAnchorEl)}
+          onClose={() => setMoreViewsAnchorEl(null)}
+          PaperProps={{
+            sx: { bgcolor: '#0a1626', color: 'white', border: '1px solid rgba(255,255,255,0.15)', borderRadius: 2 }
+          }}
+        >
+          <MenuItem selected={cameraView === 'bowler'} onClick={() => { setCameraView('bowler'); setMoreViewsAnchorEl(null); }}>
+            <ListItemText primary="Bowler End POV" secondary="View from bowler's run-up" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+          <MenuItem selected={cameraView === 'side'} onClick={() => { setCameraView('side'); setMoreViewsAnchorEl(null); }}>
+            <ListItemText primary="Side Arc (Elevation)" secondary="Full pitch trajectory elevation profile" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+          <MenuItem selected={cameraView === 'aerial'} onClick={() => { setCameraView('aerial'); setMoreViewsAnchorEl(null); }}>
+            <ListItemText primary="Pitch Map (Top-Down 2D)" secondary="Overhead pitching length distribution" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+          <MenuItem selected={cameraView === 'impact'} onClick={() => { setCameraView('impact'); setMoreViewsAnchorEl(null); }}>
+            <ListItemText primary="Impact Close-Up Zoom" secondary="Close-in focus on wicket and pads" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+          <MenuItem selected={cameraView === 'bullet_time'} onClick={() => { setCameraView('bullet_time'); setMoreViewsAnchorEl(null); }}>
+            <ListItemIcon><SlowMotionVideo sx={{ color: '#c084fc', fontSize: 18 }} /></ListItemIcon>
+            <ListItemText primary="Bullet Time (Matrix 360°)" secondary="Cinematic orbital freeze-frame sweep" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+          <MenuItem selected={cameraView === 'drone_flythrough'} onClick={() => { setCameraView('drone_flythrough'); setMoreViewsAnchorEl(null); }}>
+            <ListItemIcon><FlightTakeoff sx={{ color: '#38bdf8', fontSize: 18 }} /></ListItemIcon>
+            <ListItemText primary="Drone Flythrough" secondary="Dynamic aerial flight down the pitch" secondaryTypographyProps={{ fontSize: '0.68rem', color: '#94a3b8' }} />
+          </MenuItem>
+        </Menu>
+
+        <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.15)', my: 0.5 }} />
+
+        {/* Feature Switches: Predict, Vectors, Zones */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+          <Tooltip title="Toggle Extrapolated Path">
+            <Button
+              size="small"
+              variant={showExtrapolation ? 'contained' : 'outlined'}
+              startIcon={<Timeline sx={{ fontSize: 14 }} />}
+              onClick={() => setShowExtrapolation(!showExtrapolation)}
+              sx={{
+                height: 30,
+                fontSize: '0.7rem',
+                fontWeight: 600,
+                px: 1,
+                py: 0.2,
+                borderRadius: 1.5,
+                bgcolor: showExtrapolation ? 'rgba(230, 57, 70, 0.25)' : 'transparent',
+                color: showExtrapolation ? '#ff4d6d' : '#94a3b8',
+                borderColor: showExtrapolation ? '#ff4d6d' : 'rgba(255,255,255,0.15)',
+                textTransform: 'none'
+              }}
+            >
+              Predict
+            </Button>
+          </Tooltip>
+
+          <Tooltip title="Toggle Aerodynamic Force Vectors & Physics HUD">
+            <Button
+              size="small"
+              variant={showForceVectors ? 'contained' : 'outlined'}
+              startIcon={<Speed sx={{ fontSize: 14 }} />}
+              onClick={() => setShowForceVectors(!showForceVectors)}
+              sx={{
+                height: 30,
+                fontSize: '0.7rem',
+                fontWeight: 600,
+                px: 1,
+                py: 0.2,
+                borderRadius: 1.5,
+                bgcolor: showForceVectors ? 'rgba(0, 229, 255, 0.2)' : 'transparent',
+                color: showForceVectors ? '#00e5ff' : '#94a3b8',
+                borderColor: showForceVectors ? '#00e5ff' : 'rgba(255,255,255,0.15)',
+                textTransform: 'none'
+              }}
+            >
+              Vectors
+            </Button>
+          </Tooltip>
+
+          <Tooltip title="Toggle Pitch Length Zones (Yorker, Full, Good Length, Short)">
+            <Button
+              size="small"
+              variant={showZones ? 'contained' : 'outlined'}
+              startIcon={<Layers sx={{ fontSize: 14 }} />}
+              onClick={() => setShowZones(!showZones)}
+              sx={{
+                height: 30,
+                fontSize: '0.7rem',
+                fontWeight: 600,
+                px: 1,
+                py: 0.2,
+                borderRadius: 1.5,
+                bgcolor: showZones ? 'rgba(42, 157, 143, 0.25)' : 'transparent',
+                color: showZones ? '#4ade80' : '#94a3b8',
+                borderColor: showZones ? '#4ade80' : 'rgba(255,255,255,0.15)',
+                textTransform: 'none'
+              }}
+            >
+              Zones
+            </Button>
           </Tooltip>
         </Box>
 
-        {/* Feature Switches */}
-        <Box sx={{ display: 'flex', gap: 1, borderLeft: '1px solid rgba(255,255,255,0.2)', pl: 1 }}>
-          <Tooltip title="Toggle Extrapolated Path">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={showExtrapolation}
-                  onChange={(e) => setShowExtrapolation(e.target.checked)}
-                  sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: theme.trajectory.extrapolated } }}
-                />
-              }
-              label={<Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.68rem' }}>Predict</Typography>}
-              sx={{ m: 0 }}
-            />
-          </Tooltip>
+        <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.15)', my: 0.5 }} />
 
-          {/* 3D Force Vectors: ON/OFF */}
-          <Tooltip title="Toggle 3D Force Vectors (Cyan Velocity, Neon Pink Magnus, Yellow Gravity, White Spin Axis)">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={showForceVectors}
-                  onChange={(e) => setShowForceVectors(e.target.checked)}
-                  sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#00e5ff' } }}
-                />
-              }
-              label={<Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.68rem' }}>Vectors</Typography>}
-              sx={{ m: 0 }}
-            />
-          </Tooltip>
+        {/* Batter Avatar Configuration Dropdown */}
+        <Button
+          size="small"
+          variant={showAvatar ? 'contained' : 'outlined'}
+          startIcon={<Person sx={{ fontSize: 15 }} />}
+          endIcon={<ExpandMore sx={{ fontSize: 15 }} />}
+          onClick={(e) => setBatterAnchorEl(e.currentTarget)}
+          sx={{
+            height: 30,
+            fontSize: '0.7rem',
+            fontWeight: 600,
+            textTransform: 'none',
+            px: 1,
+            borderRadius: 1.5,
+            bgcolor: showAvatar ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255,255,255,0.06)',
+            color: showAvatar ? '#38bdf8' : '#cbd5e1',
+            borderColor: showAvatar ? '#38bdf8' : 'rgba(255,255,255,0.18)'
+          }}
+        >
+          {showAvatar ? `Batter (${stance === 'right_hand' ? 'RHB' : 'LHB'})` : 'Batter'}
+        </Button>
 
-          <Tooltip title="Toggle Pitch Length Zones (Yorker, Full, Good Length, Bouncer)">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={showZones}
-                  onChange={(e) => setShowZones(e.target.checked)}
-                  sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#2a9d8f' } }}
-                />
-              }
-              label={<Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.68rem' }}>Zones</Typography>}
-              sx={{ m: 0 }}
-            />
-          </Tooltip>
+        <Popover
+          open={Boolean(batterAnchorEl)}
+          anchorEl={batterAnchorEl}
+          onClose={() => setBatterAnchorEl(null)}
+          anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+          transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+          PaperProps={{
+            sx: {
+              bgcolor: '#0a1626',
+              color: 'white',
+              border: '1px solid rgba(255,255,255,0.15)',
+              borderRadius: 2.5,
+              p: 1.8,
+              minWidth: 220,
+              boxShadow: '0 12px 32px rgba(0,0,0,0.8)'
+            }
+          }}
+        >
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.2 }}>
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Typography variant="caption" sx={{ fontWeight: 700, color: '#e2e8f0' }}>Show 3D Batter</Typography>
+              <Switch
+                size="small"
+                checked={showAvatar}
+                onChange={(e) => setShowAvatar(e.target.checked)}
+                sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#38bdf8' } }}
+              />
+            </Box>
 
-          {/* 3D Batsman Avatar Switch */}
-          <Tooltip title="Toggle Procedural 3D Batsman Avatar (Helmet, Team Jersey, Willow Bat & Gloves)">
-            <FormControlLabel
-              control={
-                <Switch
-                  size="small"
-                  checked={showAvatar}
-                  onChange={(e) => setShowAvatar(e.target.checked)}
-                  sx={{ '& .MuiSwitch-switchBase.Mui-checked': { color: '#38bdf8' } }}
-                />
-              }
-              label={<Typography variant="caption" sx={{ color: '#cbd5e1', fontSize: '0.68rem' }}>Avatar</Typography>}
-              sx={{ m: 0 }}
-            />
-          </Tooltip>
+            <Divider sx={{ borderColor: 'rgba(255,255,255,0.1)' }} />
 
-          {/* Batsman Stance Toggle (Right Hand vs Left Hand) */}
-          {showAvatar && (
-            <Tooltip title="Batsman Stance: Right-Hand (RHB) or Left-Hand (LHB)">
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem' }}>Batting Stance</Typography>
               <ToggleButtonGroup
                 size="small"
                 value={stance}
@@ -1695,25 +1678,19 @@ export default function HawkEyeViewer({
                     borderColor: 'rgba(255,255,255,0.15)',
                     fontSize: '0.65rem',
                     fontWeight: 700,
-                    px: 0.8,
-                    py: 0,
-                    textTransform: 'none'
+                    px: 1.2,
+                    py: 0
                   },
-                  '& .Mui-selected': {
-                    bgcolor: 'rgba(56, 189, 248, 0.85) !important',
-                    color: '#020617 !important'
-                  }
+                  '& .Mui-selected': { bgcolor: 'rgba(56, 189, 248, 0.85) !important', color: '#020617 !important' }
                 }}
               >
-                <ToggleButton value="right_hand">RHB</ToggleButton>
-                <ToggleButton value="left_hand">LHB</ToggleButton>
+                <ToggleButton value="right_hand">Right Hand (RHB)</ToggleButton>
+                <ToggleButton value="left_hand">Left Hand (LHB)</ToggleButton>
               </ToggleButtonGroup>
-            </Tooltip>
-          )}
+            </Box>
 
-          {/* Bat Action / Stroke Mode Selector */}
-          {showAvatar && (
-            <Tooltip title="Bat Kinematics: Auto Stroke on Crease Arrival, Forward Defend, Drive, or Leave">
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem' }}>Shot Kinematics</Typography>
               <ToggleButtonGroup
                 size="small"
                 value={batAction}
@@ -1726,14 +1703,10 @@ export default function HawkEyeViewer({
                     borderColor: 'rgba(255,255,255,0.15)',
                     fontSize: '0.65rem',
                     fontWeight: 600,
-                    px: 0.7,
-                    py: 0,
-                    textTransform: 'none'
+                    px: 0.8,
+                    py: 0
                   },
-                  '& .Mui-selected': {
-                    bgcolor: 'rgba(245, 158, 11, 0.85) !important',
-                    color: '#020617 !important'
-                  }
+                  '& .Mui-selected': { bgcolor: 'rgba(245, 158, 11, 0.85) !important', color: '#020617 !important' }
                 }}
               >
                 <ToggleButton value="auto">Auto</ToggleButton>
@@ -1741,9 +1714,68 @@ export default function HawkEyeViewer({
                 <ToggleButton value="drive">Drive</ToggleButton>
                 <ToggleButton value="leave">Leave</ToggleButton>
               </ToggleButtonGroup>
-            </Tooltip>
-          )}
-        </Box>
+            </Box>
+          </Box>
+        </Popover>
+
+        <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.15)', my: 0.5 }} />
+
+        {/* Ghost Trajectory Selector */}
+        <FormControl size="small" sx={{ minWidth: 120 }}>
+          <Select
+            value={ghostPreset}
+            onChange={(e) => setGhostPreset(e.target.value)}
+            displayEmpty
+            size="small"
+            sx={{
+              color: '#e2e8f0',
+              bgcolor: ghostPreset !== 'none' ? 'rgba(168,85,247,0.22)' : 'rgba(255,255,255,0.06)',
+              fontSize: '0.70rem',
+              fontWeight: 700,
+              height: 30,
+              borderRadius: 1.5,
+              border: ghostPreset !== 'none' ? '1px solid rgba(168,85,247,0.6)' : '1px solid rgba(255,255,255,0.15)',
+              '& .MuiSelect-select': { py: 0.3, px: 1, display: 'flex', alignItems: 'center', gap: 0.5 },
+              '& .MuiSvgIcon-root': { color: '#c084fc', fontSize: 16 }
+            }}
+          >
+            <MenuItem value="none" sx={{ fontSize: '0.72rem' }}>
+              <em>Ghost: None</em>
+            </MenuItem>
+            {GHOST_PRESETS.map((p) => (
+              <MenuItem key={p.id} value={p.id} sx={{ fontSize: '0.72rem' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: p.color }} />
+                  <span>{p.name}</span>
+                </Box>
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+
+        {/* Conditional Reset Wickets Button */}
+        {isShattered && (
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={<RestartAlt sx={{ fontSize: 15 }} />}
+            onClick={toggleShatterAction}
+            sx={{
+              height: 30,
+              fontSize: '0.7rem',
+              fontWeight: 700,
+              textTransform: 'none',
+              bgcolor: '#ef4444',
+              color: 'white',
+              px: 1,
+              borderRadius: 1.5,
+              boxShadow: '0 0 12px rgba(239, 68, 68, 0.7)',
+              '&:hover': { bgcolor: '#dc2626' }
+            }}
+          >
+            Reset Wickets
+          </Button>
+        )}
       </Box>
     </Box>
   );

@@ -227,57 +227,54 @@ export default function DRSCommentary({
   };
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, ...style }}>
-      {/* Visual Closed-Captions Subtitle Ticker Strip across Viewer */}
-      {showTicker && (
-        <Paper
-          elevation={4}
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 1.5,
-            px: 2,
-            py: 1,
-            bgcolor: 'rgba(6, 15, 28, 0.92)',
-            backdropFilter: 'blur(10px)',
-            border: '1px solid rgba(56, 189, 248, 0.4)',
-            borderRadius: 2,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.6), inset 0 0 12px rgba(56, 189, 248, 0.1)',
-            overflow: 'hidden'
-          }}
-        >
-          {/* Umpire Audio Badge & Pulsing Graphic EQ */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, flexShrink: 0 }}>
-            <Box
-              sx={{
-                width: 10,
-                height: 10,
-                borderRadius: '50%',
-                bgcolor: isSpeaking ? '#22c55e' : '#38bdf8',
-                boxShadow: isSpeaking ? '0 0 10px #22c55e' : '0 0 6px #38bdf8',
-                transition: 'all 0.3s'
-              }}
-            />
+    <Box sx={{ width: '100%', ...style }}>
+      <Paper
+        elevation={4}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: { xs: 1.2, sm: 2 },
+          py: 0.6,
+          bgcolor: 'rgba(6, 15, 28, 0.94)',
+          backdropFilter: 'blur(10px)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
+          borderRadius: 2,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+          gap: { xs: 1, sm: 2 }
+        }}
+      >
+        {/* Left: Umpire Audio Badge */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, flexShrink: 0 }}>
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.6,
+              bgcolor: isSpeaking ? 'rgba(34, 197, 94, 0.18)' : 'rgba(56, 189, 248, 0.15)',
+              border: `1px solid ${isSpeaking ? 'rgba(34, 197, 94, 0.45)' : 'rgba(56, 189, 248, 0.35)'}`,
+              px: 1,
+              py: 0.35,
+              borderRadius: 1.5
+            }}
+          >
+            <RecordVoiceOver sx={{ fontSize: 14, color: isSpeaking ? '#4ade80' : '#38bdf8' }} />
             <Typography
               variant="caption"
               sx={{
-                fontWeight: 900,
-                letterSpacing: 0.8,
+                fontWeight: 800,
                 color: isSpeaking ? '#4ade80' : '#38bdf8',
                 textTransform: 'uppercase',
                 fontSize: '0.68rem',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 0.5
+                letterSpacing: 0.5
               }}
             >
-              <RecordVoiceOver sx={{ fontSize: 14 }} />
               THIRD UMPIRE
             </Typography>
             {isSpeaking && (
               <GraphicEq
                 sx={{
-                  fontSize: 16,
+                  fontSize: 14,
                   color: '#4ade80',
                   animation: 'pulse 1s infinite alternate',
                   '@keyframes pulse': {
@@ -288,28 +285,91 @@ export default function DRSCommentary({
               />
             )}
           </Box>
+        </Box>
 
-          {/* Subtitle Ticker Text */}
-          <Typography
-            variant="body2"
-            sx={{
-              flex: 1,
-              fontWeight: 600,
-              fontSize: { xs: '0.75rem', sm: '0.84rem' },
-              color: '#f8fafc',
-              fontStyle: 'italic',
-              letterSpacing: 0.3,
-              lineHeight: 1.3,
-              textShadow: '0 1px 3px rgba(0,0,0,0.9)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis'
-            }}
-          >
-            &ldquo;{activeSubtitle}&rdquo;
-          </Typography>
+        {/* Center: Dialogue Subtitle Ticker */}
+        <Typography
+          variant="body2"
+          sx={{
+            flex: 1,
+            fontWeight: 600,
+            fontSize: { xs: '0.74rem', sm: '0.82rem' },
+            color: '#f8fafc',
+            fontStyle: 'italic',
+            letterSpacing: 0.2,
+            lineHeight: 1.2,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis'
+          }}
+        >
+          &ldquo;{activeSubtitle}&rdquo;
+        </Typography>
 
-          {/* Quick Mute Indicator / Button */}
+        {/* Right: Sound & Voice Controls */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexShrink: 0 }}>
+          {/* Voice Accent Picker */}
+          <FormControl size="small" sx={{ display: { xs: 'none', sm: 'block' } }}>
+            <Select
+              value={accent}
+              disabled={isMuted}
+              onChange={(e) => setAccent(e.target.value)}
+              sx={{
+                color: 'white',
+                bgcolor: 'rgba(255,255,255,0.06)',
+                height: 24,
+                fontSize: '0.68rem',
+                fontWeight: 600,
+                borderRadius: 1,
+                '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.15)' },
+                '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#38bdf8' },
+                '& .MuiSvgIcon-root': { color: '#94a3b8', fontSize: 15 }
+              }}
+            >
+              <MenuItem value="uk" sx={{ fontSize: '0.72rem' }}>🇬🇧 UK</MenuItem>
+              <MenuItem value="australia" sx={{ fontSize: '0.72rem' }}>🇦🇺 AUS</MenuItem>
+              <MenuItem value="india" sx={{ fontSize: '0.72rem' }}>🇮🇳 IND</MenuItem>
+              <MenuItem value="us" sx={{ fontSize: '0.72rem' }}>🇺🇸 US</MenuItem>
+            </Select>
+          </FormControl>
+
+          {/* Volume Slider (Medium+ screens) */}
+          <Box sx={{ display: { xs: 'none', md: 'flex' }, alignItems: 'center', gap: 0.6 }}>
+            <Slider
+              size="small"
+              value={volume}
+              min={0}
+              max={1}
+              step={0.05}
+              disabled={isMuted}
+              onChange={(_, v) => setVolume(v)}
+              sx={{
+                color: '#38bdf8',
+                width: 50,
+                '& .MuiSlider-thumb': { width: 8, height: 8 }
+              }}
+            />
+          </Box>
+
+          {/* Test Voice Button */}
+          <Tooltip title="Test voice announcement">
+            <IconButton
+              size="small"
+              onClick={handlePlayFullVerdict}
+              disabled={isMuted}
+              sx={{
+                bgcolor: 'rgba(56, 189, 248, 0.12)',
+                color: '#38bdf8',
+                p: 0.35,
+                borderRadius: 1,
+                '&:hover': { bgcolor: 'rgba(56, 189, 248, 0.25)' }
+              }}
+            >
+              <Hearing sx={{ fontSize: 15 }} />
+            </IconButton>
+          </Tooltip>
+
+          {/* Mute Toggle */}
           <Tooltip title={isMuted ? 'Unmute AI Commentary' : 'Mute Commentary'}>
             <IconButton
               size="small"
@@ -319,132 +379,16 @@ export default function DRSCommentary({
               }}
               sx={{
                 color: isMuted ? '#f87171' : '#38bdf8',
-                bgcolor: isMuted ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
-                p: 0.5,
-                '&:hover': {
-                  bgcolor: isMuted ? 'rgba(239, 68, 68, 0.25)' : 'rgba(56, 189, 248, 0.25)'
-                }
+                bgcolor: isMuted ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                p: 0.35,
+                borderRadius: 1
               }}
             >
-              {isMuted ? <VolumeOff fontSize="small" /> : <VolumeUp fontSize="small" />}
+              {isMuted ? <VolumeOff sx={{ fontSize: 15 }} /> : <VolumeUp sx={{ fontSize: 15 }} />}
             </IconButton>
           </Tooltip>
-        </Paper>
-      )}
-
-      {/* Broadcast Audio Commentary Controls Bar */}
-      {showControls && (
-        <Paper
-          sx={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 1.5,
-            px: 1.8,
-            py: 0.8,
-            bgcolor: 'rgba(10, 22, 40, 0.85)',
-            backdropFilter: 'blur(8px)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: 2
-          }}
-        >
-          {/* Audio Status & Switch */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2 }}>
-            <Campaign sx={{ color: isMuted ? '#64748b' : '#38bdf8', fontSize: 20 }} />
-            <Typography variant="caption" sx={{ fontWeight: 700, color: '#e2e8f0', fontSize: '0.75rem' }}>
-              Spoken AI Commentary
-            </Typography>
-            <Switch
-              size="small"
-              checked={!isMuted}
-              onChange={(e) => {
-                const enable = e.target.checked;
-                setIsMuted(!enable);
-                if (!enable && window.speechSynthesis) window.speechSynthesis.cancel();
-              }}
-              sx={{
-                '& .MuiSwitch-switchBase.Mui-checked': { color: '#38bdf8' },
-                '& .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track': { bgcolor: '#0284c7' }
-              }}
-            />
-          </Box>
-
-          {/* Volume Slider & Accent Selector */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-            {/* Speech Volume */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 120 }}>
-              <VolumeUp sx={{ fontSize: 16, color: '#94a3b8' }} />
-              <Slider
-                size="small"
-                value={volume}
-                min={0}
-                max={1}
-                step={0.05}
-                disabled={isMuted}
-                onChange={(_, v) => setVolume(v)}
-                sx={{
-                  color: '#38bdf8',
-                  width: 70,
-                  '& .MuiSlider-thumb': { width: 10, height: 10 }
-                }}
-              />
-              <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem', minWidth: 26, fontFamily: 'monospace' }}>
-                {Math.round(volume * 100)}%
-              </Typography>
-            </Box>
-
-            {/* Voice Accent Picker */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-              <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>
-                Accent:
-              </Typography>
-              <FormControl size="small">
-                <Select
-                  value={accent}
-                  disabled={isMuted}
-                  onChange={(e) => setAccent(e.target.value)}
-                  sx={{
-                    color: 'white',
-                    bgcolor: 'rgba(255,255,255,0.06)',
-                    height: 26,
-                    fontSize: '0.72rem',
-                    fontWeight: 600,
-                    borderRadius: 1,
-                    '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.18)' },
-                    '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#38bdf8' },
-                    '& .MuiSvgIcon-root': { color: '#94a3b8', fontSize: 16 }
-                  }}
-                >
-                  <MenuItem value="uk" sx={{ fontSize: '0.75rem' }}>🇬🇧 UK English</MenuItem>
-                  <MenuItem value="australia" sx={{ fontSize: '0.75rem' }}>🇦🇺 Australian</MenuItem>
-                  <MenuItem value="india" sx={{ fontSize: '0.75rem' }}>🇮🇳 Indian</MenuItem>
-                  <MenuItem value="us" sx={{ fontSize: '0.75rem' }}>🇺🇸 US English</MenuItem>
-                  <MenuItem value="default" sx={{ fontSize: '0.75rem' }}>🌐 Standard Default</MenuItem>
-                </Select>
-              </FormControl>
-            </Box>
-
-            {/* Test Voice / Speak Now Button */}
-            <Tooltip title="Test voice dialogue for current delivery">
-              <IconButton
-                size="small"
-                onClick={handlePlayFullVerdict}
-                disabled={isMuted}
-                sx={{
-                  bgcolor: 'rgba(56, 189, 248, 0.15)',
-                  color: '#38bdf8',
-                  p: 0.5,
-                  borderRadius: 1,
-                  '&:hover': { bgcolor: 'rgba(56, 189, 248, 0.28)' }
-                }}
-              >
-                <Hearing sx={{ fontSize: 16 }} />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        </Paper>
-      )}
+        </Box>
+      </Paper>
     </Box>
   );
 }
