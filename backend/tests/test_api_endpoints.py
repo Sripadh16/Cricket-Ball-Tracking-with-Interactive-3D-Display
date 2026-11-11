@@ -106,6 +106,21 @@ def test_api_root(client):
     assert response.json()["status"] == "running"
 
 
+def test_guest_auth_endpoint(client):
+    """Guest authentication provisions or returns a guest access token seamlessly."""
+    response = client.post("/auth/guest")
+    assert response.status_code == 200
+    data = response.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+
+    # Verify the guest token can access authenticated routes
+    headers = {"Authorization": f"Bearer {data['access_token']}"}
+    resp = client.get("/videos/", headers=headers)
+    assert resp.status_code == 200
+    assert "videos" in resp.json()
+
+
 def test_get_preset_deliveries(client):
     """Presets remain accessible without authentication."""
     response = client.get("/videos/presets")

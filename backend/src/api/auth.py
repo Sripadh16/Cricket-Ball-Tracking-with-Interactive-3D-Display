@@ -86,6 +86,26 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
     logger.info(f"User logged in: {user.email}")
     return {"access_token": access_token, "token_type": "bearer"}
 
+@router.post("/guest", response_model=Token)
+async def guest_login(db: Session = Depends(get_db)):
+    """Authenticate or auto-provision a guest/demo account for frictionless trial"""
+    auth_service = AuthService(db)
+    guest_email = "guest@cricket.drs"
+    user = db.query(User).filter(User.email == guest_email).first()
+    if not user:
+        user = User(
+            email=guest_email,
+            name="Guest Evaluator",
+            hashed_password=auth_service.get_password_hash("guest_evaluation_pass_2026")
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+    access_token = auth_service.create_access_token(data={"sub": user.email})
+    logger.info(f"Guest user signed in: {guest_email}")
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @router.post("/token", response_model=Token)
 async def token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     """OAuth2 compatible token endpoint"""

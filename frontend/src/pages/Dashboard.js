@@ -221,6 +221,22 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
   const [reprocessingId, setReprocessingId] = useState(null);
   const fileInputRef = useRef(null);
 
+  const ensureAuth = async () => {
+    let token = localStorage.getItem('token');
+    if (!token) {
+      try {
+        const res = await api.post('/auth/guest');
+        if (res.data?.access_token) {
+          localStorage.setItem('token', res.data.access_token);
+          token = res.data.access_token;
+        }
+      } catch (err) {
+        console.warn('Guest authentication failed:', err);
+      }
+    }
+    return token;
+  };
+
   useEffect(() => {
     loadVideos();
   }, []);
@@ -228,9 +244,22 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
   const loadVideos = async (showSpinner = true) => {
     if (showSpinner) setLoading(true);
     try {
+      await ensureAuth();
       const response = await api.get('/videos');
       setVideos(response.data.videos || []);
     } catch (err) {
+      if (err.response?.status === 401) {
+        try {
+          const res = await api.post('/auth/guest');
+          if (res.data?.access_token) {
+            localStorage.setItem('token', res.data.access_token);
+            const retryRes = await api.get('/videos');
+            setVideos(retryRes.data.videos || []);
+            setError(null);
+            return;
+          }
+        } catch (_) {}
+      }
       if (showSpinner) setError('Failed to load videos');
     } finally {
       if (showSpinner) setLoading(false);
@@ -254,6 +283,8 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
     setUploadProgress(0);
     setError(null);
 
+    await ensureAuth();
+
     const formData = new FormData();
     formData.append('file', file);
 
@@ -265,7 +296,23 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
       });
       await loadVideos();
     } catch (err) {
-      setError(err.response?.data?.detail || 'Upload failed');
+      if (err.response?.status === 401) {
+        try {
+          const guestRes = await api.post('/auth/guest');
+          if (guestRes.data?.access_token) {
+            localStorage.setItem('token', guestRes.data.access_token);
+            await api.post('/videos/upload', formData);
+            await loadVideos();
+            return;
+          }
+        } catch (_) {}
+      }
+      const msg = err.response?.data?.detail;
+      if (msg === 'Not authenticated' || err.response?.status === 401) {
+        setError('Authentication required: please log in or click Guest Mode to upload.');
+      } else {
+        setError(msg || 'Upload failed');
+      }
     } finally {
       setUploading(false);
       setUploadProgress(0);
@@ -453,7 +500,31 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
       {/* Error Alert */}
       {error && (
         <Box sx={{ px: 2, pb: 2 }}>
-          <Alert severity="error" onClose={() => setError(null)}>
+          <Alert
+            severity="error"
+            onClose={() => setError(null)}
+            action={
+              (error.toLowerCase().includes('auth') || error.toLowerCase().includes('sign in')) ? (
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={async () => {
+                    try {
+                      const res = await api.post('/auth/guest');
+                      if (res.data?.access_token) {
+                        localStorage.setItem('token', res.data.access_token);
+                        setError(null);
+                        await loadVideos();
+                      }
+                    } catch (_) {}
+                  }}
+                  sx={{ fontWeight: 700, textTransform: 'none' }}
+                >
+                  Quick Sign-In
+                </Button>
+              ) : null
+            }
+          >
             {error}
           </Alert>
         </Box>

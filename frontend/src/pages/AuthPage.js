@@ -32,8 +32,21 @@ function AuthPage({ onAuthSuccess }) {
     }
   };
 
-  const handleSkip = () => {
-    onAuthSuccess();
+  const handleGuest = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await api.post('/auth/guest');
+      if (response.data?.access_token) {
+        localStorage.setItem('token', response.data.access_token);
+      }
+      onAuthSuccess();
+    } catch (err) {
+      // Fallback: still enter dashboard even if guest endpoint had network glitch
+      onAuthSuccess();
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -121,11 +134,18 @@ function AuthPage({ onAuthSuccess }) {
 
           <Button
             fullWidth
-            variant="text"
-            onClick={handleSkip}
-            sx={{ color: 'text.secondary' }}
+            variant="outlined"
+            onClick={handleGuest}
+            disabled={loading}
+            sx={{
+              mt: 1.5,
+              borderColor: 'rgba(26,71,42,0.4)',
+              color: '#1a472a',
+              fontWeight: 700,
+              '&:hover': { borderColor: '#1a472a', bgcolor: 'rgba(26,71,42,0.04)' }
+            }}
           >
-            Continue without account
+            ⚡ Quick Demo Access (No Sign-Up)
           </Button>
         </Box>
       </Paper>
