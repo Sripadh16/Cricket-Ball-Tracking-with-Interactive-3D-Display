@@ -22,6 +22,7 @@ Comprehensive aerodynamic simulation engine implementing:
 
 import math
 import numpy as np
+from services.wicket_geometry import first_wicket_contact
 from typing import Dict, Any, List, Optional, Tuple
 
 # Physical constants for regulation cricket ball & standard atmosphere
@@ -177,7 +178,7 @@ class BallPhysicsEngine:
                 "spin_vector": [round(float(x), 4) for x in spin_vector],
                 "speed_kmh": round(speed_kmh, 2),
                 "speed_ms": round(speed_ms, 2),
-                "spin_rpm": 0.0,
+                "spin_rpm": round(float(np.linalg.norm(spin_vector)) * 60 / (2 * math.pi), 1),
                 "reynolds_number": 0.0,
                 "spin_parameter": 0.0,
                 "lift_coefficient": 0.0,
@@ -282,7 +283,7 @@ class BallPhysicsEngine:
         vy_new = vy * forward_loss_factor
 
         # Lateral deviation: seam kick + spin grip
-        delta_vx = contact_kick_x * seam_kick
+        delta_vx = contact_kick_x * seam_kick * spin_grip
         vx_new = vx + delta_vx
 
         # Spin decay upon impact due to contact torque
@@ -309,7 +310,7 @@ class BallPhysicsEngine:
         fps: float = 60.0
     ) -> Dict[str, Any]:
         """
-        Numerically integrate full 3D aerodynamic trajectory using Runge-Kutta substepping
+        Numerically integrate full 3D aerodynamic trajectory using semi-implicit Euler substepping
         and pitch surface restitution tensor.
         """
         profile = cls.get_pitch_profile(pitch_type)
@@ -325,7 +326,7 @@ class BallPhysicsEngine:
         vx0 = (pitch_target_x - x0) / t_pitch
 
         # Shooting solver to precisely hit pitch_target accounting for air resistance
-        dt_solve = 0.005
+        dt_solve = dt_sub
         for _ in range(8):
             pos_s = np.array(release_pos, dtype=float)
             vel_s = np.array([vx0, vy0, vz0], dtype=float)
@@ -358,7 +359,11 @@ class BallPhysicsEngine:
         t = 0.0
 
         # 1. Pre-bounce flight
-        while pos[1] < pitch_target_y and pos[2] > BALL_RADIUS:
+        prev_pos = np.copy(pos)
+        prev_vel = np.copy(vel)
+        prev_t = t
+
+        while pos[2] > BALL_RADIUS:
             forces = cls.calculate_instantaneous_forces(
                 vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
             )
@@ -388,27 +393,40 @@ class BallPhysicsEngine:
             points.append(pt)
             pre_bounce_points.append(pt)
 
+            prev_pos = np.copy(pos)
+            prev_vel = np.copy(vel)
+            prev_t = t
+
             for _ in range(substeps):
                 f_sub = cls.calculate_instantaneous_forces(
                     vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
                 )
                 acc = np.array(f_sub["acceleration"], dtype=float)
+                prev_pos, prev_vel, prev_t = pos.copy(), vel.copy(), t
                 vel += acc * dt_sub
                 pos += vel * dt_sub
-            t += dt_frame
+                t += dt_sub
+                if pos[2] <= BALL_RADIUS:
+                    break
 
-        # Bounce point
+        # First ground contact within the actual integration substep.
+        alpha_z = (prev_pos[2] - BALL_RADIUS) / max(1e-9, prev_pos[2] - pos[2])
+        t_bounce = prev_t + alpha_z * dt_sub
+        pos_bounce = prev_pos + alpha_z * (pos - prev_pos)
+        pos_bounce[2] = BALL_RADIUS
+        vel_bounce = prev_vel + alpha_z * (vel - prev_vel)
+
         bounce_forces = cls.calculate_instantaneous_forces(
-            vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+            vel_bounce.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
         )
         bounce_pt = {
-            "x": round(float(pos[0]), 4),
-            "y": round(float(pitch_target_y), 4),
+            "x": round(float(pos_bounce[0]), 4),
+            "y": round(float(pos_bounce[1]), 4),
             "z": BALL_RADIUS,
-            "vx": round(float(vel[0]), 3),
-            "vy": round(float(vel[1]), 3),
-            "vz": round(float(vel[2]), 3),
-            "t": round(float(t), 4),
+            "vx": round(float(vel_bounce[0]), 3),
+            "vy": round(float(vel_bounce[1]), 3),
+            "vz": round(float(vel_bounce[2]), 3),
+            "t": round(float(t_bounce), 4),
             "speed_kmh": bounce_forces["speed_kmh"],
             "phase": "bounce",
             "velocity_vector": bounce_forces["velocity_vector"],
@@ -422,20 +440,43 @@ class BallPhysicsEngine:
             "magnus_force_n": bounce_forces["magnus_force_n"],
             "drag_force_n": bounce_forces["drag_force_n"],
         }
+        # Rounded timestamps can coincide at a frame boundary; the event owns that sample.
+        if points and points[-1]["t"] == bounce_pt["t"]:
+            points.pop()
+            pre_bounce_points.pop()
         points.append(bounce_pt)
+        pre_bounce_points.append(bounce_pt)
 
-        # Apply pitch restitution tensor
+        # Apply pitch restitution tensor to reflect velocity and decay spin
         new_vel, new_spin = cls.apply_pitch_restitution(
-            vel.tolist(), spin.tolist(), pitch_type, seam_angle_deg, contact_kick_x, base_restitution
+            vel_bounce.tolist(), spin.tolist(), pitch_type, seam_angle_deg, contact_kick_x, base_restitution
         )
         vel = np.array(new_vel, dtype=float)
         spin = np.array(new_spin, dtype=float)
-        pos[2] = BALL_RADIUS
+        pos = np.copy(pos_bounce)
+        t = t_bounce
 
+        bounce_pt["outgoing_telemetry"] = cls.calculate_instantaneous_forces(
+            vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+        )
         bounce_speed_kmh = round(float(np.linalg.norm(vel) * 3.6), 1)
 
         # 2. Post-bounce flight
         target_impact_y = impact_y if has_pad_impact else STUMP_Y
+        prev_pos = np.copy(pos)
+        prev_vel = np.copy(vel)
+        prev_t = t
+
+        # Step first post-bounce increment so points has no duplicate timestamp
+        for _ in range(substeps):
+            f_sub = cls.calculate_instantaneous_forces(
+                vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+            )
+            acc = np.array(f_sub["acceleration"], dtype=float)
+            vel += acc * dt_sub
+            pos += vel * dt_sub
+        t += dt_frame
+
         while pos[1] < target_impact_y and pos[2] > 0.02:
             forces = cls.calculate_instantaneous_forces(
                 vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
@@ -466,6 +507,10 @@ class BallPhysicsEngine:
             points.append(pt)
             post_bounce_points.append(pt)
 
+            prev_pos = np.copy(pos)
+            prev_vel = np.copy(vel)
+            prev_t = t
+
             for _ in range(substeps):
                 f_sub = cls.calculate_instantaneous_forces(
                     vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
@@ -477,17 +522,25 @@ class BallPhysicsEngine:
 
         impact_pt = None
         if has_pad_impact:
+            # Interpolate exact pad impact position at y = impact_y
+            dy_imp = max(1e-9, pos[1] - prev_pos[1])
+            alpha_imp = max(0.0, min(1.0, (impact_y - prev_pos[1]) / dy_imp))
+            t_imp = prev_t + alpha_imp * dt_frame
+            pos_imp = prev_pos + alpha_imp * (pos - prev_pos)
+            pos_imp[1] = impact_y
+            vel_imp = prev_vel + alpha_imp * (vel - prev_vel)
+
             imp_forces = cls.calculate_instantaneous_forces(
-                vel.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+                vel_imp.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
             )
             impact_pt = {
-                "x": round(float(pos[0]), 4),
-                "y": round(float(pos[1]), 4),
-                "z": round(float(max(0.04, pos[2])), 4),
-                "vx": round(float(vel[0]), 3),
-                "vy": round(float(vel[1]), 3),
-                "vz": round(float(vel[2]), 3),
-                "t": round(float(t), 4),
+                "x": round(float(pos_imp[0]), 4),
+                "y": round(float(impact_y), 4),
+                "z": round(float(max(0.04, pos_imp[2])), 4),
+                "vx": round(float(vel_imp[0]), 3),
+                "vy": round(float(vel_imp[1]), 3),
+                "vz": round(float(vel_imp[2]), 3),
+                "t": round(float(t_imp), 4),
                 "speed_kmh": imp_forces["speed_kmh"],
                 "phase": "impact",
                 "velocity_vector": imp_forces["velocity_vector"],
@@ -502,58 +555,113 @@ class BallPhysicsEngine:
                 "drag_force_n": imp_forces["drag_force_n"],
             }
             points.append(impact_pt)
+            post_bounce_points.append(impact_pt)
+            # Extrapolation begins at exact impact point
+            pos = np.copy(pos_imp)
+            vel = np.copy(vel_imp)
+            t = t_imp
+        else:
+            # Physical track reaches stumps (bowled / bouncer) - interpolate exact wicket plane crossing
+            dy_stump = max(1e-9, pos[1] - prev_pos[1])
+            alpha_stump = max(0.0, min(1.0, (STUMP_Y - prev_pos[1]) / dy_stump))
+            t_stump = prev_t + alpha_stump * dt_frame
+            pos_stump = prev_pos + alpha_stump * (pos - prev_pos)
+            pos_stump[1] = STUMP_Y
+            vel_stump = prev_vel + alpha_stump * (vel - prev_vel)
 
-        # 3. Hawk-Eye Predictive Extrapolation to Stumps (Y = 10.06m)
+            stump_crossing_forces = cls.calculate_instantaneous_forces(
+                vel_stump.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+            )
+            stump_crossing_pt = {
+                "x": round(float(pos_stump[0]), 4),
+                "y": STUMP_Y,
+                "z": round(float(max(0.01, pos_stump[2])), 4),
+                "vx": round(float(vel_stump[0]), 3),
+                "vy": round(float(vel_stump[1]), 3),
+                "vz": round(float(vel_stump[2]), 3),
+                "t": round(float(t_stump), 4),
+                "speed_kmh": stump_crossing_forces["speed_kmh"],
+                "phase": "wicket_plane",
+                "velocity_vector": stump_crossing_forces["velocity_vector"],
+                "gravity_vector": stump_crossing_forces["gravity_vector"],
+                "drag_vector": stump_crossing_forces["drag_vector"],
+                "magnus_vector": stump_crossing_forces["magnus_vector"],
+                "seam_vector": stump_crossing_forces["seam_vector"],
+                "spin_vector": stump_crossing_forces["spin_vector"],
+                "spin_rpm": stump_crossing_forces["spin_rpm"],
+                "reynolds_number": stump_crossing_forces["reynolds_number"],
+                "magnus_force_n": stump_crossing_forces["magnus_force_n"],
+                "drag_force_n": stump_crossing_forces["drag_force_n"],
+            }
+            points.append(stump_crossing_pt)
+            post_bounce_points.append(stump_crossing_pt)
+            pos = np.copy(pos_stump)
+            vel = np.copy(vel_stump)
+            t = t_stump
+
+        # 3. Hawk-Eye Predictive Extrapolation to Stumps (for LBW prediction beyond pad impact)
         pred_pos = np.copy(pos)
         pred_vel = np.copy(vel)
         pred_spin = np.copy(spin)
         pred_t = t
 
-        while pred_pos[1] <= STUMP_Y + 0.35 and pred_pos[2] > 0.01:
-            forces = cls.calculate_instantaneous_forces(
-                pred_vel.tolist(), pred_spin.tolist(), seam_angle_deg, ball_condition, pitch_type
-            )
-            pt = {
-                "x": round(float(pred_pos[0]), 4),
-                "y": round(float(pred_pos[1]), 4),
-                "z": round(float(max(0.01, pred_pos[2])), 4),
-                "vx": round(float(pred_vel[0]), 3),
-                "vy": round(float(pred_vel[1]), 3),
-                "vz": round(float(pred_vel[2]), 3),
-                "t": round(float(pred_t), 4),
-                "speed_kmh": forces["speed_kmh"],
-                "phase": "extrapolated",
-                "confidence": 0.89,
-                "velocity_vector": forces["velocity_vector"],
-                "gravity_vector": forces["gravity_vector"],
-                "drag_vector": forces["drag_vector"],
-                "magnus_vector": forces["magnus_vector"],
-                "seam_vector": forces["seam_vector"],
-                "net_force_vector": forces["net_force_vector"],
-                "spin_vector": forces["spin_vector"],
-                "spin_rpm": forces["spin_rpm"],
-                "reynolds_number": forces["reynolds_number"],
-                "magnus_force_n": forces["magnus_force_n"],
-                "drag_force_n": forces["drag_force_n"],
-            }
-            extrapolated_points.append(pt)
-
-            for _ in range(substeps):
-                f_sub = cls.calculate_instantaneous_forces(
+        if has_pad_impact:
+            while pred_pos[1] <= STUMP_Y + 0.35 and pred_pos[2] > 0.01:
+                forces = cls.calculate_instantaneous_forces(
                     pred_vel.tolist(), pred_spin.tolist(), seam_angle_deg, ball_condition, pitch_type
                 )
-                acc = np.array(f_sub["acceleration"], dtype=float)
-                pred_vel += acc * dt_sub
-                pred_pos += pred_vel * dt_sub
-            pred_t += dt_frame
+                pt = {
+                    "x": round(float(pred_pos[0]), 4),
+                    "y": round(float(pred_pos[1]), 4),
+                    "z": round(float(max(0.01, pred_pos[2])), 4),
+                    "vx": round(float(pred_vel[0]), 3),
+                    "vy": round(float(pred_vel[1]), 3),
+                    "vz": round(float(pred_vel[2]), 3),
+                    "t": round(float(pred_t), 4),
+                    "speed_kmh": forces["speed_kmh"],
+                    "phase": "extrapolated",
+                    "confidence": 0.89,
+                    "velocity_vector": forces["velocity_vector"],
+                    "gravity_vector": forces["gravity_vector"],
+                    "drag_vector": forces["drag_vector"],
+                    "magnus_vector": forces["magnus_vector"],
+                    "seam_vector": forces["seam_vector"],
+                    "net_force_vector": forces["net_force_vector"],
+                    "spin_vector": forces["spin_vector"],
+                    "spin_rpm": forces["spin_rpm"],
+                    "reynolds_number": forces["reynolds_number"],
+                    "magnus_force_n": forces["magnus_force_n"],
+                    "drag_force_n": forces["drag_force_n"],
+                }
+                extrapolated_points.append(pt)
 
-        stump_plane_x = float(pred_pos[0])
-        stump_plane_z = float(pred_pos[2])
-        for ep in extrapolated_points:
-            if ep["y"] >= STUMP_Y:
-                stump_plane_x = ep["x"]
-                stump_plane_z = ep["z"]
-                break
+                for _ in range(substeps):
+                    f_sub = cls.calculate_instantaneous_forces(
+                        pred_vel.tolist(), pred_spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+                    )
+                    acc = np.array(f_sub["acceleration"], dtype=float)
+                    pred_vel += acc * dt_sub
+                    pred_pos += pred_vel * dt_sub
+                pred_t += dt_frame
+
+        # Interpolate exact stump-plane crossing at y=STUMP_Y
+        if has_pad_impact:
+            stump_plane_x = float(pred_pos[0])
+            stump_plane_z = float(pred_pos[2])
+            for i, ep in enumerate(extrapolated_points):
+                if ep["y"] >= STUMP_Y:
+                    if i > 0:
+                        prev = extrapolated_points[i - 1]
+                        frac = (STUMP_Y - prev["y"]) / max(1e-9, ep["y"] - prev["y"])
+                        stump_plane_x = prev["x"] + frac * (ep["x"] - prev["x"])
+                        stump_plane_z = prev["z"] + frac * (ep["z"] - prev["z"])
+                    else:
+                        stump_plane_x = ep["x"]
+                        stump_plane_z = ep["z"]
+                    break
+        else:
+            stump_plane_x = float(pos[0])
+            stump_plane_z = float(pos[2])
 
         # 4. DRS Evaluation
         stump_half_width = STUMP_WIDTH / 2.0  # 0.1143m
@@ -574,7 +682,7 @@ class BallPhysicsEngine:
             else:
                 impact_verdict = "OUTSIDE"
         else:
-            impact_verdict = "NO IMPACT (CLEAN BOWLED)"
+            impact_verdict = "NO PAD INTERCEPTION"
 
         is_height_hitting = (stump_plane_z <= stump_top) and (stump_plane_z >= 0.03)
         is_height_clipping = abs(stump_plane_z - stump_top) <= BALL_RADIUS
@@ -607,6 +715,37 @@ class BallPhysicsEngine:
                 hit_stump = "Off Stump"
             else:
                 hit_stump = "Middle Stump"
+
+        # Explicit event classification and collision metadata
+        if has_pad_impact:
+            event_type = "lbw_pad_predicted"
+            collision_event = {
+                "type": "lbw_predicted",
+                "time": round(float(impact_pt["t"]), 4) if impact_pt else round(float(t), 4),
+                "hit_stump": hit_stump,
+                "x": round(float(stump_plane_x), 4),
+                "y": STUMP_Y,
+                "z": round(float(stump_plane_z), 4),
+                "is_out": wickets_verdict == "HITTING"
+            }
+        else:
+            collision_event = first_wicket_contact(points)
+            event_type = "bowled_collision" if collision_event else "not_out_missing"
+            overall_decision = "OUT" if collision_event else "NOT OUT (Missing Wickets)"
+            if collision_event:
+                hit_stump = collision_event["hit_stump"]
+                before = [point for point in points if point["t"] < collision_event["time"]]
+                after = next(point for point in points if point["t"] >= collision_event["time"])
+                previous = before[-1]
+                fraction = (collision_event["time"] - previous["t"]) / (after["t"] - previous["t"])
+                velocity = np.array([previous[key] + fraction * (after[key] - previous[key]) for key in ("vx", "vy", "vz")])
+                contact_forces = cls.calculate_instantaneous_forces(
+                    velocity.tolist(), spin.tolist(), seam_angle_deg, ball_condition, pitch_type
+                )
+                contact = {**after, **contact_forces, "t": collision_event["time"], "phase": "wicket_contact",
+                           **{key: collision_event[key] for key in ("x", "y", "z")}}
+                points = [*before, contact]
+                post_bounce_points = [point for point in post_bounce_points if point["t"] < contact["t"]] + [contact]
 
         dist_from_stumps = STUMP_Y - pitch_target_y
         if dist_from_stumps < 2.0:
@@ -648,8 +787,14 @@ class BallPhysicsEngine:
                 "pitching": pitching_verdict,
                 "impact": impact_verdict,
                 "wickets": wickets_verdict,
-                "hit_stump": hit_stump
+                "hit_stump": hit_stump,
+                "event_type": event_type,
+                "has_pad_interception": has_pad_impact,
+                "collision_event": collision_event
             },
+            "event_type": event_type,
+            "collision_event": collision_event,
+            "has_pad_interception": has_pad_impact,
             "aerodynamics_telemetry": {
                 "peak_magnus_force_n": round(float(max(magnus_forces, default=0.0)), 4),
                 "mean_drag_force_n": round(float(np.mean(drag_forces) if drag_forces else 0.0), 4),
@@ -660,7 +805,7 @@ class BallPhysicsEngine:
             "timestamps": [p["t"] for p in points],
             "confidence_score": 0.95,
             "ball_detected": True,
-            "video_duration": points[-1]["t"] if points else 1.5
+            "video_duration": max(1.5, points[-1]["t"] if points else 0)
         }
 
     @classmethod
@@ -673,6 +818,7 @@ class BallPhysicsEngine:
     ) -> Dict[str, Any]:
         """
         Simulate standard preset deliveries with custom pitch surface and RPM overrides.
+        Direction vectors for spin are unit-normalized so requested RPM exactly matches vector magnitude.
         """
         if delivery_type == "inswinger_lbw":
             title = "Fast Inswinger - LBW Out"
@@ -680,7 +826,8 @@ class BallPhysicsEngine:
             release_speed_kmh = 142.0
             spin_rpm = rpm if rpm is not None else 2100.0
             omega = spin_rpm * 2.0 * math.pi / 60.0
-            spin_vec = [-omega * 0.95, 0.0, -omega * 0.20]
+            raw_spin = np.array([-0.95, 0.0, -0.20], dtype=float)
+            spin_vec = (raw_spin / np.linalg.norm(raw_spin) * omega).tolist()
             seam_angle = -14.0
             release_pos = [0.25, -9.5, 2.05]
             pitch_target = [0.06, 5.0]
@@ -695,7 +842,8 @@ class BallPhysicsEngine:
             release_speed_kmh = 132.0
             spin_rpm = rpm if rpm is not None else 1900.0
             omega = spin_rpm * 2.0 * math.pi / 60.0
-            spin_vec = [-omega * 0.85, 0.0, -omega * 0.40]
+            raw_spin = np.array([-0.85, 0.0, -0.40], dtype=float)
+            spin_vec = (raw_spin / np.linalg.norm(raw_spin) * omega).tolist()
             seam_angle = -12.0
             release_pos = [0.45, -9.5, 2.15]
             pitch_target = [0.22, 4.4]
@@ -710,12 +858,13 @@ class BallPhysicsEngine:
             release_speed_kmh = 148.0
             spin_rpm = rpm if rpm is not None else 2250.0
             omega = spin_rpm * 2.0 * math.pi / 60.0
-            spin_vec = [-omega * 0.98, 0.0, 0.0]
+            raw_spin = np.array([-0.98, 0.0, 0.0], dtype=float)
+            spin_vec = (raw_spin / np.linalg.norm(raw_spin) * omega).tolist()
             seam_angle = 5.0
             release_pos = [0.40, -9.5, 2.25]
             pitch_target = [0.02, -1.5]
-            has_pad_impact = True
-            impact_y = 8.6
+            has_pad_impact = False  # Bouncer carries over without pad strike
+            impact_y = 10.06
             contact_kick_x = -0.45
             base_restitution = 0.68
             ball_condition = "new"
@@ -725,7 +874,8 @@ class BallPhysicsEngine:
             release_speed_kmh = 88.0
             spin_rpm = rpm if rpm is not None else 2350.0
             omega = spin_rpm * 2.0 * math.pi / 60.0
-            spin_vec = [-omega * 0.70, 0.0, -omega * 0.70]
+            raw_spin = np.array([-0.70, 0.0, -0.70], dtype=float)
+            spin_vec = (raw_spin / np.linalg.norm(raw_spin) * omega).tolist()
             seam_angle = 16.0
             release_pos = [0.35, -9.0, 1.95]
             pitch_target = [-0.04, 5.0]
@@ -752,7 +902,25 @@ class BallPhysicsEngine:
             base_restitution=base_restitution,
             fps=fps
         )
-        traj["title"] = title
+
+        profile = cls.get_pitch_profile(pitch_type)
+        is_customized = (pitch_type != "standard_hard") or (rpm is not None)
+        base_name = {
+            "inswinger_lbw": "Fast Inswinger",
+            "offcutter_bowled": "Good Length Off-Cutter",
+            "bouncer_missing": "Sharp Bouncer",
+            "legspin_umpires_call": "Leg Break"
+        }.get(delivery_type, "Custom Delivery")
+
+        outcome = traj.get("drs_evaluation", {}).get("decision", "")
+        if is_customized:
+            computed_title = f"{base_name} ({profile['name']}) - {outcome}"
+        else:
+            computed_title = title
+
+        traj["title"] = computed_title
+        traj["base_delivery_name"] = base_name
+        traj["is_customized"] = is_customized
         traj["bowler_type"] = bowler_type
         traj["spin_rpm"] = spin_rpm
         return traj

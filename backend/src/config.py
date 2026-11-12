@@ -49,7 +49,7 @@ BALL_TRACKING = {
     "min_radius": 3,
     "max_radius": 15,
     "min_confidence": 0.3,
-    "max_velocity_px_per_sec": 200,
+    "max_velocity_px_per_sec": 2500,
     "prediction_tolerance_px": 50,
 }
 

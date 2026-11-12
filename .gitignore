@@ -242,6 +242,12 @@ docker/ssl/*.crt
 # Test results
 test-results/
 playwright-report/
+.playwright-mcp/
+
+# Local audit captures and uploaded-footage diagnostics
+docs/ui-audit/*
+!docs/ui-audit/fixture.json
+!docs/ui-audit/timing.webm
 
 # Cypress
 cypress/videos/

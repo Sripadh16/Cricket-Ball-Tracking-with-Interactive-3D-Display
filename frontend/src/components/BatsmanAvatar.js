@@ -1,5 +1,6 @@
 import React, { useRef, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { strokeEnvelope } from '../utils/replayMotion';
 import * as THREE from 'three';
 
 // Procedural dynamic canvas texture for athletic team jersey back
@@ -136,6 +137,10 @@ export default function BatsmanAvatar({
   stance = 'right_hand',
   impactPoint = null,
   currentBallPos = null,
+  currentTime = 0,
+  contactTime = 0,
+  autoAction = 'backlift',
+  reducedMotion = false,
   batAction = 'auto', // 'auto' | 'defend' | 'leave' | 'drive' | 'backlift'
   visible = true,
   onSelectPoint = null,
@@ -158,7 +163,8 @@ export default function BatsmanAvatar({
     if (!impactPoint || !currentBallPos) return false;
     const dz = Math.abs(currentBallPos.z - impactPoint.z);
     const dy = Math.abs(currentBallPos.y - impactPoint.y);
-    return dz < 0.45 && dy < 0.55;
+    const dx = Math.abs(currentBallPos.x - impactPoint.x);
+    return dx < 0.08 && dz < 0.08 && dy < 0.08;
   }, [impactPoint, currentBallPos]);
 
   // Procedural textures
@@ -174,22 +180,7 @@ export default function BatsmanAvatar({
 
     // Determine current target stroke based on batAction or ball proximity
     let targetStroke = batAction;
-    if (batAction === 'auto') {
-      if (currentBallPos && currentBallPos.z > 6.0 && currentBallPos.z < 9.6) {
-        // Ball approaching popping crease
-        const isWide = isLeftHand ? (currentBallPos.x < -0.22) : (currentBallPos.x > 0.22);
-
-        if (isWide && currentBallPos.y > 0.5) {
-          targetStroke = 'leave';
-        } else if (currentBallPos.y < 0.45 && currentBallPos.z > 7.5) {
-          targetStroke = 'drive';
-        } else {
-          targetStroke = 'defend';
-        }
-      } else {
-        targetStroke = 'backlift';
-      }
-    }
+    if (batAction === 'auto') targetStroke = autoAction;
 
     // Kinematic target transforms for Bat Rig
     let targetRotX = 0;
@@ -242,20 +233,17 @@ export default function BatsmanAvatar({
         break;
     }
 
-    // Smooth lerp (60 FPS interpolation)
-    const lerpSpeed = Math.min(1.0, 8.5 * delta);
-    batRigRef.current.rotation.x = THREE.MathUtils.lerp(batRigRef.current.rotation.x, targetRotX, lerpSpeed);
-    batRigRef.current.rotation.y = THREE.MathUtils.lerp(batRigRef.current.rotation.y, targetRotY, lerpSpeed);
-    batRigRef.current.rotation.z = THREE.MathUtils.lerp(batRigRef.current.rotation.z, targetRotZ, lerpSpeed);
-
-    batRigRef.current.position.x = THREE.MathUtils.lerp(batRigRef.current.position.x, targetPosX, lerpSpeed);
-    batRigRef.current.position.y = THREE.MathUtils.lerp(batRigRef.current.position.y, targetPosY, lerpSpeed);
-    batRigRef.current.position.z = THREE.MathUtils.lerp(batRigRef.current.position.z, targetPosZ, lerpSpeed);
-
-    // Subtle head tracking towards ball
-    if (headRef.current && currentBallPos) {
-      const ballDirX = (currentBallPos.x - (stanceX + 0.1)) * 0.15;
-      headRef.current.rotation.y = THREE.MathUtils.lerp(headRef.current.rotation.y, ballDirX * stanceDir, 0.1);
+    // One continuous stroke envelope, evaluated at replay time rather than frame delta.
+    const blend = reducedMotion ? 0 : strokeEnvelope(currentTime, contactTime);
+    batRigRef.current.rotation.set(
+      THREE.MathUtils.lerp(-0.42, targetRotX, blend),
+      THREE.MathUtils.lerp(stanceDir * 0.22, targetRotY, blend),
+      THREE.MathUtils.lerp(stanceDir * 0.28, targetRotZ, blend)
+    );
+    batRigRef.current.position.set(targetPosX * blend, targetPosY * blend, targetPosZ * blend);
+    if (headRef.current) {
+      const look = currentBallPos ? THREE.MathUtils.clamp((currentBallPos.x - stanceX) * 0.15, -0.25, 0.25) : 0;
+      headRef.current.rotation.y = reducedMotion ? 0 : look * stanceDir;
     }
   });
 

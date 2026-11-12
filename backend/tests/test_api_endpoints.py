@@ -580,3 +580,31 @@ def test_drs_review_lifecycle(client, test_users):
     assert list_resp.status_code == 200
     assert len(list_resp.json()) >= 1
 
+
+
+def test_manual_calibration_ownership_and_roundtrip(client, test_users):
+    video_id = str(uuid.uuid4())
+    db = _TestingSessionLocal()
+    db.add(Video(id=video_id, user_id=test_users['user_a']['id'], filename='calibration.mp4',
+                 file_path='fixture-only', status='processed'))
+    db.add(Trajectory(video_id=video_id, points=[{'t': 2, 'x': 0, 'y': 0, 'z': 1, 'pixel_x': 100, 'pixel_y': 100}],
+                      timestamps=[2], ball_detected=True, additional_data={
+                          'video_info': {'width': 640, 'height': 480, 'fps': 30},
+                          'timing_source': 'decoder_pts', 'source_duration_s': 8,
+                          'tracking_start_s': 2, 'tracking_end_s': 2, 'drs_evaluation': {'decision': 'OUT'}}))
+    db.commit()
+    db.close()
+    route = f'/videos/{video_id}/calibration'
+    payload = {'corners': [[100, 100], [200, 100], [300, 400], [0, 400]]}
+    assert client.put(route, json=payload).status_code == 401
+    assert client.put(route, json=payload, headers=test_users['user_b']['headers']).status_code == 403
+    assert client.put(route, json={'corners': [[0, 0]] * 4}, headers=test_users['user_a']['headers']).status_code == 422
+    assert client.put(route, json=payload, headers=test_users['user_a']['headers']).status_code == 200
+    data = client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()
+    assert data['calibration_status'] == 'manual_pitch_plane'
+    assert data['points'][0]['y'] == pytest.approx(-10.06, abs=1e-5)
+    assert data['points'][0]['z'] == 1
+    assert data['drs_evaluation'] is None
+    assert data['timing_source'] == 'decoder_pts'
+    assert data['video_duration'] == 8
+    assert data['tracking_start_s'] == data['tracking_end_s'] == 2

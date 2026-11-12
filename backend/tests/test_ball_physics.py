@@ -111,3 +111,55 @@ class TestDeliveryPhysicsSimulator:
 
         # Stump plane height or post-bounce height is higher for green seamer
         assert t_green["stump_plane_target"]["z"] > t_clay["stump_plane_target"]["z"]
+
+    def test_no_duplicate_timestamps_and_rpm_normalization(self):
+        """Every preset must have strictly monotonic timestamps and exact RPM."""
+        for dt, expected_rpm in [
+            ("inswinger_lbw", 2100.0),
+            ("offcutter_bowled", 1900.0),
+            ("bouncer_missing", 2250.0),
+            ("legspin_umpires_call", 2350.0)
+        ]:
+            data = DeliveryPhysicsSimulator.generate_delivery(dt)
+            ts = [p["t"] for p in data["points"]]
+            for i in range(len(ts) - 1):
+                assert ts[i] < ts[i + 1], f"Duplicate or non-monotonic timestamp in {dt}: {ts[i]} >= {ts[i+1]}"
+            assert abs(data["points"][0]["spin_rpm"] - expected_rpm) < 1.0, f"RPM mismatch in {dt}"
+
+    def test_stump_plane_exact_interpolation(self):
+        """Stump plane target must be exactly at y=10.06m."""
+        for dt in ["inswinger_lbw", "offcutter_bowled", "bouncer_missing", "legspin_umpires_call"]:
+            data = DeliveryPhysicsSimulator.generate_delivery(dt)
+            target = data["stump_plane_target"]
+            assert target["y"] == 10.06
+
+    def test_event_types_and_pad_interception(self):
+        """Inswinger & Legspin must be LBW predictions; Offcutter must be bowled collision; Bouncer must be missing without pad strike."""
+        inswinger = DeliveryPhysicsSimulator.generate_delivery("inswinger_lbw")
+        assert inswinger["event_type"] == "lbw_pad_predicted"
+        assert inswinger["has_pad_interception"] is True
+        assert inswinger["collision_event"]["type"] == "lbw_predicted"
+
+        offcutter = DeliveryPhysicsSimulator.generate_delivery("offcutter_bowled")
+        assert offcutter["event_type"] == "bowled_collision"
+        assert offcutter["has_pad_interception"] is False
+        assert offcutter["collision_event"]["type"] == "bowled"
+
+        bouncer = DeliveryPhysicsSimulator.generate_delivery("bouncer_missing")
+        assert bouncer["event_type"] == "not_out_missing"
+        assert bouncer["has_pad_interception"] is False
+        assert bouncer["impact_point"] is None
+
+    def test_all_16_preset_turf_combinations(self):
+        """All 16 combinations of 4 presets and 4 turf profiles must simulate successfully with computed results."""
+        turf_profiles = ["standard_hard", "green_seamer", "dry_dusty", "damp_clay"]
+        presets = ["inswinger_lbw", "offcutter_bowled", "bouncer_missing", "legspin_umpires_call"]
+
+        for dt in presets:
+            for turf in turf_profiles:
+                data = DeliveryPhysicsSimulator.generate_delivery(dt, pitch_type=turf)
+                assert data["ball_detected"] is True
+                assert len(data["points"]) > 20
+                assert "drs_evaluation" in data
+                assert "decision" in data["drs_evaluation"]
+                assert data["stump_plane_target"]["y"] == 10.06

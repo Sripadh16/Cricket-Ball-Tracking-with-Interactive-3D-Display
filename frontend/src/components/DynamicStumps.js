@@ -1,12 +1,13 @@
 import React, { useRef, useState, useEffect, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
+import { wicketBodyAtTime } from '../utils/wicketReplay';
 
 // Standard Cricket Stumps Dimensions (meters)
 const STUMP_HEIGHT = 0.711; // 28 inches
-const STUMP_RADIUS = 0.018; // 3.6cm diameter
-const STUMP_SPACING = 0.057; // 5.7cm apart
-const BAIL_LENGTH = 0.054;
+const STUMP_RADIUS = 0.019; // 3.6cm diameter
+const STUMP_SPACING = 0.0953; // 5.7cm apart
+const BAIL_LENGTH = 0.0953;
 const BAIL_RADIUS = 0.006;
 
 // Initial resting positions and orientations
@@ -28,12 +29,12 @@ const INITIAL_BODIES = {
   },
   leftBail: {
     name: 'Left Bail',
-    basePos: [-0.0285, STUMP_HEIGHT + 0.012, 0],
+    basePos: [-0.04765, STUMP_HEIGHT + 0.012, 0],
     baseRot: [0, 0, Math.PI / 2]
   },
   rightBail: {
     name: 'Right Bail',
-    basePos: [0.0285, STUMP_HEIGHT + 0.012, 0],
+    basePos: [0.04765, STUMP_HEIGHT + 0.012, 0],
     baseRot: [0, 0, Math.PI / 2]
   }
 };
@@ -61,7 +62,11 @@ const DynamicStumps = forwardRef(function DynamicStumps(
     shatterTrigger = false,
     onShatter = null,
     onReset = null,
-    autoShatter = true
+    autoShatter = true,
+    replayTime = 0,
+    collisionEvent = null,
+    reducedMotion = false,
+    hasPadInterception = false
   },
   ref
 ) {
@@ -130,56 +135,56 @@ const DynamicStumps = forwardRef(function DynamicStumps(
     s.flashIntensity = 2.5;
     setIsShatteredState(true);
 
-    // Determine impact bias (middle, off, or leg)
+    // Determine impact bias (middle, off, or leg) - deterministic, repeatable physics
     const hit = (hitStump || '').toLowerCase();
     const isOffHit = hit.includes('off');
     const isLegHit = hit.includes('leg');
 
     // Middle Stump: pushed backward with violent cartwheel
     s.bodies.middle.vel.set(
-      (Math.random() - 0.5) * 0.8 * impulseStrength,
-      (1.8 + Math.random() * 1.2) * impulseStrength,
-      (3.6 + Math.random() * 1.8) * impulseStrength
+      0.0,
+      2.4 * impulseStrength,
+      4.5 * impulseStrength
     );
     s.bodies.middle.angVel.set(
-      -(6 + Math.random() * 5),
-      (Math.random() - 0.5) * 4,
-      (Math.random() - 0.5) * 6
+      -8.5,
+      0.0,
+      0.0
     );
     s.bodies.middle.resting = false;
 
     // Off Stump: pushed backward and tilted outward to off-side (+X)
     s.bodies.off.vel.set(
-      (1.4 + Math.random() * 1.0) * (isOffHit ? 1.5 : 1.0) * impulseStrength,
-      (2.0 + Math.random() * 1.0) * impulseStrength,
-      (2.8 + Math.random() * 1.4) * impulseStrength
+      1.8 * (isOffHit ? 1.4 : 1.0) * impulseStrength,
+      2.5 * impulseStrength,
+      3.5 * impulseStrength
     );
-    s.bodies.off.angVel.set(-5, 4, -(7 + Math.random() * 6));
+    s.bodies.off.angVel.set(-5, 4, -10);
     s.bodies.off.resting = false;
 
     // Leg Stump: pushed backward and tilted outward to leg-side (-X)
     s.bodies.leg.vel.set(
-      -(1.4 + Math.random() * 1.0) * (isLegHit ? 1.5 : 1.0) * impulseStrength,
-      (2.0 + Math.random() * 1.0) * impulseStrength,
-      (2.8 + Math.random() * 1.4) * impulseStrength
+      -1.8 * (isLegHit ? 1.4 : 1.0) * impulseStrength,
+      2.5 * impulseStrength,
+      3.5 * impulseStrength
     );
-    s.bodies.leg.angVel.set(-5, -4, (7 + Math.random() * 6));
+    s.bodies.leg.angVel.set(-5, -4, 10);
     s.bodies.leg.resting = false;
 
     // Left Bail: Lightweight, flies high with rapid tumble
     s.bodies.leftBail.vel.set(
-      (-1.2 + (Math.random() - 0.5) * 1.2) * impulseStrength,
-      (5.4 + Math.random() * 2.2) * impulseStrength,
-      (2.2 + Math.random() * 1.6) * impulseStrength
+      -1.2 * impulseStrength,
+      6.5 * impulseStrength,
+      3.0 * impulseStrength
     );
     s.bodies.leftBail.angVel.set(16, 10, 22);
     s.bodies.leftBail.resting = false;
 
     // Right Bail: Flies high and away
     s.bodies.rightBail.vel.set(
-      (1.2 + (Math.random() - 0.5) * 1.2) * impulseStrength,
-      (5.8 + Math.random() * 2.2) * impulseStrength,
-      (2.4 + Math.random() * 1.6) * impulseStrength
+      1.2 * impulseStrength,
+      6.8 * impulseStrength,
+      3.2 * impulseStrength
     );
     s.bodies.rightBail.angVel.set(-18, -8, -24);
     s.bodies.rightBail.resting = false;
@@ -249,26 +254,36 @@ const DynamicStumps = forwardRef(function DynamicStumps(
     const dt = Math.min(delta, 0.04); // clamp frame drop
     const g = 9.8; // Standard realistic gravity (m/s²)
 
-    // Automatic trigger detection:
-    // If target end and ball arrives at stumps (Z >= 9.85m), check if verdict is HITTING or BOWLED
-    if (isTargetEnd && autoShatter && !s.hasAutoTriggered && !s.isShattered && currentBallPos) {
-      const isNearStumpsZ = Math.abs(currentBallPos.z - position[2]) < 0.35;
-      const isStumpsHeight = currentBallPos.y <= STUMP_HEIGHT + 0.08 && currentBallPos.y >= 0;
-      const isStumpsWidth = Math.abs(currentBallPos.x - position[0]) <= 0.16;
-
-      const verdictHitting =
-        drsVerdict?.wickets === 'HITTING' ||
-        drsVerdict?.decision?.includes('OUT') ||
-        hitStump !== 'None';
-
-      if (isNearStumpsZ && isStumpsHeight && isStumpsWidth && verdictHitting) {
-        s.hasAutoTriggered = true;
-        shatter(1.1);
-      } else if (isNearStumpsZ && isStumpsHeight && isStumpsWidth) {
-        // Flash LEDs on ball graze / close proximity
-        s.ledActive = true;
-        s.flashIntensity = 1.2;
+    // Automatic replay uses explicit collision evidence, never verdict text.
+    if (isTargetEnd && autoShatter && !shatterTrigger) {
+      const hit = Boolean(!hasPadInterception && collisionEvent?.type === 'bowled'
+        && Number.isFinite(collisionEvent.time) && replayTime >= collisionEvent.time);
+      if (s.isShattered !== hit) {
+        s.isShattered = hit;
+        setIsShatteredState(hit);
+        if (hit) onShatter?.();
+        else onReset?.();
       }
+      s.ledActive = hit;
+      const elapsed = hit ? (reducedMotion ? 3 : replayTime - collisionEvent.time) : 0;
+      const refs = { leg: legRef, middle: middleRef, off: offRef, leftBail: leftBailRef, rightBail: rightBailRef };
+      const impulses = {
+        leg: [[-0.35, 0.3, 1.4], [-4, -0.4, 0.5]],
+        middle: [[0, 0.25, 1.6], [-4.5, 0, 0]],
+        off: [[0.35, 0.3, 1.4], [-4, 0.4, -0.5]],
+        leftBail: [[-0.35, 1.8, 0.9], [8, 3, 6]],
+        rightBail: [[0.35, 2, 1.1], [-7, -3, -8]]
+      };
+      Object.entries(refs).forEach(([key, mesh]) => {
+        if (!mesh.current) return;
+        const base = INITIAL_BODIES[key];
+        const struck = key.includes('Bail') || base.name === collisionEvent?.hit_stump;
+        const pose = wicketBodyAtTime(base.basePos, ...impulses[key], struck ? elapsed : 0, key.includes('Bail') ? 0.008 : 0.045);
+        mesh.current.position.set(...pose.position);
+        mesh.current.rotation.set(...pose.rotation.map((value, axis) => value + base.baseRot[axis]));
+      });
+      if (pointLightRef.current) pointLightRef.current.intensity = hit ? 2 * Math.exp(-elapsed * 3) : 0;
+      return;
     }
 
     // Decay flash intensity smoothly

@@ -1,140 +1,66 @@
 import React, { useState } from 'react';
-import { Box, TextField, Button, Typography, Paper, Alert, Tab, Tabs, CircularProgress } from '@mui/material';
-import { Login, PersonAdd, SportsCricket } from '@mui/icons-material';
+import { Box, TextField, Button, Alert, Tab, Tabs, CircularProgress, InputAdornment, IconButton } from '@mui/material';
+import { ArrowForward, SportsCricket, Visibility, VisibilityOff, PlayArrow } from '@mui/icons-material';
+import PitchDiagram from '../components/PitchDiagram';
 import api from '../api/client';
 
-function AuthPage({ onAuthSuccess }) {
+export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState('');
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleSubmit = async (event) => {
+    event.preventDefault();
     setLoading(true);
-    setError(null);
-
+    setError('');
     try {
-      const endpoint = mode === 'login' ? '/auth/login' : '/auth/register';
-      const payload = mode === 'login' 
-        ? { email, password }
-        : { email, password, name };
-      
-      const response = await api.post(endpoint, payload);
+      const response = await api.post(mode === 'login' ? '/auth/login' : '/auth/register',
+        mode === 'login' ? { email: email.trim(), password } : { email: email.trim(), password, name: name.trim() });
       localStorage.setItem('token', response.data.access_token);
       onAuthSuccess();
     } catch (err) {
-      setError(err.response?.data?.detail || `${mode === 'login' ? 'Login' : 'Registration'} failed`);
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : 'We could not connect to your account. Check your details and try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSkip = () => {
-    onAuthSuccess();
-  };
-
   return (
-    <Box sx={{
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-      alignItems: 'center',
-      background: 'linear-gradient(135deg, #1a472a 0%, #2d6a4f 100%)',
-      p: 3
-    }}>
-      {/* Logo */}
-      <Box sx={{ textAlign: 'center', mb: 4 }}>
-        <SportsCricket sx={{ fontSize: 64, color: 'white', mb: 1 }} />
-        <Typography variant="h4" sx={{ color: 'white', fontWeight: 700 }}>
-          Cricket DRS
-        </Typography>
-        <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.7)' }}>
-          Professional Ball Tracking System
-        </Typography>
-      </Box>
-
-      <Paper sx={{ maxWidth: 400, width: '100%', overflow: 'hidden' }}>
-        <Tabs
-          value={mode}
-          onChange={(_, v) => { setMode(v); setError(null); }}
-          variant="fullWidth"
-          sx={{ borderBottom: 1, borderColor: 'divider' }}
-        >
-          <Tab value="login" label="Login" icon={<Login />} iconPosition="start" />
-          <Tab value="register" label="Register" icon={<PersonAdd />} iconPosition="start" />
-        </Tabs>
-
-        <Box component="form" onSubmit={handleSubmit} sx={{ p: 3 }}>
-          {error && (
-            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          )}
-
-          {mode === 'register' && (
-            <TextField
-              fullWidth
-              label="Full Name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              margin="normal"
-              required
-              autoComplete="name"
-            />
-          )}
-
-          <TextField
-            fullWidth
-            label="Email"
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            margin="normal"
-            required
-            autoComplete="email"
-          />
-
-          <TextField
-            fullWidth
-            label="Password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            margin="normal"
-            required
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-          />
-
-          <Button
-            fullWidth
-            type="submit"
-            variant="contained"
-            disabled={loading}
-            sx={{ mt: 3, mb: 1, bgcolor: '#1a472a', '&:hover': { bgcolor: '#2d6a4f' } }}
-          >
-            {loading ? <CircularProgress size={24} /> : mode === 'login' ? 'Sign In' : 'Create Account'}
-          </Button>
-
-          <Button
-            fullWidth
-            variant="text"
-            onClick={handleSkip}
-            sx={{ color: 'text.secondary' }}
-          >
-            Continue without account
-          </Button>
-        </Box>
-      </Paper>
-
-      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.5)', mt: 4, textAlign: 'center' }}>
-        By continuing, you agree to our Terms of Service
-      </Typography>
-    </Box>
+    <main id="main-content" tabIndex={-1} className="auth-layout">
+      <section className="auth-story" aria-label="About the project">
+        <div className="wordmark"><span className="brand-symbol"><SportsCricket sx={{ fontSize: 17 }} /></span> crease<span className="muted" style={{ fontWeight: 400 }}>/ lab</span></div>
+        <div>
+          <h1>See the delivery.<br /><em>Understand the path.</em></h1>
+          <p>Follow the ball from the first frame to the final bounce. Inspect the evidence. Explore the geometry.</p>
+        </div>
+        <PitchDiagram />
+        <div className="auth-story-footer eyebrow" style={{ color: '#adb8c7' }}>Track in 2D. Understand in 3D.</div>
+      </section>
+      <section className="auth-form-panel" aria-label="Account access">
+        <div className="auth-form-inner">
+          <h2>{mode === 'login' ? 'Sign in to your workspace' : 'Create your account'}</h2>
+          <p>{mode === 'login' ? 'Sign in to upload deliveries and revisit your reviews.' : 'Create an account to keep your clips and analysis together.'}</p>
+          <Tabs value={mode} onChange={(_, value) => { setMode(value); setError(''); }} variant="fullWidth" aria-label="Account action">
+            <Tab value="login" label="Sign in" disabled={loading} /><Tab value="register" label="Create account" disabled={loading} />
+          </Tabs>
+          <Box component="form" onSubmit={handleSubmit}>
+            {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
+            {mode === 'register' && <TextField label="Full name" required value={name} onChange={e => setName(e.target.value)} autoComplete="name" disabled={loading} fullWidth />}
+            <TextField label="Email address" type="email" required value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" disabled={loading} fullWidth />
+            <TextField label="Password" type={showPassword ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} disabled={loading} fullWidth InputProps={{ endAdornment: <InputAdornment position="end"><IconButton aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)} edge="end">{showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}</IconButton></InputAdornment> }} />
+            <Button type="submit" variant="contained" disabled={loading} endIcon={loading ? <CircularProgress size={17} color="inherit" /> : <ArrowForward />} fullWidth>{loading ? 'Connecting…' : mode === 'login' ? 'Open workspace' : 'Create account'}</Button>
+          </Box>
+          <div className="auth-demo">
+            <span className="muted" style={{ fontSize: 13 }}>Explore simulated deliveries. No account needed.</span>
+            <Button onClick={onExploreDemo} startIcon={<PlayArrow />} sx={{ mt: 1.5 }} fullWidth>Continue without account</Button>
+          </div>
+        </div>
+      </section>
+    </main>
   );
 }
-
-export default AuthPage;

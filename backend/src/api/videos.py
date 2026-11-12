@@ -11,6 +11,8 @@ from models.user import User
 from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS
 from services.sample_generator import DeliveryPhysicsSimulator
 from services.ball_physics_engine import BallPhysicsEngine
+from services.pitch_calibration import calibrate_pitch
+from pydantic import BaseModel, Field
 from typing import Optional
 import uuid
 import logging
@@ -120,6 +122,14 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "bounce_speed_kmh": trajectory_data.get("bounce_speed_kmh"),
         "release_speed_px_per_sec": trajectory_data.get("release_speed_px_per_sec"),
         "length_zone": trajectory_data.get("length_zone"),
+        "timing_source": trajectory_data.get("timing_source"),
+        "fps_source": trajectory_data.get("fps_source"),
+        "reconstruction_method": trajectory_data.get("reconstruction_method"),
+        "calibration_status": trajectory_data.get("calibration_status"),
+        "coordinate_space": trajectory_data.get("coordinate_space"),
+        "tracking_start_s": trajectory_data.get("tracking_start_s"),
+        "tracking_end_s": trajectory_data.get("tracking_end_s"),
+        "source_duration_s": trajectory_data.get("source_duration_s"),
     }
 
 
@@ -467,6 +477,41 @@ async def track_video(
         raise HTTPException(status_code=500, detail=f"Tracking failed: {str(e)}")
 
 
+class PitchCalibrationRequest(BaseModel):
+    corners: list[tuple[float, float]] = Field(min_length=4, max_length=4)
+
+
+@router.put("/{video_id}/calibration")
+async def correct_pitch_calibration(video_id: str, payload: PitchCalibrationRequest,
+                                    current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = VideoService(db).get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+    if video.status != "processed":
+        raise HTTPException(status_code=409, detail="Wait for video processing to complete before correcting landmarks.")
+    trajectory = db.query(Trajectory).filter(Trajectory.video_id == video_id).first()
+    if not trajectory:
+        raise HTTPException(status_code=404, detail="Process this video before correcting landmarks.")
+    data = dict(trajectory.additional_data or {})
+    info = data.get("video_info") or {}
+    try:
+        corrected, calibration = calibrate_pitch(trajectory.points or [], payload.corners, info.get("width"), info.get("height"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    trajectory.points = corrected
+    # Old inferred event geometry cannot survive a changed projection.
+    for key in ("pre_bounce_points", "post_bounce_points", "extrapolated_points", "bounce_point",
+                "impact_point", "stump_plane_target", "drs_evaluation", "release_speed_kmh", "bounce_speed_kmh", "length_zone"):
+        data[key] = None
+    data.update(calibration=calibration, calibration_status="manual_pitch_plane",
+                reconstruction_method="manual_plane_heuristic_height")
+    trajectory.additional_data = data
+    db.commit()
+    return calibration
+
+
 @router.get("/{video_id}/trajectory")
 async def get_trajectory(
     video_id: str,
@@ -499,7 +544,16 @@ async def get_trajectory(
             additional_data = {}
 
     timestamps = trajectory.timestamps or []
-    video_duration = max(timestamps) if timestamps else (video.duration or 0)
+    # Detection coverage must never masquerade as the source duration.
+    source_duration_s = additional_data.get("source_duration_s")
+    if source_duration_s and isinstance(source_duration_s, (int, float)) and source_duration_s > 0:
+        video_duration = float(source_duration_s)
+    elif video.duration and video.duration > 0:
+        video_duration = float(video.duration)
+    else:
+        video_duration = None  # Browser metadata remains authoritative; tracking length is not source duration.
+    tracking_start_s = additional_data.get("tracking_start_s")
+    tracking_end_s = additional_data.get("tracking_end_s")
     video_info = additional_data.get("video_info", {})
 
     return {
@@ -512,7 +566,7 @@ async def get_trajectory(
         # CV Observable Diagnostics & Metadata
         "debug_info": additional_data.get("debug_info", {}),
         "video_info": {
-            "fps": video_info.get("fps", 30.0),
+            "fps": video_info.get("fps"),
             "frame_count": video_info.get("frame_count"),
             "width": video_info.get("width"),
             "height": video_info.get("height"),
@@ -535,7 +589,15 @@ async def get_trajectory(
         "release_speed_kmh": additional_data.get("release_speed_kmh"),
         "bounce_speed_kmh": additional_data.get("bounce_speed_kmh"),
         "release_speed_px_per_sec": additional_data.get("release_speed_px_per_sec"),
-        "length_zone": additional_data.get("length_zone")
+        "length_zone": additional_data.get("length_zone"),
+        "tracking_start_s": tracking_start_s,
+        "tracking_end_s": tracking_end_s,
+        "timing_source": additional_data.get("timing_source"),
+        "coordinate_space": additional_data.get("coordinate_space"),
+        "fps_source": additional_data.get("fps_source"),
+        "reconstruction_method": additional_data.get("reconstruction_method", "legacy_unknown"),
+        "calibration_status": additional_data.get("calibration_status", "unverified"),
+        "calibration": additional_data.get("calibration"),
     }
 
 

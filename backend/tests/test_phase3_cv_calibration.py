@@ -122,7 +122,7 @@ class TestPerspectiveNPointCalibration:
         proj_pts, _ = cv2.projectPoints(pts_3d, rvec_true, tvec_true, K, dist)
         pts_2d = proj_pts.reshape(-1, 2)
 
-        pose = svc._estimate_camera_pose_pnp(image_points=pts_2d, object_points=pts_3d)
+        pose = svc._estimate_camera_pose_pnp(image_points=pts_2d, object_points=pts_3d, camera_matrix=K)
         assert pose['success'] is True
         assert pose['reprojection_error'] < 1.0, f"Expected sub-pixel reprojection error, got {pose['reprojection_error']}"
 

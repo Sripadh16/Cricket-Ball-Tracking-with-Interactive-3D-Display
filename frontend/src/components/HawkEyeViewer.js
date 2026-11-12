@@ -1,14 +1,14 @@
-import React, { useRef, useMemo, useState } from 'react';
+import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import {
   Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
   FormControlLabel, Switch, Paper, Tooltip, IconButton, Button,
-  Menu, MenuItem, ListItemIcon, ListItemText, Select, FormControl
+  Menu, MenuItem, ListItemIcon, ListItemText, Select, FormControl, useMediaQuery
 } from '@mui/material';
 import {
   SportsCricket, Palette, Whatshot, WbSunny, LiveTv,
   GraphicEq, AutoAwesome, Close, ExpandMore, AccountTree, Article,
-  SlowMotionVideo, FlightTakeoff, RestartAlt, FlashOn
+  RestartAlt, FlashOn
 } from '@mui/icons-material';
 import DecisionFlowHUD from './DecisionFlowHUD';
 import * as THREE from 'three';
@@ -18,6 +18,7 @@ import BatsmanAvatar from './BatsmanAvatar';
 import DynamicStumps from './DynamicStumps';
 import GhostTrajectoryOverlay, { GhostDivergencePill, GHOST_PRESETS } from './GhostTrajectoryOverlay';
 import CinematicCameraController from './CinematicCameraController';
+import { prepareTrajectory, sampleTrajectoryAtTime } from '../utils/trajectory';
 import PhysicsVectorArrows, { PhysicsTelemetryBadge } from './PhysicsVectorsHUD';
 
 // Standard Cricket Pitch Dimensions (meters)
@@ -29,7 +30,7 @@ const BALL_RADIUS = 0.036;
 
 // 3D Stumps & Bails component with Theme-aware Materials
 function Stumps({ position, isTargetEnd = false, hitStump = 'None', theme }) {
-  const stumpSpacing = 0.057; // 5.7cm apart
+  const stumpSpacing = 0.0953; // 5.7cm apart
   const stumps = [
     { name: 'Leg Stump', x: -stumpSpacing },
     { name: 'Middle Stump', x: 0 },
@@ -44,7 +45,7 @@ function Stumps({ position, isTargetEnd = false, hitStump = 'None', theme }) {
         const isHit = isTargetEnd && hitStump.includes(s.name.split(' ')[0]);
         return (
           <mesh key={idx} position={[s.x, STUMP_HEIGHT / 2, 0]} castShadow>
-            <cylinderGeometry args={[0.018, 0.018, STUMP_HEIGHT, 16]} />
+            <cylinderGeometry args={[0.019, 0.019, STUMP_HEIGHT, 16]} />
             <meshStandardMaterial
               color={isHit ? '#ff1744' : themeStumps.color}
               roughness={0.3}
@@ -57,12 +58,12 @@ function Stumps({ position, isTargetEnd = false, hitStump = 'None', theme }) {
       })}
 
       {/* Two Bails */}
-      <mesh position={[-0.028, STUMP_HEIGHT + 0.015, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.006, 0.006, 0.055, 12]} />
+      <mesh position={[-0.04765, STUMP_HEIGHT + 0.012, 0]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.006, 0.006, 0.0953, 12]} />
         <meshStandardMaterial color={themeStumps.bailsColor} roughness={0.4} />
       </mesh>
-      <mesh position={[0.028, STUMP_HEIGHT + 0.015, 0]} rotation={[0, 0, Math.PI / 2]}>
-        <cylinderGeometry args={[0.006, 0.006, 0.055, 12]} />
+      <mesh position={[0.04765, STUMP_HEIGHT + 0.012, 0]} rotation={[0, 0, Math.PI / 2]}>
+        <cylinderGeometry args={[0.006, 0.006, 0.0953, 12]} />
         <meshStandardMaterial color={themeStumps.bailsColor} roughness={0.4} />
       </mesh>
     </group>
@@ -70,11 +71,13 @@ function Stumps({ position, isTargetEnd = false, hitStump = 'None', theme }) {
 }
 
 // Detailed Cricket Pitch with Crease Markings, Grid Overlay & Optional Length Zones
-function CricketPitch({ showZones = false, theme }) {
+function CricketPitch({ showZones = false, theme, pitchType }) {
   const halfPitch = PITCH_LENGTH / 2;
   const poppingCreaseDist = 1.22; // 1.22m in front of bowling crease
 
-  const pConfig = theme?.pitch || THEME_CONFIGS.broadcast.pitch;
+  const base = theme?.pitch || THEME_CONFIGS.broadcast.pitch;
+  const surface = { standard_hard: '#b89769', green_seamer: '#72905a', dry_dusty: '#bc9464', damp_clay: '#806750' }[pitchType];
+  const pConfig = surface ? { ...base, pitchColor: surface } : base;
 
   return (
     <group>
@@ -223,6 +226,9 @@ function TrajectoryTube({ points, color, emissiveColor, radius = 0.022, isDashed
     return { solidGeoms: [], dashedGeoms: geoms };
   }, [points, radius, isDashed]);
 
+  useEffect(() => () => {
+    [...solidGeoms, ...dashedGeoms].forEach(geometry => geometry.dispose());
+  }, [solidGeoms, dashedGeoms]);
   if (!solidGeoms.length && !dashedGeoms.length) return null;
 
   const materialProps = {
@@ -326,41 +332,21 @@ function BallCometTail({ currentBallPos, allPoints, currentTime, theme }) {
     if (!currentBallPos || !allPoints || allPoints.length < 2) return [];
 
     const segments = [];
-    const NUM_SEGMENTS = 10;
-    const TIME_STEP = 0.016; // ~16ms history steps
+    const NUM_SEGMENTS = 7;
+    const TIME_STEP = 0.008; // ~16ms history steps
 
     for (let s = 1; s <= NUM_SEGMENTS; s++) {
       const pastTime = currentTime - s * TIME_STEP;
       if (pastTime < (allPoints[0].t || 0)) break;
 
-      // Locate enclosing points in trajectory
-      let idx = 0;
-      for (let i = 0; i < allPoints.length - 1; i++) {
-        if (allPoints[i].t <= pastTime) idx = i;
-        else break;
-      }
-
-      const p1 = allPoints[idx];
-      const p2 = allPoints[Math.min(idx + 1, allPoints.length - 1)];
-
-      let interpolated;
-      if (p1 === p2 || p1.t === p2.t) {
-        interpolated = p1;
-      } else {
-        const t = (pastTime - p1.t) / (p2.t - p1.t);
-        const clampedT = Math.max(0, Math.min(1, t));
-        interpolated = {
-          x: p1.x + (p2.x - p1.x) * clampedT,
-          y: p1.y + (p2.y - p1.y) * clampedT,
-          z: p1.z + (p2.z - p1.z) * clampedT
-        };
-      }
+      const interpolated = sampleTrajectoryAtTime(allPoints, pastTime);
+      if (!interpolated) continue;
 
       const fraction = (NUM_SEGMENTS - s) / NUM_SEGMENTS; // 1 at ball, 0 at end of tail
       segments.push({
         position: [interpolated.x, interpolated.y, interpolated.z],
         radius: BALL_RADIUS * (0.2 + fraction * 0.7),
-        opacity: Math.pow(fraction, 1.4) * 0.75
+        opacity: Math.pow(fraction, 1.4) * 0.35
       });
     }
 
@@ -394,7 +380,7 @@ function PitchingSpotMarker({ bouncePoint, onSelectPoint, theme }) {
 
   useFrame(({ clock }) => {
     if (ringRef.current) {
-      const s = 1 + Math.sin(clock.getElapsedTime() * 4) * 0.12;
+      const s = 1;
       ringRef.current.scale.set(s, s, s);
     }
   });
@@ -504,7 +490,7 @@ function BatsmanPads({ impactPoint, currentBallPos, onSelectPoint, theme }) {
     if (!impactPoint || !currentBallPos) return false;
     const dz = Math.abs(currentBallPos.z - impactPoint.z);
     const dy = Math.abs(currentBallPos.y - impactPoint.y);
-    return dz < 0.40 && dy < 0.50;
+    return Math.abs(currentBallPos.x - impactPoint.x) < 0.08 && dz < 0.08 && dy < 0.08;
   }, [impactPoint, currentBallPos]);
 
   const stanceZ = impactPoint ? impactPoint.z : 8.84;
@@ -606,13 +592,13 @@ function BatsmanPads({ impactPoint, currentBallPos, onSelectPoint, theme }) {
 }
 
 // Moving Cricket Ball with Dynamic Trail Glow & Visible Rotating Seam
-function CricketBall({ position, showGlow = true, theme }) {
+function CricketBall({ position, currentTime = 0, showGlow = true, theme }) {
   const meshRef = useRef();
 
-  useFrame((state, delta) => {
+  useFrame(() => {
     if (meshRef.current) {
-      meshRef.current.rotation.x += 14.0 * delta;
-      meshRef.current.rotation.y += 5.0 * delta;
+      meshRef.current.rotation.x = currentTime * 28.0;
+      meshRef.current.rotation.y = currentTime * 10.0;
     }
   });
 
@@ -664,9 +650,15 @@ function CricketBall({ position, showGlow = true, theme }) {
 // Main 3D Canvas Scene
 function Scene({
   trajectoryData,
+  isSimulation,
+  reducedMotion,
+  isPlaying,
+  isSeeking,
+  duration,
   currentTime,
   cameraView,
   showExtrapolation,
+  showFullPath,
   showZones,
   showForceVectors = true,
   currentTelemetry = null,
@@ -711,7 +703,7 @@ function Scene({
       const ext = (trajectoryData.extrapolated_points || []).map(convert);
       const bnc = convert(trajectoryData.bounce_point);
       const imp = convert(trajectoryData.impact_point);
-      const all = (trajectoryData.points || []).map(convert);
+      const all = prepareTrajectory(trajectoryData.points).map(convert);
 
       return {
         preBouncePoints: pre,
@@ -724,7 +716,7 @@ function Scene({
       };
     }
 
-    const pts = (trajectoryData.points || []).map(convert).filter(Boolean);
+    const pts = prepareTrajectory(trajectoryData.points).map(convert);
     if (pts.length === 0) return { allPoints: [] };
 
     let minZIdx = 0;
@@ -743,37 +735,16 @@ function Scene({
       preBouncePoints: pre,
       postBouncePoints: post,
       extrapolatedPoints: [],
-      bouncePoint: pts[minZIdx],
-      impactPoint: pts[pts.length - 1],
+      bouncePoint: isSimulation ? pts[minZIdx] : null,
+      impactPoint: isSimulation ? pts[pts.length - 1] : null,
       stumpTarget: null,
       allPoints: pts
     };
-  }, [trajectoryData]);
+  }, [trajectoryData, isSimulation]);
 
   // Interpolate ball position according to current playback time
-  const currentBallPos = useMemo(() => {
-    if (allPoints.length === 0) return null;
-    if (allPoints.length === 1) return allPoints[0];
-
-    let idx = 0;
-    for (let i = 0; i < allPoints.length - 1; i++) {
-      if (allPoints[i].t <= currentTime) idx = i;
-      else break;
-    }
-
-    const p1 = allPoints[idx];
-    const p2 = allPoints[Math.min(idx + 1, allPoints.length - 1)];
-    if (p1 === p2 || p1.t === p2.t) return p1;
-
-    const t = (currentTime - p1.t) / (p2.t - p1.t);
-    const clampedT = Math.max(0, Math.min(1, t));
-
-    return {
-      x: p1.x + (p2.x - p1.x) * clampedT,
-      y: p1.y + (p2.y - p1.y) * clampedT,
-      z: p1.z + (p2.z - p1.z) * clampedT
-    };
-  }, [allPoints, currentTime]);
+  const sampledPoints = useMemo(() => prepareTrajectory(allPoints), [allPoints]);
+  const currentBallPos = useMemo(() => sampleTrajectoryAtTime(sampledPoints, currentTime), [sampledPoints, currentTime]);
 
   const lightCfg = theme?.lighting || THEME_CONFIGS.broadcast.lighting;
   const trajCfg = theme?.trajectory || THEME_CONFIGS.broadcast.trajectory;
@@ -815,19 +786,22 @@ function Scene({
       />
 
       <CinematicCameraController
-        view={cameraView}
+        view={reducedMotion && ['bullet_time', 'drone_flythrough', 'chase'].includes(cameraView) ? 'umpire' : cameraView}
         ballPosition={currentBallPos}
         bouncePoint={bouncePoint}
         impactPoint={impactPoint}
         trajectoryPoints={allPoints}
         currentTime={currentTime}
+        duration={duration}
+        isPlaying={isPlaying}
+        isSeeking={isSeeking}
       />
-      <CricketPitch showZones={showZones} theme={theme} />
+      <CricketPitch showZones={showZones} theme={theme} pitchType={trajectoryData?.pitch_type} />
 
       {/* Multi-Phase Hawk-Eye Trajectory Ribbons */}
       {preBouncePoints && preBouncePoints.length > 1 && (
         <TrajectoryTube
-          points={preBouncePoints}
+          points={showFullPath ? preBouncePoints : preBouncePoints.filter(point => point.t >= currentTime - 0.3 && point.t <= currentTime)}
           color={trajCfg.preBounce}
           emissiveColor={trajCfg.preBounceEmissive}
           radius={0.024}
@@ -836,7 +810,7 @@ function Scene({
 
       {postBouncePoints && postBouncePoints.length > 1 && (
         <TrajectoryTube
-          points={postBouncePoints}
+          points={showFullPath ? postBouncePoints : postBouncePoints.filter(point => point.t >= currentTime - 0.3 && point.t <= currentTime)}
           color={trajCfg.postBounce}
           emissiveColor={trajCfg.postBounceEmissive}
           radius={0.024}
@@ -856,29 +830,31 @@ function Scene({
       {/* Multi-Trajectory Ghost Overlay (Side-by-side comparison) */}
       {ghostPreset !== 'none' && (
         <GhostTrajectoryOverlay
+          reducedMotion={reducedMotion}
           primaryTrajectory={trajectoryData}
           ghostTrajectoryData={ghostTrajectoryData}
           ghostPreset={ghostPreset}
           currentTime={currentTime}
           showExtrapolation={showExtrapolation}
+            showFullPath={showFullPath}
         />
       )}
 
       {/* Dust Impact Puff Particle Burst at Bounce Point */}
-      <BounceDustParticles
+      {!reducedMotion && <BounceDustParticles
         bouncePoint={bouncePoint}
         bounceTime={bounceTime}
         currentTime={currentTime}
         theme={theme}
-      />
+      />}
 
       {/* Comet Speed Tail / Glowing Trajectory Particles following the Ball */}
-      <BallCometTail
+      {!reducedMotion && <BallCometTail
         currentBallPos={currentBallPos}
         allPoints={allPoints}
         currentTime={currentTime}
         theme={theme}
-      />
+      />}
 
       {/* Smart LED Zing Stumps & Bails at Batsman End (Z = halfPitch = 10.06m) */}
       <DynamicStumps
@@ -888,6 +864,10 @@ function Scene({
         hitStump={trajectoryData?.hit_stump || 'None'}
         drsVerdict={trajectoryData?.drs_evaluation}
         currentBallPos={currentBallPos}
+        replayTime={currentTime}
+        collisionEvent={trajectoryData?.collision_event || null}
+        reducedMotion={reducedMotion}
+        hasPadInterception={Boolean(trajectoryData?.has_pad_interception)}
         shatterTrigger={shatterTrigger}
         onShatter={onShatter}
         onReset={onReset}
@@ -899,6 +879,10 @@ function Scene({
           stance={stance}
           impactPoint={impactPoint}
           currentBallPos={currentBallPos}
+          currentTime={currentTime}
+          contactTime={impactPoint?.t ?? trajectoryData?.collision_event?.time ?? allPoints?.[allPoints.length - 1]?.t ?? 0}
+          autoAction={isSimulation ? (trajectoryData?.event_type === 'not_out_missing' ? 'leave' : 'defend') : 'backlift'}
+          reducedMotion={reducedMotion}
           batAction={batAction}
           onSelectPoint={onSelectPoint}
           visible={showAvatar}
@@ -924,14 +908,14 @@ function Scene({
       )}
 
       {/* 3D Force Vectors: Velocity, Magnus, Gravity, Spin Axis */}
-      <PhysicsVectorArrows
+      <PhysicsVectorArrows replayTime={reducedMotion ? 0 : currentTime}
         ballPosition={currentBallPos}
         telemetry={currentTelemetry}
         visible={showForceVectors}
       />
 
       {/* Moving 3D Cricket Ball */}
-      <CricketBall position={currentBallPos} theme={theme} />
+      <CricketBall position={currentBallPos} currentTime={currentTime} theme={theme} />
     </>
   );
 }
@@ -990,55 +974,35 @@ class WebGLErrorBoundary extends React.Component {
 export default function HawkEyeViewer({
   trajectoryData,
   currentTime = 0,
+  duration = 1.5,
+  isPlaying = false,
+  isSeeking = false,
+  sourceAudioUrl = null,
   initialTheme = 'broadcast',
+  isSimulation = true,
   ghostTrajectoryData = null,
   initialGhostPreset = 'none',
   onSeek = null,
   onOpenFlowHUD = null,
   onOpenReportCard = null
 }) {
-  const [cameraView, setCameraView] = useState('orbit');
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
+  const [cameraView, setCameraView] = useState('side');
   const [ghostPreset, setGhostPreset] = useState(initialGhostPreset);
-  const [showExtrapolation, setShowExtrapolation] = useState(true);
+  const [showExtrapolation, setShowExtrapolation] = useState(isSimulation);
+  const [showFullPath, setShowFullPath] = useState(isSimulation);
   const [showZones, setShowZones] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState(null);
 
   // 3D Aerodynamic Force Vectors & Physics HUD State
-  const [showForceVectors, setShowForceVectors] = useState(true);
+  const [showForceVectors, setShowForceVectors] = useState(false);
 
   // Real-time Physics Telemetry computed for HUD overlay and 3D vector arrows
-  const currentTelemetry = useMemo(() => {
-    const pts = trajectoryData?.points;
-    if (!pts || pts.length === 0) return null;
-    let idx = 0;
-    for (let i = 0; i < pts.length - 1; i++) {
-      if (pts[i].t <= currentTime) idx = i;
-      else break;
-    }
-    const p1 = pts[idx];
-
-    const vx = p1.vx !== undefined ? p1.vx : (p1.velocity_vector ? p1.velocity_vector[0] : 0);
-    const vy = p1.vy !== undefined ? p1.vy : (p1.velocity_vector ? p1.velocity_vector[1] : 35);
-    const vz = p1.vz !== undefined ? p1.vz : (p1.velocity_vector ? p1.velocity_vector[2] : -2);
-
-    return {
-      velocity_vector: p1.velocity_vector || [vx, vy, vz],
-      magnus_vector: p1.magnus_vector || [0.35, 0, 0.15],
-      gravity_vector: p1.gravity_vector || [0, 0, -1.53],
-      spin_vector: p1.spin_vector || [-150, 0, -40],
-      spin_rpm: p1.spin_rpm || trajectoryData?.spin_rpm || 2100,
-      magnus_force_n: p1.magnus_force_n !== undefined
-        ? p1.magnus_force_n
-        : (p1.magnus_vector ? Math.sqrt(p1.magnus_vector[0]**2 + p1.magnus_vector[1]**2 + p1.magnus_vector[2]**2) : 0.42),
-      drag_force_n: p1.drag_force_n || 0.85,
-      reynolds_number: p1.reynolds_number || 172000,
-      speed_kmh: p1.speed_kmh || (Math.sqrt(vx**2 + vy**2 + vz**2) * 3.6),
-      phase: p1.phase || 'trajectory'
-    };
-  }, [trajectoryData, currentTime]);
+  const telemetryPoints = useMemo(() => prepareTrajectory(trajectoryData?.points), [trajectoryData]);
+  const currentTelemetry = useMemo(() => sampleTrajectoryAtTime(telemetryPoints, currentTime), [telemetryPoints, currentTime]);
 
   // 3D Batsman Avatar & Dynamic Zing Stumps State
-  const [showAvatar, setShowAvatar] = useState(true);
+  const [showAvatar, setShowAvatar] = useState(isSimulation);
   const [stance, setStance] = useState('right_hand');
   const [batAction, setBatAction] = useState('auto');
   const targetStumpsRef = useRef(null);
@@ -1047,12 +1011,13 @@ export default function HawkEyeViewer({
 
   const toggleShatterAction = () => {
     if (isShattered) {
+      onSeek?.(0);
       if (targetStumpsRef.current) targetStumpsRef.current.reset();
       setIsShattered(false);
       setShatterTrigger(false);
     } else {
       if (targetStumpsRef.current) targetStumpsRef.current.shatter();
-      else setShatterTrigger(true);
+      setShatterTrigger(true);
       setIsShattered(true);
     }
   };
@@ -1068,14 +1033,20 @@ export default function HawkEyeViewer({
   const [showFlowHUDOverlay, setShowFlowHUDOverlay] = useState(false);
 
   const theme = useMemo(() => getThemeColors(themeName), [themeName]);
-  const drs = trajectoryData?.drs_evaluation;
+  const drs = typeof trajectoryData?.drs_evaluation?.decision === 'string' ? trajectoryData.drs_evaluation : null;
 
   return (
     <Box sx={{
       height: '100%',
+      minHeight: 0,
+      display: 'grid',
+      minWidth: 0,
+      gridTemplateColumns: 'minmax(0, 1fr)',
+      gridTemplateRows: showUltraEdge ? 'minmax(180px, 1fr) minmax(0, 240px) auto' : 'minmax(0, 1fr) auto',
       position: 'relative',
       bgcolor: theme.background,
-      overflow: 'hidden',
+      overflowX: 'hidden',
+      overflowY: showUltraEdge ? 'auto' : 'hidden',
       transition: 'background-color 0.4s ease'
     }}>
       <WebGLErrorBoundary>
@@ -1088,9 +1059,15 @@ export default function HawkEyeViewer({
           <fog attach="fog" args={[theme.fog.color, theme.fog.near, theme.fog.far]} />
           <Scene
             trajectoryData={trajectoryData}
+            isSimulation={isSimulation}
+            reducedMotion={reducedMotion}
+            isPlaying={isPlaying}
+            isSeeking={isSeeking}
+            duration={duration}
             currentTime={currentTime}
             cameraView={cameraView}
             showExtrapolation={showExtrapolation}
+            showFullPath={showFullPath}
             showZones={showZones}
             showForceVectors={showForceVectors}
             currentTelemetry={currentTelemetry}
@@ -1141,10 +1118,10 @@ export default function HawkEyeViewer({
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           <Chip
             icon={<SportsCricket sx={{ fontSize: 16 }} />}
-            label="HAWK-EYE 3D"
+            label={isSimulation ? 'Simulated delivery · 3D' : 'Approximate reconstruction'}
             size="small"
             sx={{
-              background: theme.ui.badgeBg || 'rgba(230,57,70,0.9)',
+              background: '#202733',
               color: 'white',
               fontWeight: 800,
               fontSize: '0.75rem',
@@ -1177,11 +1154,12 @@ export default function HawkEyeViewer({
         )}
       </Box>
 
+      <details className="viewer-tools"><summary>Scene tools</summary><div className="viewer-tools-content">
       {/* Top Right: Theme Switcher & Trajectory Color Legend */}
       <Box sx={{
-        position: 'absolute',
-        top: 14,
-        right: 14,
+        position: 'relative',
+        top: 0,
+        right: 0,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'flex-end',
@@ -1189,7 +1167,7 @@ export default function HawkEyeViewer({
         zIndex: 10
       }}>
         {/* Quick Toolbar: Theme Selector Button & UltraEdge Toggle & Decision Flow */}
-        <Box sx={{ display: 'flex', gap: 0.8, alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.8, alignItems: 'center' }}>
           {/* Decision Flow HUD Button */}
           <Tooltip title="TV 3-Stage Decision Flowchart (Pitching → Impact → Wickets)">
             <Button
@@ -1226,7 +1204,7 @@ export default function HawkEyeViewer({
 
           {/* Match Report Card Button */}
           {onOpenReportCard && (
-            <Tooltip title="Official Hawk-Eye Match Certificate & Report Card">
+            <Tooltip title="Delivery report and reviewer notes">
               <Button
                 size="small"
                 variant="outlined"
@@ -1277,7 +1255,7 @@ export default function HawkEyeViewer({
                 }
               }}
             >
-              Ultra-Edge
+              {isSimulation ? 'UltraEdge demo' : 'Audio inspection'}
             </Button>
           </Tooltip>
 
@@ -1288,6 +1266,7 @@ export default function HawkEyeViewer({
               variant={isShattered ? 'contained' : 'outlined'}
               startIcon={isShattered ? <RestartAlt sx={{ fontSize: 15 }} /> : <FlashOn sx={{ fontSize: 15 }} />}
               onClick={toggleShatterAction}
+              disabled={!isSimulation}
               sx={{
                 bgcolor: isShattered ? 'rgba(239, 68, 68, 0.9)' : 'rgba(10,22,40,0.85)',
                 color: isShattered ? '#ffffff' : '#f87171',
@@ -1379,7 +1358,7 @@ export default function HawkEyeViewer({
             onClick={() => { setThemeName('thermal'); setThemeAnchorEl(null); }}
           >
             <ListItemIcon><Whatshot sx={{ color: '#ff0055', fontSize: 18 }} /></ListItemIcon>
-            <ListItemText primary="Thermal HotSpot" secondary="Infrared Heat Signature" secondaryTypographyProps={{ color: '#94a3b8', fontSize: '0.68rem' }} />
+            <ListItemText primary="Thermal HotSpot" secondary="Simulated thermal styling" secondaryTypographyProps={{ color: '#94a3b8', fontSize: '0.68rem' }} />
           </MenuItem>
         </Menu>
 
@@ -1415,6 +1394,7 @@ export default function HawkEyeViewer({
         </Paper>
       </Box>
 
+      </div></details>
       {/* Point Inspector Tooltip Card (Pop-up on marker click) */}
       {selectedPoint && (
         <Paper sx={{
@@ -1434,7 +1414,7 @@ export default function HawkEyeViewer({
             <Typography variant="caption" sx={{ fontWeight: 700, color: theme.ui.accent, textTransform: 'uppercase' }}>
               Point Telemetry
             </Typography>
-            <IconButton size="small" onClick={() => setSelectedPoint(null)} sx={{ color: '#94a3b8', p: 0.2 }}>
+            <IconButton aria-label="Close point telemetry" size="small" onClick={() => setSelectedPoint(null)} sx={{ color: '#94a3b8', p: 0.2 }}>
               <Close sx={{ fontSize: 14 }} />
             </IconButton>
           </Box>
@@ -1463,19 +1443,25 @@ export default function HawkEyeViewer({
       {/* UltraEdge Drawer Overlay (Docked directly above controls when toggled) */}
       {showUltraEdge && (
         <Box sx={{
-          position: 'absolute',
-          bottom: 74,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          width: { xs: '95%', sm: '85%', md: '72%' },
+          position: 'relative',
+          gridColumn: '1 / -1',
+          width: '100%',
+          minWidth: 0,
+          maxHeight: 240,
+          overflowX: 'hidden',
+          overflowY: 'auto',
           maxWidth: 720,
           zIndex: 20,
           boxShadow: '0 12px 40px rgba(0,0,0,0.85)'
         }}>
           <UltraEdgeVisualizer
             currentTime={currentTime}
-            duration={trajectoryData?.video_duration || 1.5}
+            duration={trajectoryData?.video_duration || duration || 1.5}
             trajectoryData={trajectoryData}
+            isPlaying={isPlaying}
+            isSeeking={isSeeking}
+            sourceAudioUrl={sourceAudioUrl}
+            isSimulation={isSimulation}
             onSeek={onSeek}
             compact={true}
           />
@@ -1504,15 +1490,17 @@ export default function HawkEyeViewer({
       )}
 
       {/* Bottom Center: Interactive Camera Switcher & Toggles */}
-      <Box sx={{
-        position: 'absolute',
-        bottom: 14,
-        left: '50%',
-        transform: 'translateX(-50%)',
+      <Box className="viewer-camera-bar" sx={{
+        position: 'relative',
+        bottom: 'auto',
+        left: 'auto',
+        transform: 'none',
+        maxWidth: '100%',
+        width: '100%',
         bgcolor: theme.ui.panelBg || 'rgba(10,22,40,0.88)',
-        backdropFilter: 'blur(10px)',
-        border: `1px solid ${theme.ui.borderColor}`,
-        borderRadius: 3,
+        borderTop: '1px solid',
+        borderColor: 'divider',
+        borderRadius: 0,
         p: 0.8,
         display: 'flex',
         alignItems: 'center',
@@ -1520,70 +1508,29 @@ export default function HawkEyeViewer({
         boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
         zIndex: 10
       }}>
-        {/* Camera Views */}
-        <ToggleButtonGroup
-          size="small"
-          value={cameraView}
-          exclusive
-          onChange={(_, v) => v && setCameraView(v)}
-          sx={{
-            '& .MuiToggleButton-root': {
-              color: '#cbd5e1',
-              borderColor: 'rgba(255,255,255,0.15)',
-              fontSize: '0.72rem',
-              fontWeight: 600,
-              px: 1.2,
-              py: 0.5,
-              textTransform: 'none'
-            },
-            '& .Mui-selected': {
-              bgcolor: `${theme.ui.accent} !important`,
-              color: theme.id === 'cyberpunk' || theme.id === 'golden' ? '#000000 !important' : 'white !important',
-              fontWeight: 700
-            }
-          }}
-        >
-          <ToggleButton value="orbit">Free Orbit</ToggleButton>
-          <ToggleButton value="chase">Chase Cam</ToggleButton>
-          <ToggleButton value="batsman">Batsman POV</ToggleButton>
+        <ToggleButtonGroup size="small" aria-label="Camera angle" value={cameraView} exclusive onChange={(_, value) => value && setCameraView(value)}>
           <ToggleButton value="umpire">Umpire</ToggleButton>
-          <ToggleButton value="bowler">Bowler</ToggleButton>
-          <ToggleButton value="side">Side Arc</ToggleButton>
-          <ToggleButton value="aerial">Pitch Map</ToggleButton>
-          <ToggleButton value="impact">Impact Zoom</ToggleButton>
-          <ToggleButton
-            value="bullet_time"
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              bgcolor: cameraView === 'bullet_time' ? 'rgba(168,85,247,0.35) !important' : 'inherit',
-              color: cameraView === 'bullet_time' ? '#c084fc !important' : 'inherit'
-            }}
-          >
-            <SlowMotionVideo sx={{ fontSize: 15 }} />
-            Bullet Time
-          </ToggleButton>
-          <ToggleButton
-            value="drone_flythrough"
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              bgcolor: cameraView === 'drone_flythrough' ? 'rgba(6,182,212,0.35) !important' : 'inherit',
-              color: cameraView === 'drone_flythrough' ? '#38bdf8 !important' : 'inherit'
-            }}
-          >
-            <FlightTakeoff sx={{ fontSize: 15 }} />
-            Drone Cam
-          </ToggleButton>
+          <ToggleButton value="side">Side</ToggleButton>
+          <ToggleButton value="aerial">Top</ToggleButton>
+          <ToggleButton value="orbit">Orbit</ToggleButton>
         </ToggleButtonGroup>
-
+        <FormControl size="small" sx={{ minWidth: 130 }}>
+          <Select value={['umpire', 'side', 'aerial', 'orbit'].includes(cameraView) ? '' : cameraView}
+            displayEmpty inputProps={{ 'aria-label': 'More camera angles' }} onChange={event => setCameraView(event.target.value)}>
+            <MenuItem value="" disabled>More cameras</MenuItem>
+            <MenuItem value="chase">Chase Cam</MenuItem><MenuItem value="batsman">Batsman POV</MenuItem>
+            <MenuItem value="bowler">Bowler</MenuItem><MenuItem value="impact">Impact Zoom</MenuItem>
+            <MenuItem value="bullet_time">Bullet Time</MenuItem><MenuItem value="drone_flythrough">Drone Cam</MenuItem>
+          </Select>
+        </FormControl>
+        <details className="scene-options"><summary>Layers, comparison & avatar</summary><div className="scene-options-content">
+        <FormControlLabel control={<Switch checked={showFullPath} onChange={event => setShowFullPath(event.target.checked)} />} label="Full trajectory" />
         {/* Ghost Delivery Selection Dropdown */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8, borderLeft: '1px solid rgba(255,255,255,0.2)', pl: 1 }}>
           <Tooltip title="Compare delivery side-by-side with an ethereal Ghost Trajectory (e.g. Inswinger vs Outswinger, Leg-break vs Googly)">
             <FormControl size="small" sx={{ minWidth: 140 }}>
               <Select
+                inputProps={{ "aria-label": "Compare with ghost delivery" }}
                 value={ghostPreset}
                 onChange={(e) => setGhostPreset(e.target.value)}
                 displayEmpty
@@ -1617,7 +1564,7 @@ export default function HawkEyeViewer({
         </Box>
 
         {/* Feature Switches */}
-        <Box sx={{ display: 'flex', gap: 1, borderLeft: '1px solid rgba(255,255,255,0.2)', pl: 1 }}>
+        <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, borderLeft: '1px solid rgba(255,255,255,0.2)', pl: 1 }}>
           <Tooltip title="Toggle Extrapolated Path">
             <FormControlLabel
               control={
@@ -1744,6 +1691,7 @@ export default function HawkEyeViewer({
             </Tooltip>
           )}
         </Box>
+        </div></details>
       </Box>
     </Box>
   );

@@ -1,37 +1,39 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import Dashboard from './pages/Dashboard';
 import AuthPage from './pages/AuthPage';
-import DRSReview from './pages/DRSReview';
 import api from './api/client';
+
+const DRSReview = lazy(() => import('./pages/DRSReview'));
 
 const theme = createTheme({
   palette: {
-    primary: { main: '#1a472a', light: '#2d6a4f' },
-    secondary: { main: '#d4a574' },
-    error: { main: '#e63946' },
-    background: { default: '#f8f9fa', paper: '#ffffff' },
+    mode: 'dark',
+    primary: { main: '#8ab4ff', contrastText: '#101318' },
+    secondary: { main: '#a8bba7' },
+    background: { default: '#101318', paper: '#181d25' },
+    text: { primary: '#f2f5f9', secondary: '#adb8c7' },
+    divider: '#343e4b',
+    error: { main: '#e89583' },
+    warning: { main: '#dfbd83' },
+    success: { main: '#b5ce93' },
   },
   typography: {
-    fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
+    fontFamily: "'Segoe UI', system-ui, sans-serif",
+    button: { textTransform: 'none', fontWeight: 600 },
+    h1: { fontWeight: 500 },
+    h2: { fontWeight: 500 },
   },
-  shape: { borderRadius: 12 },
+  shape: { borderRadius: 8 },
   components: {
-    MuiButton: {
-      styleOverrides: {
-        root: {
-          textTransform: 'none',
-          fontWeight: 600,
-          padding: '12px 24px',
-          minHeight: 48,
-        },
-      },
-    },
-    MuiPaper: {
-      styleOverrides: {
-        root: { backgroundImage: 'none' },
-      },
-    },
+    MuiButton: { defaultProps: { disableElevation: true }, styleOverrides: { root: { minHeight: 40, padding: '9px 18px', borderRadius: 6 }, sizeSmall: { minHeight: 32, padding: '5px 12px' } } },
+    MuiPaper: { styleOverrides: { root: { backgroundImage: 'none' } } },
+    MuiOutlinedInput: { styleOverrides: { root: { fontSize: 14, borderRadius: 6 } } },
+    MuiTab: { styleOverrides: { root: { textTransform: 'none', fontSize: 13, minHeight: 46 } } },
+    MuiChip: { styleOverrides: { root: { borderRadius: 5, fontWeight: 500, fontSize: 11 } } },
+    MuiToggleButton: { styleOverrides: { root: { textTransform: 'none', fontSize: 13, minHeight: 44 } } },
+    MuiIconButton: { styleOverrides: { root: { minWidth: 44, minHeight: 44 } } },
+    MuiCssBaseline: { styleOverrides: { body: { fontVariantNumeric: 'tabular-nums' } } },
   },
 });
 
@@ -58,6 +60,7 @@ function App() {
   }, []);
 
   const handleLogout = useCallback(() => {
+    activeVideoFetchId.current++;
     localStorage.removeItem('token');
     setIsAuthenticated(false);
     setSelectedVideo(null);
@@ -96,6 +99,35 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!selectedVideo || trajectoryError !== 'not_processed') return;
+    const fetchId = activeVideoFetchId.current;
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        const progress = await api.get(`/videos/${selectedVideo.id}/progress`);
+        if (cancelled || fetchId !== activeVideoFetchId.current) return;
+        if (['error', 'failed'].includes(progress.data.status)) {
+          setTrajectoryError('processing_failed');
+          return;
+        }
+        if (progress.data.status === 'processed') {
+          const response = await api.get(`/videos/${selectedVideo.id}/trajectory`);
+          if (cancelled || fetchId !== activeVideoFetchId.current) return;
+          setTrajectoryData(response.data);
+          setTrajectoryError(null);
+          return;
+        }
+        timer = setTimeout(poll, 2500);
+      } catch {
+        if (!cancelled && fetchId === activeVideoFetchId.current) setTrajectoryError('load_error');
+      }
+    };
+    timer = setTimeout(poll, 2500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [selectedVideo, trajectoryError]);
+
   const handleLaunchDemo = useCallback(() => {
     activeVideoFetchId.current++;
     setSelectedVideo(null);
@@ -118,12 +150,12 @@ function App() {
     return (
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <div style={{ 
-          height: '100vh', 
-          display: 'flex', 
-          alignItems: 'center', 
+        <div style={{
+          minHeight: '100dvh',
+          display: 'flex',
+          alignItems: 'center',
           justifyContent: 'center',
-          background: '#1a472a'
+          background: '#101318'
         }}>
           <div className="loading-spinner" style={{ width: 48, height: 48, borderWidth: 4 }} />
         </div>
@@ -131,11 +163,12 @@ function App() {
     );
   }
 
-  if (!isAuthenticated) {
+  if (!isAuthenticated && currentView !== 'review') {
     return (
       <ThemeProvider theme={theme}>
         <CssBaseline />
-        <AuthPage onAuthSuccess={handleAuthSuccess} />
+        <a className="skip-link" href="#main-content">Skip to account access</a>
+        <AuthPage onAuthSuccess={handleAuthSuccess} onExploreDemo={handleLaunchDemo} />
       </ThemeProvider>
     );
   }
@@ -143,6 +176,7 @@ function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      <a className="skip-link" href="#main-content">Skip to workspace</a>
       {currentView === 'dashboard' ? (
         <Dashboard
           onVideoSelect={handleVideoSelect}
@@ -150,6 +184,7 @@ function App() {
           onLogout={handleLogout}
         />
       ) : (
+        <Suspense fallback={<div role="status" style={{ padding: 32 }}>Opening review workspace…</div>}>
         <DRSReview
           video={selectedVideo}
           trajectoryData={trajectoryData}
@@ -157,6 +192,7 @@ function App() {
           trajectoryError={trajectoryError}
           onBack={handleBackToDashboard}
         />
+        </Suspense>
       )}
     </ThemeProvider>
   );

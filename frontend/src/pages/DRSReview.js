@@ -1,30 +1,34 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import {
   Box, IconButton, Typography, Chip, Slider, ToggleButton, ToggleButtonGroup,
   Paper, Button, Select, MenuItem, FormControl, Divider, CircularProgress,
   Switch, FormControlLabel,
   Dialog, DialogTitle, DialogContent, DialogActions, TextField, Snackbar, Alert,
-  Tooltip
+  Tooltip, useMediaQuery
 } from '@mui/material';
 import {
   ArrowBack, PlayArrow, Pause, Replay, Speed, Gavel, SkipPrevious, SkipNext,
   Assessment,
-  DataObject, TableChart, CameraAlt, GpsFixed, Visibility, VisibilityOff,
+  DataObject, TableChart, CameraAlt, Visibility, VisibilityOff,
   TrendingUp, Timeline, AccountTree, Article
 } from '@mui/icons-material';
 import HawkEyeViewer from '../components/HawkEyeViewer';
 import DRSCommentary from '../components/DRSCommentary';
 import DecisionFlowHUD from '../components/DecisionFlowHUD';
 import MatchReportCard from '../components/MatchReportCard';
+import PitchCalibration from '../components/PitchCalibration';
 import api, { API_BASE_URL } from '../api/client';
+import { prepareTrajectory, sampleTrajectoryAtTime, containRect } from '../utils/trajectory';
+import { subscribeMediaClock } from '../utils/mediaClock';
 
 const PLAYBACK_RATES = [0.1, 0.25, 0.5, 1];
 
 const PRESET_DELIVERIES = [
-  { id: 'inswinger_lbw', label: 'Fast Inswinger - LBW Out (142 km/h)', decision: 'OUT' },
-  { id: 'offcutter_bowled', label: 'Good Length Off-Cutter - Bowled (132 km/h)', decision: 'OUT' },
-  { id: 'bouncer_missing', label: 'Sharp Bouncer - Missing Stumps (148 km/h)', decision: 'NOT OUT' },
-  { id: 'legspin_umpires_call', label: "Leg Break - Umpire's Call (88 km/h)", decision: "UMPIRE'S CALL" }
+  { id: 'inswinger_lbw', label: 'Fast inswinger (142 km/h)', decision: 'OUT' },
+  { id: 'offcutter_bowled', label: 'Good length off-cutter (132 km/h)', decision: 'OUT' },
+  { id: 'bouncer_missing', label: 'Sharp bouncer (148 km/h)', decision: 'NOT OUT' },
+  { id: 'legspin_umpires_call', label: 'Leg break (88 km/h)', decision: "UMPIRE'S CALL" }
 ];
 
 export default function DRSReview({
@@ -34,6 +38,7 @@ export default function DRSReview({
   trajectoryError = null,
   onBack
 }) {
+  const smallScreen = useMediaQuery('(max-width:767px)');
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const animFrameRef = useRef(null);
@@ -42,19 +47,24 @@ export default function DRSReview({
   const activeDeliveryFetchId = useRef(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isSeeking, setIsSeeking] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(1.5);
-  const [playbackRate, setPlaybackRate] = useState(1);
-  const [viewMode, setViewMode] = useState(video?.filename ? 'split' : '3d');
+  const [playbackRate, setPlaybackRate] = useState(video ? 1 : 0.5);
+  const [viewMode, setViewMode] = useState(video ? (smallScreen ? 'video' : 'split') : '3d');
   const [currentDeliveryType, setCurrentDeliveryType] = useState(video ? 'video' : 'inswinger_lbw');
   const [activeTrajectory, setActiveTrajectory] = useState(initialTrajectory);
   const [loadingPreset, setLoadingPreset] = useState(false);
   const [showCvOverlay, setShowCvOverlay] = useState(true);
   const [showCvTrail, setShowCvTrail] = useState(true);
+  const [pickingCorner, setPickingCorner] = useState(null);
+  const [pickedPoint, setPickedPoint] = useState(null);
+  useEffect(() => { setPickedPoint(null); setPickingCorner(null); }, [video?.id]);
+  useEffect(() => { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); }, [video?.id]);
 
   // Official DRS Review Session State
   const [reviewDialogOpen, setReviewDialogOpen] = useState(false);
-  const [reviewOutcome, setReviewOutcome] = useState('OUT');
+  const [reviewOutcome, setReviewOutcome] = useState('');
   const [reviewType, setReviewType] = useState('LBW');
   const [reviewNotes, setReviewNotes] = useState('');
   const [savingReview, setSavingReview] = useState(false);
@@ -62,29 +72,34 @@ export default function DRSReview({
   const [reviewSuccessMsg, setReviewSuccessMsg] = useState('');
 
   // 2D Video Tracking Reticle & Broadcast HUD Controls
-  const [showReticle, setShowReticle] = useState(true);
-  const [showBroadcastHUD] = useState(true);
+  const [mediaError, setMediaError] = useState('');
+  const [videoRect, setVideoRect] = useState(null);
+  const [showBroadcastHUD, setShowBroadcastHUD] = useState(false);
   const [hudMinimized, setHudMinimized] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [showCommentary, setShowCommentary] = useState(false);
 
-  // TV Broadcast Decision Flow HUD & Match Report Card states
+  // TV Broadcast Decision Flow HUD & Match Delivery report states
   const [flowHUDOpen, setFlowHUDOpen] = useState(false);
   const [reportCardOpen, setReportCardOpen] = useState(false);
 
   const handleSaveReview = async () => {
+    if (!video?.id || !reviewOutcome || !localStorage.getItem('token')) return;
+    setActionError('');
     setSavingReview(true);
     try {
       const payload = {
-        video_id: video?.id || 'demo-preset',
+        video_id: video.id,
         decisions: [
           {
             type: reviewType,
             outcome: reviewOutcome,
             timestamp: currentTime,
-            confidence: activeTrajectory?.confidence_score || 0.95
+            confidence: activeTrajectory?.confidence_score ?? null
           }
         ],
-        notes: reviewNotes || `Official DRS Review: ${reviewOutcome} (${reviewType})`
+        notes: reviewNotes || `Reviewer assessment: ${reviewOutcome} (${reviewType})`
       };
       const res = await api.post('/reviews/', payload);
       setSavedReviewId(res.data.id);
@@ -92,7 +107,7 @@ export default function DRSReview({
       setReviewDialogOpen(false);
     } catch (err) {
       console.error('Failed to save review session:', err);
-      alert('Could not save review: ' + (err.response?.data?.detail || err.message));
+      setActionError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not save this review. Please try again.');
     } finally {
       setSavingReview(false);
     }
@@ -113,6 +128,7 @@ export default function DRSReview({
   const loadPresetDelivery = useCallback(async (deliveryType, pType = pitchType, rpm = spinRPM) => {
     const fetchId = ++activeDeliveryFetchId.current;
     setLoadingPreset(true);
+    setActionError('');
     try {
       const response = await api.get(`/videos/presets/${deliveryType}`, {
         params: {
@@ -124,10 +140,11 @@ export default function DRSReview({
       setActiveTrajectory(response.data);
       setDuration(response.data.video_duration || 1.5);
       setCurrentTime(0);
-      setIsPlaying(true);
+      setIsPlaying(false);
     } catch (err) {
       if (fetchId === activeDeliveryFetchId.current) {
         console.error('Failed to load preset delivery:', err);
+        setActionError('Could not load the simulation. Check the server connection and try again.');
       }
     } finally {
       if (fetchId === activeDeliveryFetchId.current) {
@@ -139,29 +156,32 @@ export default function DRSReview({
   // Handle switching delivery presets
   const handleDeliveryChange = (newType) => {
     activeDeliveryFetchId.current++;
+    videoRef.current?.pause();
+    setIsPlaying(false);
+    setCurrentTime(0);
     setCurrentDeliveryType(newType);
     if (newType === 'video') {
       setActiveTrajectory(initialTrajectory);
       if (videoRef.current) {
         setDuration(videoRef.current.duration || 1.5);
       }
-      setViewMode('split');
+      setViewMode(smallScreen ? 'video' : 'split');
     } else {
-      loadPresetDelivery(newType, pitchType, spinRPM);
+      if (video) loadPresetDelivery(newType, pitchType, spinRPM);
       setViewMode('3d');
     }
   };
 
   const handlePitchTypeChange = (newPitch) => {
     setPitchType(newPitch);
-    if (currentDeliveryType !== 'video') {
+    if (video && currentDeliveryType !== 'video') {
       loadPresetDelivery(currentDeliveryType, newPitch, spinRPM);
     }
   };
 
   const handleRPMChange = (newRPM) => {
     setSpinRPM(newRPM);
-    if (currentDeliveryType !== 'video') {
+    if (video && currentDeliveryType !== 'video') {
       loadPresetDelivery(currentDeliveryType, pitchType, newRPM);
     }
   };
@@ -169,36 +189,37 @@ export default function DRSReview({
   // Load initial preset if no video is loaded
   useEffect(() => {
     if (!video && !initialTrajectory && !trajectoryLoading) {
-      loadPresetDelivery('inswinger_lbw');
+      loadPresetDelivery(currentDeliveryType);
     }
-  }, [video, initialTrajectory, trajectoryLoading, loadPresetDelivery]);
+  }, [video, initialTrajectory, trajectoryLoading, loadPresetDelivery, currentDeliveryType]);
 
-  // Video event listeners: attached once whenever video element is available
+  // Keep the mounted media element authoritative across layout changes.
   useEffect(() => {
-    const vid = videoRef.current;
-    if (!vid) return;
+    const media = videoRef.current;
+    if (!media || currentDeliveryType !== 'video') return;
+    setMediaError('');
+    return subscribeMediaClock(media, (time, fromFrame) => {
+      const update = () => { setCurrentTime(time); setIsSeeking(false); };
+      // Native video presentation must not wait for a deferred React render.
+      if (fromFrame) flushSync(update);
+      else update();
+    }, setIsPlaying, setDuration,
+      () => setMediaError('This video could not be played. Try an MP4 encoded with H.264, or return to your deliveries to choose another clip.'));
+  }, [video, currentDeliveryType]);
 
-    const onTimeUpdate = () => setCurrentTime(vid.currentTime);
-    const onLoadedMetadata = () => {
-      if (vid.duration && !isNaN(vid.duration)) {
-        setDuration(vid.duration);
-      }
-    };
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-
-    vid.addEventListener('timeupdate', onTimeUpdate);
-    vid.addEventListener('loadedmetadata', onLoadedMetadata);
-    vid.addEventListener('play', onPlay);
-    vid.addEventListener('pause', onPause);
-
-    return () => {
-      vid.removeEventListener('timeupdate', onTimeUpdate);
-      vid.removeEventListener('loadedmetadata', onLoadedMetadata);
-      vid.removeEventListener('play', onPlay);
-      vid.removeEventListener('pause', onPause);
-    };
-  }, [video]);
+  useEffect(() => {
+    const media = videoRef.current;
+    const container = videoContainerRef.current;
+    if (!media || !container) return;
+    const update = () => setVideoRect(containRect(container.clientWidth, container.clientHeight,
+      media.videoWidth || initialTrajectory?.video_info?.width,
+      media.videoHeight || initialTrajectory?.video_info?.height));
+    const observer = new ResizeObserver(update);
+    observer.observe(container);
+    media.addEventListener('loadedmetadata', update);
+    update();
+    return () => { observer.disconnect(); media.removeEventListener('loadedmetadata', update); };
+  }, [video, initialTrajectory, viewMode]);
 
   // Simulated animation clock for 3D physics presets
   useEffect(() => {
@@ -215,7 +236,7 @@ export default function DRSReview({
         setCurrentTime((prev) => {
           const next = prev + delta * playbackRate;
           if (next >= duration) {
-            return 0; // Loop simulation
+            return duration;
           }
           return next;
         });
@@ -229,6 +250,9 @@ export default function DRSReview({
       lastTimeRef.current = null;
     };
   }, [isPlaying, playbackRate, duration, currentDeliveryType]);
+  useEffect(() => {
+    if (currentDeliveryType !== 'video' && currentTime >= duration) setIsPlaying(false);
+  }, [currentDeliveryType, currentTime, duration]);
 
   // Authoritative Play/Pause control (works in 3D-only, Split, and Video view modes)
   const togglePlay = () => {
@@ -237,19 +261,20 @@ export default function DRSReview({
         videoRef.current.pause();
       } else {
         videoRef.current.play().catch(err => {
-          console.warn('Video play rejected:', err.name);
+          setMediaError('Playback could not start. Press Play to try again.');
         });
       }
     } else {
+      if (!isPlaying && currentTime >= duration) setCurrentTime(0);
       setIsPlaying(!isPlaying);
     }
   };
 
   const handleSeek = (_, value) => {
-    setCurrentTime(value);
+    setIsSeeking(true);
     if (currentDeliveryType === 'video' && videoRef.current) {
       videoRef.current.currentTime = value;
-    }
+    } else { setCurrentTime(value); setIsSeeking(false); }
   };
 
   const handleRateChange = (rate) => {
@@ -260,17 +285,19 @@ export default function DRSReview({
   };
 
   const restart = () => {
-    setCurrentTime(0);
     if (currentDeliveryType === 'video' && videoRef.current) {
       videoRef.current.currentTime = 0;
-      videoRef.current.play().catch(() => {});
+      videoRef.current.play().catch(() => setMediaError('Playback could not start. Press Play to try again.'));
     } else {
+      setCurrentTime(0);
       setIsPlaying(true);
     }
   };
 
   // Accurate frame step using source video FPS when available
   const stepFrame = (direction) => {
+    videoRef.current?.pause();
+    setIsPlaying(false);
     const fps = activeTrajectory?.video_info?.fps || 30;
     if (currentDeliveryType === 'video' && videoRef.current) {
       const step = direction / fps;
@@ -295,7 +322,7 @@ export default function DRSReview({
     ? `${API_BASE_URL}/videos/${video.id}/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
     : '';
 
-  const drs = activeTrajectory?.drs_evaluation;
+  const drs = typeof activeTrajectory?.drs_evaluation?.decision === 'string' ? activeTrajectory.drs_evaluation : null;
   const debugInfo = activeTrajectory?.debug_info;
   const videoInfo = activeTrajectory?.video_info;
   const isVideoMode = currentDeliveryType === 'video';
@@ -305,6 +332,18 @@ export default function DRSReview({
   // TELEMETRY COMPUTATIONS (Speed, Seam Deviation, Length Zone, LBW Impact)
   // ---------------------------------------------------------------------------
   const releaseSpeed = useMemo(() => {
+    if (!isVideoMode) {
+      // Simulation: use provided value or fallback
+      if (activeTrajectory?.release_speed_kmh != null) {
+        return Number(activeTrajectory.release_speed_kmh.toFixed(1));
+      }
+      const pts = activeTrajectory?.points;
+      if (pts && pts.length > 0 && pts[0].speed_kmh != null) {
+        return Number(pts[0].speed_kmh.toFixed(1));
+      }
+      return 142.4; // simulation fallback only
+    }
+    // Real upload: return null if not measured
     if (activeTrajectory?.release_speed_kmh != null) {
       return Number(activeTrajectory.release_speed_kmh.toFixed(1));
     }
@@ -312,8 +351,8 @@ export default function DRSReview({
     if (pts && pts.length > 0 && pts[0].speed_kmh != null) {
       return Number(pts[0].speed_kmh.toFixed(1));
     }
-    return 142.4;
-  }, [activeTrajectory]);
+    return null; // unknown — do not invent a value
+  }, [activeTrajectory, isVideoMode]);
 
   const bounceSpeed = useMemo(() => {
     if (activeTrajectory?.bounce_speed_kmh != null) {
@@ -323,11 +362,15 @@ export default function DRSReview({
     if (bp && bp.speed_kmh != null) {
       return Number(bp.speed_kmh.toFixed(1));
     }
-    return Number((releaseSpeed * 0.83).toFixed(1));
-  }, [activeTrajectory, releaseSpeed]);
+    // This ratio belongs only to the illustrative simulation.
+    if (!isVideoMode && releaseSpeed != null) {
+      return Number((releaseSpeed * 0.83).toFixed(1));
+    }
+    return null; // unknown for real uploads without speed data
+  }, [activeTrajectory, releaseSpeed, isVideoMode]);
 
   const speedLossPct = useMemo(() => {
-    if (!releaseSpeed || !bounceSpeed) return 17.0;
+    if (releaseSpeed == null || bounceSpeed == null) return null;
     const loss = ((releaseSpeed - bounceSpeed) / releaseSpeed) * 100;
     return Number(Math.max(0, loss).toFixed(1));
   }, [releaseSpeed, bounceSpeed]);
@@ -355,15 +398,17 @@ export default function DRSReview({
       }
     }
 
+    if (isVideoMode) return null;
     const id = activeTrajectory?.id || currentDeliveryType || '';
     if (id.includes('inswinger')) return 3.2;
     if (id.includes('offcutter')) return -3.4;
     if (id.includes('legspin')) return 4.6;
     if (id.includes('bouncer')) return 0.5;
     return 2.4;
-  }, [activeTrajectory, currentDeliveryType]);
+  }, [activeTrajectory, currentDeliveryType, isVideoMode]);
 
   const deviationLabel = useMemo(() => {
+    if (deviationAngle == null) return 'Unavailable';
     if (deviationAngle > 0.5) {
       return `+${deviationAngle}° Seam Away / Leg Break`;
     } else if (deviationAngle < -0.5) {
@@ -383,12 +428,13 @@ export default function DRSReview({
       if (distFromStumps < 8.5) return 'Short Pitch';
       return 'Bouncer';
     }
+    if (isVideoMode) return null;
     const id = activeTrajectory?.id || currentDeliveryType || '';
     if (id.includes('bouncer')) return 'Bouncer';
     if (id.includes('offcutter')) return 'Good Length';
     if (id.includes('inswinger')) return 'Full Pitch';
     return 'Good Length';
-  }, [activeTrajectory, currentDeliveryType]);
+  }, [activeTrajectory, currentDeliveryType, isVideoMode]);
 
   const lengthZoneColor = useMemo(() => {
     switch (lengthZone) {
@@ -401,27 +447,8 @@ export default function DRSReview({
     }
   }, [lengthZone]);
 
-  const lbwProbability = useMemo(() => {
-    if (activeTrajectory?.lbw_probability != null) {
-      return Math.round(activeTrajectory.lbw_probability);
-    }
-    if (!drs) return 86;
-    const dec = (drs.decision || '').toUpperCase();
-    const w = (drs.wickets || '').toUpperCase();
-    const p = (drs.pitching || '').toUpperCase();
-    const imp = (drs.impact || '').toUpperCase();
-
-    if (p.includes('OUTSIDE') || imp.includes('OUTSIDE') || w.includes('MISSING') || dec.includes('NOT OUT')) {
-      return 8;
-    }
-    if (w.includes('UMPIRE') || dec.includes('UMPIRE')) {
-      return 51;
-    }
-    if (w.includes('HITTING') || dec.includes('OUT')) {
-      return 96;
-    }
-    return 74;
-  }, [activeTrajectory, drs]);
+  const lbwProbability = Number.isFinite(activeTrajectory?.lbw_probability)
+    ? Math.round(activeTrajectory.lbw_probability) : null;
 
   const lbwColor = useMemo(() => {
     if (lbwProbability >= 70) return '#ef4444';
@@ -429,169 +456,17 @@ export default function DRSReview({
     return '#10b981';
   }, [lbwProbability]);
 
-  // ---------------------------------------------------------------------------
-  // SYNCHRONOUS 2D BOUNDING BOX / RETICLE OVERLAY CALCULATION
-  // ---------------------------------------------------------------------------
-  const getRenderedVideoRect = useCallback(() => {
-    const vid = videoRef.current;
-    if (!vid) return null;
-    const cw = vid.clientWidth;
-    const ch = vid.clientHeight;
-    const vw = vid.videoWidth || 1920;
-    const vh = vid.videoHeight || 1080;
-    if (!cw || !ch) return null;
-
-    const videoAspect = vw / vh;
-    const elemAspect = cw / ch;
-
-    let drawW = cw;
-    let drawH = ch;
-    let drawX = vid.offsetLeft;
-    let drawY = vid.offsetTop;
-
-    if (Math.abs(elemAspect - videoAspect) > 0.01) {
-      if (elemAspect > videoAspect) {
-        drawW = ch * videoAspect;
-        drawX = vid.offsetLeft + (cw - drawW) / 2;
-      } else {
-        drawH = cw / videoAspect;
-        drawY = vid.offsetTop + (ch - drawH) / 2;
-      }
-    }
-    return { drawX, drawY, drawW, drawH, vw, vh };
-  }, []);
-
-  const activeBallData = useMemo(() => {
-    const points = activeTrajectory?.points;
-    if (!points || points.length === 0) return null;
-
-    // Search for segment [p0, p1] enclosing currentTime
-    let p0 = null;
-    let p1 = null;
-
-    for (let i = 0; i < points.length; i++) {
-      if (points[i].t <= currentTime) {
-        p0 = points[i];
-      }
-      if (points[i].t >= currentTime && !p1) {
-        p1 = points[i];
-        break;
-      }
-    }
-
-    if (!p0 && !p1) return null;
-    if (!p0) p0 = p1;
-    if (!p1) p1 = p0;
-
-    // Check if within tracking temporal window
-    const distToRange = currentTime < points[0].t
-      ? (points[0].t - currentTime)
-      : currentTime > points[points.length - 1].t
-      ? (currentTime - points[points.length - 1].t)
-      : 0;
-
-    if (distToRange > 0.35) return null;
-
-    let alpha = 0;
-    if (p1.t !== p0.t && p1.t > p0.t) {
-      alpha = Math.max(0, Math.min(1, (currentTime - p0.t) / (p1.t - p0.t)));
-    }
-
-    const isInterpolated = Boolean(
-      p0.is_predicted || p1.is_predicted ||
-      p0.is_interpolated || p1.is_interpolated ||
-      p0.interpolated || p1.interpolated ||
-      p0.phase === 'extrapolated' || p1.phase === 'extrapolated'
-    );
-
-    const confidence = (p0.confidence ?? 0.94) * (1 - alpha) + (p1.confidence ?? 0.94) * alpha;
-    const speedKmh = p1.speed_kmh ?? p0.speed_kmh ?? releaseSpeed;
-
-    // Coordinate resolution
-    let px = null;
-    let py = null;
-
-    if (p0.pixel_x != null && p1.pixel_x != null) {
-      let p0x = p0.pixel_x;
-      let p0y = p0.pixel_y;
-      let p1x = p1.pixel_x;
-      let p1y = p1.pixel_y;
-
-      const rect = getRenderedVideoRect();
-      const vw = rect?.vw || 1920;
-      const vh = rect?.vh || 1080;
-      if (p0x <= 1.0 && p0y <= 1.0 && p0x > 0 && p0y > 0) {
-        p0x *= vw;
-        p0y *= vh;
-      }
-      if (p1x <= 1.0 && p1y <= 1.0 && p1x > 0 && p1y > 0) {
-        p1x *= vw;
-        p1y *= vh;
-      }
-
-      px = p0x + (p1x - p0x) * alpha;
-      py = p0y + (p1y - p0y) * alpha;
-    } else if (p0.x != null && p1.x != null) {
-      // 3D perspective projection into broadcast camera frame
-      const x = p0.x + (p1.x - p0.x) * alpha;
-      const y = p0.y + (p1.y - p0.y) * alpha;
-      const z = p0.z + (p1.z - p0.z) * alpha;
-
-      const rect = getRenderedVideoRect();
-      const vw = rect?.vw || 1920;
-      const vh = rect?.vh || 1080;
-
-      // Broadcast camera position behind bowler stumps
-      const dY = Math.max(0.6, y - (-15.5));
-      const normU = 0.5 + ((x - 0.0) / dY) * 1.85;
-      const normV = 0.70 - ((z - 0.25) / dY) * 2.35;
-
-      px = Math.max(0, Math.min(vw, normU * vw));
-      py = Math.max(0, Math.min(vh, normV * vh));
-    }
-
-    return {
-      px,
-      py,
-      isInterpolated,
-      confidence,
-      speedKmh,
-      point: p0
-    };
-  }, [activeTrajectory, currentTime, getRenderedVideoRect, releaseSpeed]);
-
-  const reticleStyle = useMemo(() => {
-    if (!activeBallData || activeBallData.px == null || activeBallData.py == null) {
-      return null;
-    }
-
-    const rect = getRenderedVideoRect();
-    if (!rect) return null;
-
-    const screenX = rect.drawX + (activeBallData.px / rect.vw) * rect.drawW;
-    const screenY = rect.drawY + (activeBallData.py / rect.vh) * rect.drawH;
-
-    const scale = rect.drawW / rect.vw;
-    const boxSize = Math.max(34, Math.min(62, Math.round(44 * Math.max(0.8, scale * 1.4))));
-
-    return {
-      left: screenX,
-      top: screenY,
-      size: boxSize,
-      isInterpolated: activeBallData.isInterpolated,
-      confidence: activeBallData.confidence,
-      speedKmh: activeBallData.speedKmh,
-      pixelX: Math.round(activeBallData.px),
-      pixelY: Math.round(activeBallData.py)
-    };
-  }, [activeBallData, getRenderedVideoRect]);
+  const preparedPoints = useMemo(() => prepareTrajectory(activeTrajectory?.points), [activeTrajectory]);
+  const currentTrackPoint = useMemo(() => sampleTrajectoryAtTime(preparedPoints, currentTime), [preparedPoints, currentTime]);
+  const recentTrail = useMemo(() => preparedPoints.filter(point => point.t <= currentTime && point.t >= currentTime - 0.3
+    && Number.isFinite(point.pixel_x) && Number.isFinite(point.pixel_y)), [preparedPoints, currentTime]);
 
   // ---------------------------------------------------------------------------
   // TRAJECTORY EXPORT (JSON & CSV & 3D Screenshot)
   // ---------------------------------------------------------------------------
   const handleExportJSON = () => {
     if (!activeTrajectory) {
-      alert('No trajectory data available to export.');
+      setActionError('Load a delivery before exporting its data.');
       return;
     }
 
@@ -602,8 +477,12 @@ export default function DRSReview({
         export_timestamp: new Date().toISOString(),
         delivery_type: currentDeliveryType,
         source_video: video?.filename || null,
+        simulation: isSimulation,
+        timing_source: activeTrajectory.timing_source ?? null,
+        calibration_status: activeTrajectory.calibration_status ?? null,
+        reconstruction_method: activeTrajectory.reconstruction_method ?? null,
         video_duration_seconds: duration,
-        confidence_score: activeTrajectory.confidence_score || 0.95
+        confidence_score: activeTrajectory.confidence_score ?? null
       },
       drs_verdict: {
         decision: drs?.decision || 'N/A',
@@ -685,7 +564,7 @@ export default function DRSReview({
 
   const handleExportCSV = () => {
     if (!activeTrajectory) {
-      alert('No trajectory data available to export.');
+      setActionError('Load a delivery before exporting its data.');
       return;
     }
 
@@ -696,8 +575,8 @@ export default function DRSReview({
     if (video?.filename) lines.push(`# Source Video Filename: ${video.filename}`);
     lines.push(`# DRS Decision: ${drs?.decision || 'N/A'}`);
     lines.push(`# Pitching: ${drs?.pitching || 'N/A'} | Impact: ${drs?.impact || 'N/A'} | Wickets: ${drs?.wickets || 'N/A'}`);
-    lines.push(`# LBW Probability: ${lbwProbability}%`);
-    lines.push(`# Release Speed: ${releaseSpeed} km/h | Bounce Speed: ${bounceSpeed} km/h | Decay: ${speedLossPct}%`);
+    lines.push(`# LBW Probability: ${lbwProbability != null ? `${lbwProbability}%` : 'N/A'}`);
+    lines.push(`# Release Speed: ${releaseSpeed != null ? `${releaseSpeed} km/h` : 'N/A'} | Bounce Speed: ${bounceSpeed != null ? `${bounceSpeed ?? '—'} km/h` : 'N/A'} | Decay: ${speedLossPct != null ? `${speedLossPct}%` : 'N/A'}`);
     lines.push(`# Seam Deviation: ${deviationAngle}° (${deviationLabel})`);
     lines.push(`# Pitch Length Zone: ${lengthZone}`);
     lines.push('#');
@@ -754,231 +633,79 @@ export default function DRSReview({
       alert('Could not capture snapshot: ' + err.message);
     }
   };
-  // Closest trajectory point for observable CV video overlay
-  const currentTrackPoint = useMemo(() => {
-    if (!activeTrajectory?.points || activeTrajectory.points.length === 0) return null;
-    const pts = activeTrajectory.points;
-    let closest = pts[0];
-    let minDiff = Math.abs((pts[0].t || 0) - currentTime);
-    for (let i = 1; i < pts.length; i++) {
-      const diff = Math.abs((pts[i].t || 0) - currentTime);
-      if (diff < minDiff) {
-        minDiff = diff;
-        closest = pts[i];
-      }
-    }
-    if (minDiff > 0.15) return null;
-    return closest;
-  }, [activeTrajectory, currentTime]);
 
 
   return (
-    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#060d17', color: 'white' }}>
-      {/* Top Header Bar */}
-      <Box sx={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        flexWrap: 'wrap',
-        gap: 1.5,
-        px: 2,
-        py: 1.2,
-        bgcolor: '#0a1626',
-        borderBottom: '1px solid rgba(255,255,255,0.1)'
-      }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <IconButton
-            onClick={onBack}
-            sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.06)' }}
-            aria-label="Back to dashboard"
-          >
-            <ArrowBack fontSize="small" />
-          </IconButton>
-          <Box>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
-              Cricket DRS Review Console
-            </Typography>
-            <Typography variant="caption" sx={{ color: '#94a3b8' }}>
-              Computer Vision &amp; Interactive 3D Hawk-Eye Display
-            </Typography>
-          </Box>
-        </Box>
-
-        {/* Delivery Selector Dropdown & View Mode */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
-          <FormControl size="small" sx={{ minWidth: { xs: '100%', sm: 260 } }}>
-            <Select
-              disabled={loadingPreset}
-              value={currentDeliveryType}
-              onChange={(e) => handleDeliveryChange(e.target.value)}
-              sx={{
-                color: 'white',
-                bgcolor: 'rgba(255,255,255,0.08)',
-                borderRadius: 2,
-                fontSize: '0.85rem',
-                fontWeight: 600,
-                '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(255,255,255,0.2)' },
-                '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#e63946' },
-                '& .MuiSvgIcon-root': { color: 'white' }
-              }}
-            >
-              {video && <MenuItem value="video">Uploaded Video ({video.original_filename || video.filename})</MenuItem>}
-              {PRESET_DELIVERIES.map((p) => (
-                <MenuItem key={p.id} value={p.id}>
-                  {p.label}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-
-          {/* Aerodynamics & Pitch Restitution Surface Controls (Active for 3D Presets) */}
-          {currentDeliveryType !== 'video' && (
-            <>
-              <FormControl size="small" sx={{ minWidth: 165 }}>
-                <Select
-                  disabled={loadingPreset}
-                  value={pitchType}
-                  onChange={(e) => handlePitchTypeChange(e.target.value)}
-                  sx={{
-                    color: '#38bdf8',
-                    bgcolor: 'rgba(56, 189, 248, 0.08)',
-                    borderRadius: 2,
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(56, 189, 248, 0.3)' },
-                    '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#38bdf8' },
-                    '& .MuiSvgIcon-root': { color: '#38bdf8' }
-                  }}
-                >
-                  <MenuItem value="standard_hard">Turf: Standard Hard</MenuItem>
-                  <MenuItem value="green_seamer">Turf: Green Seamer</MenuItem>
-                  <MenuItem value="dry_dusty">Turf: Dry & Dusty</MenuItem>
-                  <MenuItem value="damp_clay">Turf: Damp Clay</MenuItem>
-                </Select>
-              </FormControl>
-
-              <FormControl size="small" sx={{ minWidth: 125 }}>
-                <Select
-                  disabled={loadingPreset}
-                  value={spinRPM}
-                  onChange={(e) => handleRPMChange(Number(e.target.value))}
-                  sx={{
-                    color: '#f472b6',
-                    bgcolor: 'rgba(244, 114, 182, 0.08)',
-                    borderRadius: 2,
-                    fontSize: '0.8rem',
-                    fontWeight: 600,
-                    '& .MuiOutlinedInput-notchedOutline': { borderColor: 'rgba(244, 114, 182, 0.3)' },
-                    '&:hover .MuiOutlinedInput-notchedOutline': { borderColor: '#f472b6' },
-                    '& .MuiSvgIcon-root': { color: '#f472b6' }
-                  }}
-                >
-                  <MenuItem value={1600}>1,600 RPM</MenuItem>
-                  <MenuItem value={2100}>2,100 RPM</MenuItem>
-                  <MenuItem value={2400}>2,400 RPM</MenuItem>
-                  <MenuItem value={2800}>2,800 RPM</MenuItem>
-                </Select>
-              </FormControl>
-            </>
-          )}
-
-          {/* View Mode Toggle */}
-          <ToggleButtonGroup
-            size="small"
-            value={viewMode}
-            exclusive
-            onChange={(_, v) => v && setViewMode(v)}
-            sx={{
-              bgcolor: 'rgba(255,255,255,0.05)',
-              '& .MuiToggleButton-root': {
-                color: '#cbd5e1',
-                borderColor: 'rgba(255,255,255,0.15)',
-                fontSize: '0.75rem',
-                px: 1.5
-              },
-              '& .Mui-selected': {
-                bgcolor: 'rgba(230,57,70,0.85) !important',
-                color: 'white !important'
-              }
-            }}
-          >
-            {video && <ToggleButton value="video" aria-label="Video only">Video</ToggleButton>}
-            {video && <ToggleButton value="split" aria-label="Split view">Split</ToggleButton>}
-            <ToggleButton value="3d" aria-label="3D Hawk-Eye">3D Hawk-Eye</ToggleButton>
-          </ToggleButtonGroup>
-
-          {/* TV Broadcast Decision Flow HUD Button */}
-          <Tooltip title="View TV Broadcast 3-Stage Decision Flowchart (Pitching → Impact → Wickets)">
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<AccountTree sx={{ fontSize: '15px !important', color: '#38bdf8' }} />}
-              onClick={() => setFlowHUDOpen(true)}
-              sx={{
-                color: '#38bdf8',
-                borderColor: 'rgba(56, 189, 248, 0.4)',
-                bgcolor: 'rgba(56, 189, 248, 0.08)',
-                fontSize: '0.75rem',
-                fontWeight: 700,
-                textTransform: 'none',
-                px: 1.2,
-                py: 0.5,
-                borderRadius: 2,
-                '&:hover': {
-                  borderColor: '#38bdf8',
-                  bgcolor: 'rgba(56, 189, 248, 0.18)'
-                }
-              }}
-            >
-              TV Flow HUD
-            </Button>
-          </Tooltip>
-
-          {/* Official Match Report Card Button */}
-          <Tooltip title="Generate Official Hawk-Eye DRS Match Certificate & Report Card">
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<Article sx={{ fontSize: '15px !important', color: '#4ade80' }} />}
-              onClick={() => setReportCardOpen(true)}
-              sx={{
-                color: '#4ade80',
-                borderColor: 'rgba(74, 222, 128, 0.4)',
-                bgcolor: 'rgba(74, 222, 128, 0.08)',
-                fontSize: '0.75rem',
-                fontWeight: 700,
-                textTransform: 'none',
-                px: 1.2,
-                py: 0.5,
-                borderRadius: 2,
-                '&:hover': {
-                  borderColor: '#4ade80',
-                  bgcolor: 'rgba(74, 222, 128, 0.18)'
-                }
-              }}
-            >
-              Match Report
-            </Button>
-          </Tooltip>
-        </Box>
-      </Box>
+    <Box component="main" id="main-content" tabIndex={-1} className="review-workspace" sx={{ display: 'flex', flexDirection: 'column', bgcolor: '#101318', color: 'white' }}>
+      <header className="review-header">
+        <div className="review-header-line">
+          <div className="review-heading">
+            <Tooltip title="Back to workspace"><IconButton onClick={onBack} aria-label="Back to workspace"><ArrowBack fontSize="small" /></IconButton></Tooltip>
+            <div><h1>{isVideoMode ? 'Delivery analysis' : 'Simulation lab'}</h1></div>
+            <Chip label={isVideoMode ? 'Uploaded footage' : 'Simulated delivery'} variant="outlined" size="small" color="primary" />
+          </div>
+          <div className="review-controls">
+            {!video && <FormControl size="small" sx={{ minWidth: { xs: 170, sm: 265 }, maxWidth: 360 }}>
+              <Select value={currentDeliveryType} onChange={e => handleDeliveryChange(e.target.value)} disabled={loadingPreset} inputProps={{ 'aria-label': 'Delivery source' }}>
+                {video && <MenuItem value="video">{video.original_filename || video.filename}</MenuItem>}
+                {PRESET_DELIVERIES.map(p => <MenuItem key={p.id} value={p.id}>{p.label}</MenuItem>)}
+              </Select>
+            </FormControl>}
+            {video && <Typography className="review-filename" title={video.original_filename || video.filename} variant="body2">{video.original_filename || video.filename}</Typography>}
+            {video && <ToggleButtonGroup size="small" value={viewMode} exclusive onChange={(_, value) => value && setViewMode(value)} aria-label="Review layout">
+              <ToggleButton value="video">Video</ToggleButton>{!smallScreen && <ToggleButton value="split">Split</ToggleButton>}<ToggleButton value="3d">3D</ToggleButton>
+            </ToggleButtonGroup>}
+          </div>
+        </div>
+        <details className="review-settings">
+          <summary>Delivery settings & presentation tools</summary>
+          <div className="settings-content">
+            {!isVideoMode && <>
+              <FormControl size="small" sx={{ minWidth: 180 }}><Select value={pitchType} disabled={loadingPreset} onChange={e => handlePitchTypeChange(e.target.value)} inputProps={{ 'aria-label': 'Pitch surface' }}>
+                <MenuItem value="standard_hard">Standard hard pitch</MenuItem><MenuItem value="green_seamer">Green seamer</MenuItem><MenuItem value="dry_dusty">Dry & dusty</MenuItem><MenuItem value="damp_clay">Damp clay</MenuItem>
+              </Select></FormControl>
+              <FormControl size="small" sx={{ minWidth: 125 }}><Select value={spinRPM} disabled={loadingPreset} onChange={e => handleRPMChange(Number(e.target.value))} inputProps={{ 'aria-label': 'Spin rate' }}>{[1600, 2100, 2400, 2800].map(rpm => <MenuItem key={rpm} value={rpm}>{rpm.toLocaleString()} RPM</MenuItem>)}</Select></FormControl>
+            </>}
+            <FormControlLabel control={<Switch size="small" checked={showBroadcastHUD} onChange={e => setShowBroadcastHUD(e.target.checked)} />} label="Scene telemetry" />
+            <FormControlLabel control={<Switch size="small" checked={showCommentary} onChange={e => setShowCommentary(e.target.checked)} />} label="Commentary" />
+          </div>
+        </details>
+        {loadingPreset && <Box role="status" sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}><CircularProgress size={12} /><Typography variant="caption" color="text.secondary">Preparing the delivery…</Typography></Box>}
+        {mediaError && <Alert severity="error" sx={{ mt: 1 }} onClose={() => setMediaError('')}>{mediaError}</Alert>}
+        {actionError && <Alert severity="error" sx={{ mt: 1.5 }} onClose={() => setActionError('')}>{actionError}</Alert>}
+      </header>
 
       {/* Main Review Area */}
-      <Box sx={{
+      <Box className="review-stage" sx={{
         flex: 1,
-        display: 'flex',
-        flexDirection: { xs: 'column', md: 'row' },
-        overflow: { xs: 'auto', md: 'hidden' },
+        minHeight: 0,
+        display: { xs: 'flex', lg: 'grid' },
+        gridTemplateColumns: video && viewMode === 'split'
+          ? 'minmax(0, 1fr) minmax(0, 1.3fr) 300px'
+          : 'minmax(0, 1fr) 300px',
+        gridTemplateRows: 'minmax(0, 1fr)',
+        flexDirection: { xs: 'column', lg: 'row' },
+        overflow: { xs: 'visible', lg: 'hidden' },
         position: 'relative'
       }}>
         {/* Video Panel: ALWAYS mounted in DOM to maintain authoritative playback clock across all view modes */}
         {video && (
           <Box
             ref={videoContainerRef}
+            className={viewMode === '3d' ? 'source-panel is-hidden' : 'source-panel'}
+            onClick={event => {
+              if (!pickingCorner || !videoRect) return;
+              const bounds = event.currentTarget.getBoundingClientRect();
+              const x = (event.clientX - bounds.left - videoRect.left) / videoRect.width;
+              const y = (event.clientY - bounds.top - videoRect.top) / videoRect.height;
+              if (x < 0 || x >= 1 || y < 0 || y >= 1) return;
+              setPickedPoint({ index: pickingCorner.index, x: Math.round(x * videoRef.current.videoWidth), y: Math.round(y * videoRef.current.videoHeight) });
+              setPickingCorner(null);
+            }}
             sx={{
               flex: viewMode === 'split' ? 1 : (viewMode === 'video' ? 1.5 : 'none'),
-              height: viewMode === '3d' ? 0 : { xs: 260, md: 'auto' },
-              minHeight: viewMode === '3d' ? 0 : { xs: 220, md: 'auto' },
+              height: viewMode === '3d' ? 0 : { xs: 320, lg: 'auto' },
+              minHeight: viewMode === '3d' ? 0 : { xs: 260, lg: 'auto' },
               width: viewMode === '3d' ? 0 : 'auto',
               overflow: 'hidden',
               visibility: viewMode === '3d' ? 'hidden' : 'visible',
@@ -993,284 +720,62 @@ export default function DRSReview({
             }}
           >
             <video
+              aria-label="Uploaded delivery video"
               ref={videoRef}
               src={videoUrl}
-              style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }}
               playsInline
             />
+            {pickingCorner && <Box sx={{ position: 'absolute', top: 50, left: 12, right: 12, bgcolor: 'background.paper', p: 1 }}>
+              <Typography role="status">Click the {pickingCorner.label.toLowerCase()} pitch corner. Pixel fields are also available for keyboard entry.</Typography>
+              <Button onClick={event => { event.stopPropagation(); setPickingCorner(null); }}>Cancel picking</Button>
+            </Box>}
 
-            {/* Observable CV 2D Ball Overlay Layer (SVG) */}
-            {(showCvOverlay || showCvTrail) && videoInfo?.width && (
-              <Box sx={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
-                pointerEvents: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}>
-                <svg
-                  viewBox={`0 0 ${videoInfo.width || 1280} ${videoInfo.height || 720}`}
-                  style={{ width: '100%', height: '100%', position: 'absolute' }}
-                >
-                  {/* Historical 2D pixel trajectory trail breadcrumbs */}
-                  {showCvTrail && activeTrajectory?.points && (
-                    <polyline
-                      points={activeTrajectory.points
-                        .filter(p => (p.t || 0) <= currentTime && p.pixel_x != null && p.pixel_y != null)
-                        .map(p => `${p.pixel_x},${p.pixel_y}`)
-                        .join(' ')}
-                      fill="none"
-                      stroke="rgba(0, 229, 255, 0.75)"
-                      strokeWidth={3}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  )}
-
-                  {/* Crosshair & target ring */}
-                  {showCvOverlay && currentTrackPoint && currentTrackPoint.pixel_x != null && (
-                    <>
-                      <circle
-                        cx={currentTrackPoint.pixel_x}
-                        cy={currentTrackPoint.pixel_y}
-                        r={currentTrackPoint.pixel_radius ? Math.max(12, currentTrackPoint.pixel_radius * 1.5) : 16}
-                        fill="none"
-                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                        strokeWidth={3}
-                        strokeDasharray={currentTrackPoint.is_predicted ? '4 4' : 'none'}
-                      />
-                      <line
-                        x1={currentTrackPoint.pixel_x - 22}
-                        y1={currentTrackPoint.pixel_y}
-                        x2={currentTrackPoint.pixel_x + 22}
-                        y2={currentTrackPoint.pixel_y}
-                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                        strokeWidth={1.5}
-                      />
-                      <line
-                        x1={currentTrackPoint.pixel_x}
-                        y1={currentTrackPoint.pixel_y - 22}
-                        x2={currentTrackPoint.pixel_x}
-                        y2={currentTrackPoint.pixel_y + 22}
-                        stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                        strokeWidth={1.5}
-                      />
-                      {/* Detection Badge Text */}
-                      <text
-                        x={currentTrackPoint.pixel_x + 18}
-                        y={currentTrackPoint.pixel_y - 12}
-                        fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'}
-                        fontSize={14}
-                        fontWeight="bold"
-                        fontFamily="monospace"
-                      >
-                        {currentTrackPoint.is_predicted ? 'KF Predicted' : `Detected (${Math.round((currentTrackPoint.confidence || 0.8) * 100)}%)`}
-                      </text>
-                    </>
-                  )}
-                </svg>
-              </Box>
+            {videoRect && (showCvOverlay || showCvTrail) && (
+              <svg aria-hidden="true" viewBox={`0 0 ${videoInfo?.width || videoRef.current?.videoWidth} ${videoInfo?.height || videoRef.current?.videoHeight}`}
+                style={{ position: 'absolute', pointerEvents: 'none', ...videoRect }}>
+                {showCvTrail && <polyline points={recentTrail.map(point => `${point.pixel_x},${point.pixel_y}`).join(' ')}
+                  fill="none" stroke="#F6D365" strokeWidth="2" vectorEffect="non-scaling-stroke" />}
+                {showCvOverlay && currentTrackPoint && Number.isFinite(currentTrackPoint.pixel_x) && Number.isFinite(currentTrackPoint.pixel_y) && (
+                  <circle cx={currentTrackPoint.pixel_x} cy={currentTrackPoint.pixel_y} r="12" fill="none"
+                    stroke="#F6D365" strokeWidth="2" vectorEffect="non-scaling-stroke"
+                    strokeDasharray={currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? '4 3' : undefined} />
+                )}
+              </svg>
             )}
 
-            {/* Top-Left Video Badges: Playback Rate & 2D Tracking Reticle Toggle */}
-            <Box sx={{ position: 'absolute', top: 12, left: 12, display: 'flex', gap: 1, zIndex: 12 }}>
-              {playbackRate !== 1 && (
-                <Chip
-                  label={`${playbackRate}x`}
-                  size="small"
-                  sx={{
-                    bgcolor: '#e63946',
-                    color: 'white',
-                    fontWeight: 800,
-                    fontSize: '0.7rem'
-                  }}
-                />
-              )}
-              <Chip
-                icon={<GpsFixed sx={{ fontSize: '14px !important', color: showReticle ? '#39ff14' : '#94a3b8' }} />}
-                label={showReticle ? '2D Reticle: ON' : '2D Reticle: OFF'}
-                size="small"
-                onClick={() => setShowReticle(!showReticle)}
-                sx={{
-                  bgcolor: showReticle ? 'rgba(57, 255, 20, 0.15)' : 'rgba(255,255,255,0.1)',
-                  color: showReticle ? '#39ff14' : '#94a3b8',
-                  border: `1px solid ${showReticle ? 'rgba(57, 255, 20, 0.5)' : 'rgba(255,255,255,0.2)'}`,
-                  fontWeight: 700,
-                  fontSize: '0.68rem',
-                  cursor: 'pointer',
-                  '&:hover': {
-                    bgcolor: showReticle ? 'rgba(57, 255, 20, 0.25)' : 'rgba(255,255,255,0.2)'
-                  }
-                }}
-              />
+            <Box className="video-status" role="status">
+              <Typography variant="caption">Original video</Typography>
+              <Typography variant="caption">{currentTrackPoint
+                ? (currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? 'Estimated position' : 'Detected position')
+                : 'No tracking at this time'}</Typography>
             </Box>
-
-            {/* Top-Right Tracking Lock Status Badge */}
-            <Box sx={{ position: 'absolute', top: 12, right: 12, zIndex: 12 }}>
-              <Chip
-                label={reticleStyle ? (reticleStyle.isInterpolated ? '● KALMAN SYNC' : '● CV LOCK [30 FPS]') : '◌ BALL SEARCH'}
-                size="small"
-                sx={{
-                  bgcolor: reticleStyle
-                    ? (reticleStyle.isInterpolated ? 'rgba(0, 240, 255, 0.2)' : 'rgba(57, 255, 20, 0.2)')
-                    : 'rgba(255,255,255,0.08)',
-                  color: reticleStyle
-                    ? (reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14')
-                    : '#94a3b8',
-                  border: `1px solid ${
-                    reticleStyle
-                      ? (reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14')
-                      : 'rgba(255,255,255,0.15)'
-                  }`,
-                  fontWeight: 800,
-                  fontSize: '0.65rem'
-                }}
-              />
-            </Box>
-
-            {/* 2D Synchronous Tracking Bounding Box / Reticle Overlay */}
-            {showReticle && reticleStyle && (
-              <Box
-                sx={{
-                  position: 'absolute',
-                  left: reticleStyle.left,
-                  top: reticleStyle.top,
-                  transform: 'translate(-50%, -50%)',
-                  pointerEvents: 'none',
-                  zIndex: 10,
-                  transition: isPlaying ? 'none' : 'all 0.08s ease-out'
-                }}
-              >
-                {/* Target Reticle Box */}
-                <Box
-                  sx={{
-                    width: reticleStyle.size,
-                    height: reticleStyle.size,
-                    border: reticleStyle.isInterpolated
-                      ? '2px dashed #00f0ff'
-                      : '2px solid #39ff14',
-                    borderRadius: '6px',
-                    boxShadow: reticleStyle.isInterpolated
-                      ? '0 0 16px rgba(0, 240, 255, 0.9), inset 0 0 8px rgba(0, 240, 255, 0.35)'
-                      : '0 0 16px rgba(57, 255, 20, 0.9), inset 0 0 8px rgba(57, 255, 20, 0.35)',
-                    position: 'relative',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center'
-                  }}
-                >
-                  {/* Corner Reticle Brackets */}
-                  <Box sx={{
-                    position: 'absolute', top: -4, left: -4, width: 8, height: 8,
-                    borderTop: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`,
-                    borderLeft: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`
-                  }} />
-                  <Box sx={{
-                    position: 'absolute', top: -4, right: -4, width: 8, height: 8,
-                    borderTop: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`,
-                    borderRight: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`
-                  }} />
-                  <Box sx={{
-                    position: 'absolute', bottom: -4, left: -4, width: 8, height: 8,
-                    borderBottom: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`,
-                    borderLeft: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`
-                  }} />
-                  <Box sx={{
-                    position: 'absolute', bottom: -4, right: -4, width: 8, height: 8,
-                    borderBottom: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`,
-                    borderRight: `2px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`
-                  }} />
-
-                  {/* Center Target Dot */}
-                  <Box
-                    sx={{
-                      width: 5,
-                      height: 5,
-                      borderRadius: '50%',
-                      bgcolor: reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14',
-                      boxShadow: `0 0 8px ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`
-                    }}
-                  />
-                </Box>
-
-                {/* Reticle Classification Badge Tag (Above) */}
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    top: -24,
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    whiteSpace: 'nowrap',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 0.5,
-                    bgcolor: reticleStyle.isInterpolated ? 'rgba(0, 25, 35, 0.94)' : 'rgba(10, 30, 15, 0.94)',
-                    border: `1px solid ${reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14'}`,
-                    color: reticleStyle.isInterpolated ? '#00f0ff' : '#39ff14',
-                    fontSize: '0.62rem',
-                    fontWeight: 800,
-                    px: 0.8,
-                    py: 0.2,
-                    borderRadius: 1,
-                    letterSpacing: 0.5,
-                    boxShadow: '0 2px 10px rgba(0,0,0,0.7)'
-                  }}
-                >
-                  <span>{reticleStyle.isInterpolated ? '● KALMAN PRED' : '● BALL DETECTED'}</span>
-                  {reticleStyle.confidence && (
-                    <span style={{ opacity: 0.85 }}>({Math.round(reticleStyle.confidence * 100)}%)</span>
-                  )}
-                </Box>
-
-                {/* Reticle Speed & Coordinate Chip (Below) */}
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    bottom: -22,
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    whiteSpace: 'nowrap',
-                    bgcolor: 'rgba(6, 13, 23, 0.92)',
-                    color: '#e2e8f0',
-                    fontSize: '0.6rem',
-                    fontFamily: 'monospace',
-                    fontWeight: 700,
-                    px: 0.8,
-                    py: 0.15,
-                    borderRadius: 0.8,
-                    border: '1px solid rgba(255,255,255,0.18)',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.6)'
-                  }}
-                >
-                  {reticleStyle.speedKmh ? `${reticleStyle.speedKmh} km/h` : `x:${reticleStyle.pixelX} y:${reticleStyle.pixelY}`}
-                </Box>
-              </Box>
-            )}
           </Box>
         )}
 
         {/* 3D Hawk-Eye View Panel with Television Broadcast HUD */}
         {(viewMode === '3d' || viewMode === 'split') && (
-          <Box sx={{
+          <Box className="scene-panel" sx={{
             flex: 1.3,
-            height: { xs: 340, md: 'auto' },
+            height: { xs: 420, lg: 'auto' },
             minHeight: { xs: 280, md: 'auto' },
             position: 'relative',
-            bgcolor: '#08121e'
+            bgcolor: '#141920'
           }}>
             <HawkEyeViewer
               trajectoryData={activeTrajectory}
+              isSimulation={isSimulation}
               currentTime={currentTime}
+              duration={duration}
+              isPlaying={isPlaying}
+              isSeeking={isSeeking || Boolean(videoRef.current?.seeking)}
+              sourceAudioUrl={videoUrl}
               onSeek={(t) => handleSeek(null, t)}
               onOpenFlowHUD={() => setFlowHUDOpen(true)}
               onOpenReportCard={() => setReportCardOpen(true)}
             />
 
-            {/* In-Viewer Television Broadcast Telemetry HUD Overlay */}
+            {/* In-Viewer Television Delivery telemetry Overlay */}
             {showBroadcastHUD && (
               <Paper sx={{
                 position: 'absolute',
@@ -1310,7 +815,7 @@ export default function DRSReview({
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                       <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Speed (Rel / Bnc)</Typography>
                       <Typography variant="caption" sx={{ fontWeight: 800, color: '#f8fafc', fontSize: '0.82rem' }}>
-                        <span style={{ color: '#38bdf8' }}>{releaseSpeed}</span> km/h <span style={{ color: '#64748b' }}>|</span> {bounceSpeed} km/h
+                        <span style={{ color: '#38bdf8' }}>{releaseSpeed ?? '—'}</span> km/h <span style={{ color: '#adb8c7' }}>|</span> {bounceSpeed ?? '—'} km/h
                       </Typography>
                     </Box>
 
@@ -1318,7 +823,7 @@ export default function DRSReview({
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Deviation Angle</Typography>
                       <Chip
-                        label={`${deviationAngle >= 0 ? '+' : ''}${deviationAngle}°`}
+                        label={deviationAngle == null ? 'Unavailable' : `${deviationAngle >= 0 ? '+' : ''}${deviationAngle}°`}
                         size="small"
                         sx={{
                           height: 20,
@@ -1335,7 +840,7 @@ export default function DRSReview({
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Length Zone</Typography>
                       <Chip
-                        label={lengthZone}
+                        label={lengthZone || 'Unavailable'}
                         size="small"
                         sx={{
                           height: 20,
@@ -1374,12 +879,12 @@ export default function DRSReview({
         )}
 
         {/* Broadcast DRS Decision & Telemetry Sidebar */}
-        <Box sx={{
-          width: { xs: '100%', md: 330 },
+        <Box component="aside" aria-label="Delivery evidence" className="review-inspector" sx={{
+          width: { xs: '100%', lg: 300 },
           flexShrink: 0,
-          bgcolor: '#0a1626',
-          borderLeft: { xs: 'none', md: '1px solid rgba(255,255,255,0.1)' },
-          borderTop: { xs: '1px solid rgba(255,255,255,0.1)', md: 'none' },
+          bgcolor: '#181d25',
+          borderLeft: { xs: 'none', lg: '1px solid rgba(255,255,255,0.1)' },
+          borderTop: { xs: '1px solid rgba(255,255,255,0.1)', lg: 'none' },
           p: 2,
           display: 'flex',
           flexDirection: 'column',
@@ -1388,15 +893,15 @@ export default function DRSReview({
         }}>
           {/* Header Card */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Gavel sx={{ color: '#e63946', fontSize: 24 }} />
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-              DRS Decision Readout
+            <Gavel sx={{ color: '#8ab4ff', fontSize: 24 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+              Review evidence
             </Typography>
           </Box>
 
           {/* Loading state for uploaded video trajectory */}
           {isVideoMode && trajectoryLoading && (
-            <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+            <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
               <CircularProgress size={16} sx={{ color: '#38bdf8' }} />
               <Typography variant="body2" sx={{ color: '#94a3b8' }}>
                 Loading trajectory analysis…
@@ -1406,22 +911,37 @@ export default function DRSReview({
 
           {/* Error state */}
           {isVideoMode && trajectoryError && !trajectoryLoading && (
-            <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
+            <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2 }}>
               <Typography variant="body2" sx={{ color: trajectoryError === 'not_processed' ? '#fbbf24' : '#f87171' }}>
                 {trajectoryError === 'not_processed'
-                  ? '⚠ Video not yet processed. Go back and reprocess.'
-                  : '⚠ Failed to load trajectory data.'}
+                  ? 'Analysis is not ready. Return to your deliveries to check processing or retry.'
+                  : 'Analysis could not be loaded. Return to your deliveries and try again.'}
               </Typography>
+              <Button onClick={onBack} sx={{ mt: 1 }}>Back to deliveries</Button>
             </Paper>
           )}
 
+          {isVideoMode && activeTrajectory && <Typography variant="body2" color="text.secondary">
+            {activeTrajectory.ball_detected ? 'Approximate 3D reconstruction. Review the original footage for evidence.' : 'No ball detected. The original video is still available; try a clearer, fixed-camera clip.'}
+          </Typography>}
+          {isVideoMode && preparedPoints.length > 0 && <Button variant="outlined" onClick={() => handleSeek(null, preparedPoints[0].t)}>
+            Jump to first tracked frame ({preparedPoints[0].t.toFixed(2)}s)
+          </Button>}
+          {isVideoMode && activeTrajectory && <>
+            <Typography variant="caption" color="text.secondary">
+              Timing: {activeTrajectory.timing_source === 'decoder_pts' ? 'decoder presentation timestamps' : 'approximate / unverified'}.
+              {' '}Calibration: {activeTrajectory.calibration_status === 'manual_pitch_plane' ? 'manual pitch plane; height unverified' : 'unverified'}.
+            </Typography>
+            <PitchCalibration key={video.id} videoId={video.id} trajectory={activeTrajectory} onApply={setActiveTrajectory} pickedPoint={pickedPoint}
+              onPick={(index, label) => { videoRef.current?.pause(); setViewMode('video'); setPickingCorner({ index, label }); videoContainerRef.current?.scrollIntoView?.({ block: 'center' }); }} />
+          </>}
           {/* Official DRS Evaluation Card (Only when verified event evidence exists) */}
           {!trajectoryLoading && (
             <>
               {drs ? (
                 <Paper sx={{
                   p: 2,
-                  bgcolor: '#0f2137',
+                  bgcolor: '#202733',
                   borderRadius: 2,
                   border: '1px solid rgba(255,255,255,0.12)',
                   display: 'flex',
@@ -1504,19 +1024,19 @@ export default function DRSReview({
                     py: 1.2,
                     borderRadius: 1.5,
                     bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                      ? '#e63946'
+                      ? '#8ab4ff'
                       : drs.decision.includes('UMPIRE')
                       ? '#f59e0b'
                       : '#2a9d8f'
                   }}>
-                    <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 1.5, color: 'white' }}>
+                    <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0, color: '#101318' }}>
                       {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
                     </Typography>
                   </Box>
                 </Paper>
               ) : (
                 !trajectoryError && (
-                  <Paper sx={{ p: 2, bgcolor: '#0f2137', textAlign: 'center', borderRadius: 2 }}>
+                  <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2 }}>
                     <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
                       {isVideoMode
                         ? 'DRS LBW decision unavailable: uncalibrated single-camera footage with no verified pad impact event.'
@@ -1528,10 +1048,11 @@ export default function DRSReview({
             </>
           )}
 
-          {/* DRS BROADCAST TELEMETRY HUD CONSOLE (Category C.5) */}
+          <details className="inspector-section"><summary>Measurements</summary>
+          {/* Delivery measurements */}
           <Paper sx={{
             p: 2,
-            bgcolor: '#0f2137',
+            bgcolor: '#202733',
             borderRadius: 2,
             border: '1px solid rgba(56, 189, 248, 0.25)',
             display: 'flex',
@@ -1543,7 +1064,7 @@ export default function DRSReview({
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <Speed sx={{ color: '#38bdf8', fontSize: 20 }} />
               <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: 0.8 }}>
-                Broadcast Telemetry HUD
+                Delivery telemetry
               </Typography>
               <Chip
                 label={isSimulation ? 'SIMULATION' : 'TRACKED'}
@@ -1587,7 +1108,7 @@ export default function DRSReview({
                     {releaseSpeed}
                   </span>
                   {' km/h '}
-                  <span style={{ color: '#64748b', fontSize: '0.72rem' }}>
+                  <span style={{ color: '#adb8c7', fontSize: '0.72rem' }}>
                     ({(releaseSpeed * 0.621371).toFixed(1)} mph)
                   </span>
                 </Typography>
@@ -1610,8 +1131,8 @@ export default function DRSReview({
                   Bounce Speed:
                 </Typography>
                 <Typography variant="caption" sx={{ fontWeight: 800, color: '#e2e8f0', fontFamily: 'monospace' }}>
-                  {bounceSpeed} km/h{' '}
-                  <span style={{ color: '#f87171', fontSize: '0.65rem' }}>(-{speedLossPct}% decay)</span>
+                  {bounceSpeed ?? '—'} km/h{' '}
+                  {speedLossPct != null && <span style={{ color: '#f87171', fontSize: '0.65rem' }}>(-{speedLossPct}% decay)</span>}
                 </Typography>
               </Box>
             </Box>
@@ -1627,7 +1148,7 @@ export default function DRSReview({
                 </Typography>
                 <Chip
                   icon={<TrendingUp sx={{ fontSize: '13px !important', color: '#38bdf8 !important' }} />}
-                  label={`${deviationAngle >= 0 ? '+' : ''}${deviationAngle}°`}
+                  label={deviationAngle == null ? 'Unavailable' : `${deviationAngle >= 0 ? '+' : ''}${deviationAngle}°`}
                   size="small"
                   sx={{
                     fontWeight: 800,
@@ -1653,7 +1174,7 @@ export default function DRSReview({
                   Length Zone
                 </Typography>
                 <Chip
-                  label={lengthZone}
+                  label={lengthZone || 'Unavailable'}
                   size="small"
                   sx={{
                     bgcolor: `${lengthZoneColor}25`,
@@ -1675,7 +1196,7 @@ export default function DRSReview({
                   { name: 'Short Pitch', color: '#6366f1' },
                   { name: 'Bouncer', color: '#ec4899' }
                 ].map((z) => {
-                  const isActive = lengthZone.includes(z.name) || z.name.includes(lengthZone);
+                  const isActive = (lengthZone != null && (lengthZone.includes(z.name) || z.name.includes(lengthZone)));
                   return (
                     <Tooltip key={z.name} title={z.name} arrow>
                       <Box sx={{
@@ -1699,56 +1220,66 @@ export default function DRSReview({
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontWeight: 600 }}>
                   LBW Impact Probability
                 </Typography>
-                <Typography variant="caption" sx={{ fontWeight: 900, color: lbwColor, fontFamily: 'monospace', fontSize: '0.85rem' }}>
-                  {lbwProbability}% Hitting
+                <Typography variant="caption" sx={{ fontWeight: 900, color: lbwProbability != null ? lbwColor : '#94a3b8', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                  {lbwProbability != null ? `${lbwProbability}% Hitting` : '— (Unavailable)'}
                 </Typography>
               </Box>
 
-              <Box sx={{ width: '100%', height: 8, bgcolor: 'rgba(255,255,255,0.08)', borderRadius: 4, overflow: 'hidden' }}>
-                <Box sx={{
-                  width: `${lbwProbability}%`,
-                  height: '100%',
-                  bgcolor: lbwColor,
-                  boxShadow: `0 0 10px ${lbwColor}`,
-                  transition: 'width 0.4s ease'
-                }} />
-              </Box>
-
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.2 }}>
-                <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.68rem' }}>Target Plane</Typography>
-                <Typography variant="caption" sx={{ fontWeight: 700, color: '#f72585', fontSize: '0.72rem' }}>
-                  {activeTrajectory?.stump_plane_target?.hit_stump || 'Middle Stump Hit'}
+              {lbwProbability != null ? (
+                <>
+                  <Box sx={{ width: '100%', height: 8, bgcolor: 'rgba(255,255,255,0.08)', borderRadius: 4, overflow: 'hidden' }}>
+                    <Box sx={{
+                      width: `${lbwProbability}%`,
+                      height: '100%',
+                      bgcolor: lbwColor,
+                      boxShadow: `0 0 10px ${lbwColor}`,
+                      transition: 'width 0.4s ease'
+                    }} />
+                  </Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 0.2 }}>
+                    <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.68rem' }}>Target Plane</Typography>
+                    <Typography variant="caption" sx={{ fontWeight: 700, color: '#f72585', fontSize: '0.72rem' }}>
+                      {activeTrajectory?.stump_plane_target?.hit_stump || (isSimulation ? 'Middle Stump Hit' : '—')}
+                    </Typography>
+                  </Box>
+                </>
+              ) : (
+                <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.72rem' }}>
+                  Single-camera footage — geometric reconstruction required for LBW analysis
                 </Typography>
-              </Box>
+              )}
             </Box>
           </Paper>
 
-          {/* Record Official DRS Review Action */}
+          </details>
+          {/* Save review notes Action */}
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
             <Button
               variant="contained"
               startIcon={<Gavel />}
+              disabled={!video || !localStorage.getItem('token')}
               onClick={() => {
                 const dec = drs?.decision || '';
                 if (dec.includes('OUT') && !dec.includes('NOT OUT')) setReviewOutcome('OUT');
                 else if (dec.includes("UMPIRE'S CALL")) setReviewOutcome("UMPIRE'S CALL");
-                else setReviewOutcome('NOT OUT');
+                else setReviewOutcome('');
                 setReviewDialogOpen(true);
               }}
               sx={{
-                bgcolor: '#e63946',
-                color: 'white',
+                bgcolor: '#8ab4ff',
+                color: 'primary.contrastText',
                 fontWeight: 700,
                 fontSize: '0.85rem',
                 py: 1.1,
                 borderRadius: 2,
                 boxShadow: '0 4px 12px rgba(230,57,70,0.3)',
-                '&:hover': { bgcolor: '#c1121f' }
+                '&:hover': { bgcolor: '#a8c7ff' }
               }}
             >
-              Record Official DRS Review
+              Save reviewer assessment
             </Button>
 
+            {!video && <Typography variant="caption" color="text.secondary">Upload a delivery after signing in to save reviewer notes.</Typography>}
             {/* Broadcast Flow HUD & Match Certificate Shortcuts */}
             <Box sx={{ display: 'flex', gap: 1 }}>
               <Button
@@ -1783,7 +1314,7 @@ export default function DRSReview({
                   '&:hover': { borderColor: '#4ade80', bgcolor: 'rgba(74, 222, 128, 0.1)' }
                 }}
               >
-                Report Card
+                Delivery report
               </Button>
             </Box>
             {savedReviewId && (
@@ -1796,10 +1327,11 @@ export default function DRSReview({
             )}
           </Box>
 
+          <details className="review-export"><summary>Export data & capture view</summary>
           {/* Trajectory Telemetry Export Section (Category E.2) */}
           <Paper sx={{
             p: 1.5,
-            bgcolor: '#0f2137',
+            bgcolor: '#202733',
             borderRadius: 2,
             border: '1px solid rgba(255,255,255,0.1)',
             display: 'flex',
@@ -1867,10 +1399,13 @@ export default function DRSReview({
             </Button>
           </Paper>
 
+          </details>
           {/* Observable Computer Vision Diagnostics Panel */}
+          <details style={{ marginTop: 0 }}>
+            <summary style={{ color: '#adb8c7', fontSize: '12px', cursor: 'pointer', padding: '8px 0' }}>CV diagnostics</summary>
           <Paper sx={{
             p: 2,
-            bgcolor: '#0f2137',
+            bgcolor: '#202733',
             borderRadius: 2,
             border: '1px solid rgba(255,255,255,0.12)',
             display: 'flex',
@@ -1990,18 +1525,21 @@ export default function DRSReview({
                 </Button>
               </Box>
             ) : (
-              <Typography variant="caption" sx={{ color: '#64748b' }}>
+              <Typography variant="caption" sx={{ color: '#adb8c7' }}>
                 {isSimulation ? 'Physics simulation delivery — analytical aerodynamics model.' : 'No CV diagnostics available for this clip.'}
               </Typography>
             )}
           </Paper>
+          </details>
 
           {/* Interactive Instructions Card */}
-          <Box sx={{ mt: 'auto', p: 1.5, bgcolor: 'rgba(255,255,255,0.03)', borderRadius: 2 }}>
+          <details style={{ marginTop: 'auto' }}>
+            <summary style={{ color: '#adb8c7', fontSize: '12px', cursor: 'pointer', padding: '8px 0' }}>Controls guide</summary>
+          <Box sx={{ p: 1.5, bgcolor: 'rgba(255,255,255,0.03)', borderRadius: 2 }}>
             <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', mb: 0.5, fontWeight: 600 }}>
-              💡 Interactive Graphics Controls
+              Viewer controls
             </Typography>
-            <Typography variant="caption" sx={{ color: '#64748b', display: 'block', fontSize: '0.7rem' }}>
+            <Typography variant="caption" sx={{ color: '#adb8c7', display: 'block', fontSize: '0.7rem' }}>
               • Drag left mouse to orbit 360°
               <br />• Scroll wheel to zoom in/out
               <br />• Switch cameras (Chase Cam, Batsman POV, Umpire)
@@ -2009,11 +1547,12 @@ export default function DRSReview({
               <br />• Click trajectory markers for telemetry
             </Typography>
           </Box>
+          </details>
         </Box>
       </Box>
 
       {/* Spoken AI Voice Commentary & Visual Closed-Captions Subtitle Strip */}
-      <Box sx={{ px: { xs: 1.5, sm: 2.5 }, py: 0.8, bgcolor: '#08121e', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+      {showCommentary && <Box sx={{ px: { xs: 1.5, sm: 2.5 }, py: 0.8, bgcolor: '#141920', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
         <DRSCommentary
           trajectoryData={activeTrajectory}
           currentTime={currentTime}
@@ -2021,12 +1560,12 @@ export default function DRSReview({
           showControls={true}
           showTicker={true}
         />
-      </Box>
+      </Box>}
 
       {/* Bottom Timeline Controls */}
-      <Paper sx={{
+      <Paper className="review-playback" elevation={0} sx={{
         borderRadius: 0,
-        bgcolor: '#0a1626',
+        bgcolor: '#181d25',
         px: 3,
         py: 1.5,
         borderTop: '1px solid rgba(255,255,255,0.1)'
@@ -2037,13 +1576,16 @@ export default function DRSReview({
             {formatTime(currentTime)}
           </Typography>
           <Slider
-            value={currentTime}
+            aria-label="Delivery timeline"
+            getAriaValueText={value => `${formatTime(value)} of ${formatTime(duration)}`}
+            value={Math.min(currentTime, duration || 1.5)}
             min={0}
             max={duration || 1.5}
             step={0.01}
             onChange={handleSeek}
+            onChangeCommitted={() => setIsSeeking(false)}
             sx={{
-              color: '#e63946',
+              color: '#8ab4ff',
               '& .MuiSlider-thumb': { width: 14, height: 14 },
               '& .MuiSlider-track': { height: 4 },
               '& .MuiSlider-rail': { height: 4, bgcolor: 'rgba(255,255,255,0.2)' }
@@ -2071,9 +1613,9 @@ export default function DRSReview({
             <IconButton
               onClick={togglePlay}
               sx={{
-                color: 'white',
-                bgcolor: '#e63946',
-                '&:hover': { bgcolor: '#c1121f' },
+                color: '#172014',
+                bgcolor: '#8ab4ff',
+                '&:hover': { bgcolor: '#a8c7ff' },
                 width: 38,
                 height: 38
               }}
@@ -2098,16 +1640,17 @@ export default function DRSReview({
                 key={rate}
                 size="small"
                 variant={playbackRate === rate ? 'contained' : 'outlined'}
+                aria-pressed={playbackRate === rate}
                 onClick={() => handleRateChange(rate)}
                 sx={{
                   minWidth: 42,
                   py: 0.3,
                   fontSize: '0.75rem',
-                  color: 'white',
-                  borderColor: 'rgba(255,255,255,0.25)',
-                  bgcolor: playbackRate === rate ? '#e63946' : 'transparent',
+                  color: playbackRate === rate ? 'primary.contrastText' : 'text.primary',
+                  borderColor: 'divider',
+                  bgcolor: playbackRate === rate ? '#8ab4ff' : 'transparent',
                   '&:hover': {
-                    bgcolor: playbackRate === rate ? '#c1121f' : 'rgba(255,255,255,0.1)'
+                    bgcolor: playbackRate === rate ? '#a8c7ff' : 'rgba(255,255,255,0.1)'
                   }
                 }}
               >
@@ -2118,13 +1661,13 @@ export default function DRSReview({
         </Box>
       </Paper>
 
-      {/* Official DRS Review Verdict Dialog */}
+      {/* Save delivery review Dialog */}
       <Dialog
         open={reviewDialogOpen}
         onClose={() => setReviewDialogOpen(false)}
         PaperProps={{
           sx: {
-            bgcolor: '#0f2137',
+            bgcolor: '#202733',
             color: 'white',
             borderRadius: 3,
             border: '1px solid rgba(255,255,255,0.15)',
@@ -2133,17 +1676,20 @@ export default function DRSReview({
           }
         }}
       >
-        <DialogTitle sx={{ fontWeight: 800, color: '#e63946', display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Gavel /> Record Official DRS Verdict
+        <DialogTitle sx={{ fontWeight: 800, color: '#8ab4ff', display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Gavel /> Save reviewer assessment
         </DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
           <FormControl size="small" fullWidth>
             <Typography variant="caption" sx={{ color: '#94a3b8', mb: 0.5, fontWeight: 600 }}>Decision Outcome</Typography>
             <Select
+              displayEmpty
+              inputProps={{ 'aria-label': 'Decision outcome' }}
               value={reviewOutcome}
               onChange={(e) => setReviewOutcome(e.target.value)}
               sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.06)', borderRadius: 1.5 }}
             >
+              <MenuItem value="" disabled>Select your assessment</MenuItem>
               <MenuItem value="OUT">OUT</MenuItem>
               <MenuItem value="NOT OUT">NOT OUT</MenuItem>
               <MenuItem value="UMPIRE'S CALL">{"UMPIRE'S CALL"}</MenuItem>
@@ -2152,6 +1698,7 @@ export default function DRSReview({
           <FormControl size="small" fullWidth>
             <Typography variant="caption" sx={{ color: '#94a3b8', mb: 0.5, fontWeight: 600 }}>Review Category</Typography>
             <Select
+              inputProps={{ 'aria-label': 'Review category' }}
               value={reviewType}
               onChange={(e) => setReviewType(e.target.value)}
               sx={{ color: 'white', bgcolor: 'rgba(255,255,255,0.06)', borderRadius: 1.5 }}
@@ -2163,7 +1710,7 @@ export default function DRSReview({
             </Select>
           </FormControl>
           <TextField
-            label="Umpire Review Notes"
+            label="Review notes"
             multiline
             rows={3}
             value={reviewNotes}
@@ -2183,8 +1730,8 @@ export default function DRSReview({
           <Button
             variant="contained"
             onClick={handleSaveReview}
-            disabled={savingReview}
-            sx={{ bgcolor: '#e63946', fontWeight: 700, '&:hover': { bgcolor: '#c1121f' } }}
+            disabled={savingReview || !reviewOutcome}
+            sx={{ bgcolor: '#8ab4ff', fontWeight: 700, '&:hover': { bgcolor: '#a8c7ff' } }}
           >
             {savingReview ? 'Saving...' : 'Save Decision'}
           </Button>
@@ -2210,7 +1757,7 @@ export default function DRSReview({
         onClose={() => setFeedbackMsg('')}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
       >
-        <Alert severity="info" onClose={() => setFeedbackMsg('')} sx={{ width: '100%', fontWeight: 600, bgcolor: '#0f2137', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.4)' }}>
+        <Alert severity="info" onClose={() => setFeedbackMsg('')} sx={{ width: '100%', fontWeight: 600, bgcolor: '#202733', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.4)' }}>
           {feedbackMsg}
         </Alert>
       </Snackbar>
@@ -2223,7 +1770,7 @@ export default function DRSReview({
         autoPlaySequence={true}
       />
 
-      {/* Official Hawk-Eye DRS Match Certificate & Report Card Modal */}
+      {/* Delivery report & Delivery report Modal */}
       <MatchReportCard
         open={reportCardOpen}
         onClose={() => setReportCardOpen(false)}

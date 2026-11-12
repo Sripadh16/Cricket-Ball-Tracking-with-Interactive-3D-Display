@@ -33,14 +33,15 @@ export default function CinematicCameraController({
   impactPoint,
   trajectoryPoints = [],
   currentTime = 0,
+  duration = 1.5,
+  isPlaying = false,
+  isSeeking = false,
   bulletTargetMode = 'auto' // 'auto' | 'impact' | 'bounce'
 }) {
   const { camera } = useThree();
   const controlsRef = useRef();
 
   // Internal persistent animation timers for smooth interpolation
-  const sweepAngleRef = useRef(0);
-  const droneProgressRef = useRef(0);
   const prevViewRef = useRef(view);
 
   // Determine bullet time focal point (in Three.js coordinates)
@@ -60,44 +61,15 @@ export default function CinematicCameraController({
 
   // Construct dynamic Catmull-Rom spline curve for the Drone Flythrough
   const droneSpline = useMemo(() => {
-    const keypoints = [];
-
-    // 1. Bowler delivery stride high perspective
-    keypoints.push(new THREE.Vector3(0.35, 2.5, -13.0));
-    // 2. Swoop behind bowler release point
-    keypoints.push(new THREE.Vector3(0.25, 1.9, -9.0));
-    // 3. Swoop low down to pitch turf
-    keypoints.push(new THREE.Vector3(0.15, 0.55, -2.0));
-
-    // 4. Banking past pitch bounce point
-    if (bouncePoint) {
-      keypoints.push(new THREE.Vector3(
-        (bouncePoint.x || 0) + 0.32,
-        Math.max(0.32, (bouncePoint.y || 0.05) + 0.25),
-        (bouncePoint.z || 4.8) - 0.4
-      ));
-    } else {
-      keypoints.push(new THREE.Vector3(0.18, 0.42, 4.8));
-    }
-
-    // 5. Swooping past pad impact
-    if (impactPoint) {
-      keypoints.push(new THREE.Vector3(
-        (impactPoint.x || 0) + 0.22,
-        Math.max(0.45, (impactPoint.y || 0.4) + 0.2),
-        (impactPoint.z || 8.8) - 0.2
-      ));
-    } else {
-      keypoints.push(new THREE.Vector3(0.10, 0.55, 8.8));
-    }
-
-    // 6. Direct rush into the batsman's stumps
-    keypoints.push(new THREE.Vector3(0.0, 0.72, 10.3));
-    // 7. Framing the timber and flying bails from behind
-    keypoints.push(new THREE.Vector3(0.0, 0.95, 11.8));
+    const keypoints = [
+      new THREE.Vector3(4.5, 5, -12),
+      new THREE.Vector3(4, 4.5, -5),
+      new THREE.Vector3(3.5, 3.8, 3),
+      new THREE.Vector3(3, 3.2, 11)
+    ];
 
     return new THREE.CatmullRomCurve3(keypoints, false, 'catmullrom', 0.25);
-  }, [bouncePoint, impactPoint]);
+  }, []);
 
   // Handle switching to static presets smoothly
   useEffect(() => {
@@ -130,10 +102,10 @@ export default function CinematicCameraController({
       // Disable user pan during cinematic sweep
       controlsRef.current.enablePan = false;
 
-      // Increment rotation angle smoothly (cinematic slow motion sweep)
-      const sweepSpeed = 0.55; // radians per second
-      sweepAngleRef.current += sweepSpeed * delta;
-      const angle = sweepAngleRef.current;
+      // Progress derived directly from replay time so seeking/pausing is deterministic
+      const normProgress = Math.max(0, Math.min(1, currentTime / Math.max(0.1, duration)));
+      const eased = normProgress * normProgress * (3 - 2 * normProgress);
+      const angle = -0.7 + eased * 1.75;
 
       const radius = 2.1; // Orbit distance around focal point (meters)
       const focal = bulletFocalPoint;
@@ -141,14 +113,13 @@ export default function CinematicCameraController({
       // Compute circular orbit with subtle cinematic wave bobbing
       const targetCamX = focal.x + radius * Math.sin(angle);
       const targetCamZ = focal.z + radius * Math.cos(angle);
-      const targetCamY = focal.y + 0.38 + 0.12 * Math.sin(angle * 2.0);
+      const targetCamY = focal.y + 0.7;
 
       const targetCamPos = new THREE.Vector3(targetCamX, targetCamY, targetCamZ);
       const lookTarget = new THREE.Vector3(focal.x, focal.y + 0.08, focal.z);
 
-      // Smooth interpolation using Three.js Vector3.lerp with damping
-      camera.position.lerp(targetCamPos, 0.085);
-      controlsRef.current.target.lerp(lookTarget, 0.085);
+      camera.position.copy(targetCamPos);
+      controlsRef.current.target.copy(lookTarget);
       controlsRef.current.update();
       return;
     }
@@ -159,28 +130,17 @@ export default function CinematicCameraController({
     if (view === 'drone_flythrough') {
       controlsRef.current.enablePan = false;
 
-      // Swoop continuously down the pitch or sync with currentTime
-      const loopDuration = 4.5; // seconds per flythrough swoop
-      droneProgressRef.current = (droneProgressRef.current + delta / loopDuration) % 1.0;
-      const progress = droneProgressRef.current;
+      // Progress tied deterministically to delivery replay timestamp
+      const progress = Math.max(0, Math.min(1, currentTime / Math.max(0.1, duration)));
 
       // Smooth ease-in-out curve along the spline
-      // s-curve: 3p^2 - 2p^3
       const easedProgress = progress * progress * (3 - 2 * progress);
 
-      const dronePos = droneSpline.getPoint(easedProgress);
-      // Look slightly ahead along the curve for natural banking flight
-      const lookAheadProgress = Math.min(1.0, easedProgress + 0.08);
-      const lookTarget = droneSpline.getPoint(lookAheadProgress);
+      const dronePos = droneSpline.getPointAt(easedProgress);
+      const lookTarget = new THREE.Vector3(0, 0.45, -8 + easedProgress * 18);
 
-      // If moving ball is available and nearby, bias look target toward ball
-      if (ballPosition) {
-        lookTarget.lerp(new THREE.Vector3(ballPosition.x, ballPosition.y, ballPosition.z), 0.35);
-      }
-
-      // Smooth interpolation using Vector3.lerp
-      camera.position.lerp(dronePos, 0.08);
-      controlsRef.current.target.lerp(lookTarget, 0.08);
+      camera.position.copy(dronePos);
+      controlsRef.current.target.copy(lookTarget);
       controlsRef.current.update();
       return;
     }
@@ -194,8 +154,8 @@ export default function CinematicCameraController({
       // Position camera slightly behind and above the ball
       const chaseCamPos = new THREE.Vector3(
         ballPosition.x * 0.7,
-        ballPosition.y + 0.55,
-        ballPosition.z - 2.2
+        ballPosition.y + 1.15,
+        ballPosition.z - 4.0
       );
       const chaseTarget = new THREE.Vector3(
         ballPosition.x,
@@ -203,8 +163,8 @@ export default function CinematicCameraController({
         ballPosition.z + 4.2
       );
 
-      camera.position.lerp(chaseCamPos, 0.12);
-      controlsRef.current.target.lerp(chaseTarget, 0.12);
+      camera.position.copy(chaseCamPos);
+      controlsRef.current.target.copy(chaseTarget);
       controlsRef.current.update();
       return;
     }
@@ -219,7 +179,7 @@ export default function CinematicCameraController({
       enablePan={true}
       enableZoom={true}
       dampingFactor={0.08}
-      enableDamping={true}
+      enableDamping={view === 'orbit'}
       maxPolarAngle={Math.PI / 2 + 0.05}
       minDistance={1.0}
       maxDistance={70}

@@ -23,17 +23,20 @@ export default function DecisionFlowHUD({
   autoPlaySequence = true
 }) {
   const drs = trajectoryData?.drs_evaluation;
+  const hasVerdict = Boolean(drs?.decision);
 
-  // Decision stage determinations
-  const pitchingVerdict = (drs?.pitching || 'IN LINE').toUpperCase();
-  const impactVerdict = (drs?.impact || 'IN LINE').toUpperCase();
-  const wicketsVerdict = (drs?.wickets || 'HITTING').toUpperCase();
-  const rawDecision = (drs?.decision || 'OUT').toUpperCase();
+  // Decision stage determinations — show UNAVAILABLE when no DRS data, never invent verdicts
+  const pitchingVerdict = hasVerdict ? (drs.pitching || 'UNAVAILABLE').toUpperCase() : 'UNAVAILABLE';
+  const impactVerdict = hasVerdict ? (drs.impact || 'UNAVAILABLE').toUpperCase() : 'UNAVAILABLE';
+  const wicketsVerdict = hasVerdict ? (drs.wickets || 'UNAVAILABLE').toUpperCase() : 'UNAVAILABLE';
+  const rawDecision = hasVerdict ? (drs.decision || 'UNAVAILABLE').toUpperCase() : 'UNAVAILABLE';
 
   const isOut = rawDecision.includes('OUT') && !rawDecision.includes('NOT');
   const isUmpiresCall = rawDecision.includes('UMPIRE');
 
-  const finalDecisionText = isOut
+  const finalDecisionText = !hasVerdict
+    ? 'UNAVAILABLE'
+    : isOut
     ? 'OUT'
     : isUmpiresCall
     ? "UMPIRE'S CALL"
@@ -78,6 +81,7 @@ export default function DecisionFlowHUD({
   // Helper for node styling
   const getNodeStatus = (stageType) => {
     if (stageType === 'pitching') {
+      if (pitchingVerdict === 'UNAVAILABLE') return { label: 'UNAVAILABLE', type: 'default', desc: 'DRS data unavailable' };
       const isPass = pitchingVerdict.includes('IN LINE');
       return {
         label: pitchingVerdict,
@@ -86,6 +90,7 @@ export default function DecisionFlowHUD({
       };
     }
     if (stageType === 'impact') {
+      if (impactVerdict === 'UNAVAILABLE') return { label: 'UNAVAILABLE', type: 'default', desc: 'DRS data unavailable' };
       const isPass = impactVerdict.includes('IN LINE');
       return {
         label: impactVerdict,
@@ -94,6 +99,7 @@ export default function DecisionFlowHUD({
       };
     }
     if (stageType === 'wickets') {
+      if (wicketsVerdict === 'UNAVAILABLE') return { label: 'UNAVAILABLE', type: 'default', desc: 'DRS data unavailable' };
       const isHit = wicketsVerdict.includes('HITTING');
       const isUmp = wicketsVerdict.includes('UMPIRE');
       return {
@@ -375,12 +381,16 @@ export default function DecisionFlowHUD({
             p: 2.2,
             textAlign: 'center',
             borderRadius: 3,
-            bgcolor: isOut
+            bgcolor: !hasVerdict
+              ? 'rgba(71, 85, 105, 0.95)'
+              : isOut
               ? 'rgba(220, 38, 38, 0.95)'
               : isUmpiresCall
               ? 'rgba(217, 119, 6, 0.95)'
               : 'rgba(16, 149, 114, 0.95)',
-            boxShadow: isOut
+            boxShadow: !hasVerdict
+              ? '0 0 20px rgba(100,116,139,0.4)'
+              : isOut
               ? '0 0 40px rgba(239, 68, 68, 0.6), inset 0 0 20px rgba(255,255,255,0.2)'
               : isUmpiresCall
               ? '0 0 40px rgba(245, 158, 11, 0.6), inset 0 0 20px rgba(255,255,255,0.2)'
@@ -442,7 +452,9 @@ export default function DecisionFlowHUD({
               display: 'block'
             }}
           >
-            {isOut
+            {!hasVerdict
+              ? `DRS analysis unavailable — single-camera footage without geometric calibration.`
+              : isOut
               ? `Decision Confirmed: Trajectory is projected to hit ${trajectoryData?.stump_plane_target?.hit_stump || 'middle stump'}.`
               : isUmpiresCall
               ? `On-Field Decision Stands: Ball clipping stumps zone.`

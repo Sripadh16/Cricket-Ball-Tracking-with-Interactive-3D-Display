@@ -72,7 +72,8 @@ function VectorArrow({
 function SpinOrientationRing({
   origin = [0, 0, 0],
   spinAxis = [0, 1, 0],
-  spinRpm = 2200,
+  spinRpm = 0,
+  replayTime = 0,
   radius = 0.048,
   color = '#ffffff'
 }) {
@@ -92,7 +93,7 @@ function SpinOrientationRing({
     if (ringRef.current) {
       // Rotation speed proportional to spin RPM
       const radPerSec = (spinRpm * 2 * Math.PI) / 60;
-      ringRef.current.rotation.y += radPerSec * delta * 0.08;
+      ringRef.current.rotation.y = radPerSec * replayTime * 0.08;
     }
   });
 
@@ -161,7 +162,8 @@ function SpinOrientationRing({
 export function PhysicsVectorArrows({
   ballPosition,
   telemetry,
-  visible = true
+  visible = true,
+  replayTime = 0
 }) {
   if (!visible || !ballPosition) return null;
 
@@ -173,44 +175,51 @@ export function PhysicsVectorArrows({
     return [v[0], v[2], v[1]];
   };
 
-  // 1. Velocity Vector (Cyan)
-  const rawVel = telemetry?.velocity_vector || [0, 35, -2];
-  const threeVel = toThreeCoords(rawVel);
-  const speedMs = Math.sqrt(rawVel[0] ** 2 + rawVel[1] ** 2 + rawVel[2] ** 2);
-  const velLength = Math.max(0.35, Math.min(1.1, 0.35 + (speedMs / 40.0) * 0.55));
+  // 1. Velocity Vector (Cyan) - truthful representation without fabricated fallbacks
+  const rawVel = telemetry?.velocity_vector;
+  const hasVel = Array.isArray(rawVel) && rawVel.length === 3 && rawVel.every(Number.isFinite);
+  const threeVel = hasVel ? toThreeCoords(rawVel) : null;
+  const speedMs = hasVel ? Math.sqrt(rawVel[0] ** 2 + rawVel[1] ** 2 + rawVel[2] ** 2) : 0;
+  const velLength = Math.max(0.25, Math.min(1.1, 0.25 + (speedMs / 40.0) * 0.55));
+  const showVel = hasVel && speedMs > 0.5;
 
   // 2. Magnus Aerodynamic Force Vector (Neon Magenta / Pink)
-  const rawMagnus = telemetry?.magnus_vector || [0.35, 0, 0.2];
-  const threeMagnus = toThreeCoords(rawMagnus);
-  const magnusForceN = telemetry?.magnus_force_n ?? Math.sqrt(rawMagnus[0] ** 2 + rawMagnus[1] ** 2 + rawMagnus[2] ** 2);
-  const magnusLength = Math.max(0.28, Math.min(0.95, 0.28 + (magnusForceN / 0.6) * 0.45));
-  const hasMagnus = magnusForceN > 0.02;
+  const rawMagnus = telemetry?.magnus_vector;
+  const hasMagnusVec = Array.isArray(rawMagnus) && rawMagnus.length === 3 && rawMagnus.every(Number.isFinite);
+  const threeMagnus = hasMagnusVec ? toThreeCoords(rawMagnus) : null;
+  const magnusForceN = telemetry?.magnus_force_n ?? (hasMagnusVec ? Math.sqrt(rawMagnus[0] ** 2 + rawMagnus[1] ** 2 + rawMagnus[2] ** 2) : 0);
+  const magnusLength = Math.max(0.25, Math.min(0.95, 0.25 + (magnusForceN / 0.6) * 0.45));
+  const showMagnus = hasMagnusVec && magnusForceN > 0.02;
 
   // 3. Gravity Vector (Yellow Downward)
-  // Downward along Three.js negative Y axis
-  const gravityDir = [0, -1, 0];
+  const showGravity = Array.isArray(telemetry?.gravity_vector) && telemetry.gravity_vector.every(Number.isFinite) && Math.hypot(...telemetry.gravity_vector) > 0;
+  const gravityDir = showGravity ? toThreeCoords(telemetry.gravity_vector) : [0, 0, 0];
   const gravityLength = 0.45;
 
   // 4. Spin Axis Vector (White)
-  const rawSpin = telemetry?.spin_vector || [-150, 0, -40];
-  const threeSpin = toThreeCoords(rawSpin);
-  const spinRpm = telemetry?.spin_rpm || 2100;
+  const rawSpin = telemetry?.spin_vector;
+  const hasSpin = Array.isArray(rawSpin) && rawSpin.length === 3 && rawSpin.every(Number.isFinite);
+  const threeSpin = hasSpin ? toThreeCoords(rawSpin) : null;
+  const spinRpm = telemetry?.spin_rpm ?? null;
+  const showSpin = hasSpin && spinRpm != null && spinRpm > 50;
 
   return (
     <group>
       {/* 1. Velocity Vector: Cyan */}
-      <VectorArrow
-        origin={origin}
-        direction={threeVel}
-        length={velLength}
-        color="#00e5ff"
-        radius={0.0075}
-        headLength={0.08}
-        headRadius={0.022}
-      />
+      {showVel && (
+        <VectorArrow
+          origin={origin}
+          direction={threeVel}
+          length={velLength}
+          color="#00e5ff"
+          radius={0.0075}
+          headLength={0.08}
+          headRadius={0.022}
+        />
+      )}
 
       {/* 2. Magnus Aerodynamic Lateral Drift / Dipping Force: Neon Magenta */}
-      {hasMagnus && (
+      {showMagnus && (
         <VectorArrow
           origin={origin}
           direction={threeMagnus}
@@ -223,24 +232,29 @@ export function PhysicsVectorArrows({
       )}
 
       {/* 3. Gravity Force: Yellow (Downward) */}
-      <VectorArrow
-        origin={origin}
-        direction={gravityDir}
-        length={gravityLength}
-        color="#ffd166"
-        radius={0.0065}
-        headLength={0.07}
-        headRadius={0.018}
-      />
+      {showGravity && (
+        <VectorArrow
+          origin={origin}
+          direction={gravityDir}
+          length={gravityLength}
+          color="#ffd166"
+          radius={0.0065}
+          headLength={0.07}
+          headRadius={0.018}
+        />
+      )}
 
       {/* 4. Spin Axis & Rotating Seam Orientation Ring: White */}
-      <SpinOrientationRing
-        origin={origin}
-        spinAxis={threeSpin}
-        spinRpm={spinRpm}
-        radius={0.048}
-        color="#ffffff"
-      />
+      {showSpin && (
+        <SpinOrientationRing
+          origin={origin}
+          spinAxis={threeSpin}
+          spinRpm={spinRpm}
+          replayTime={replayTime}
+          radius={0.048}
+          color="#ffffff"
+        />
+      )}
     </group>
   );
 }
@@ -256,25 +270,25 @@ export function PhysicsTelemetryBadge({
 }) {
   if (!visible) return null;
 
-  const magnusForceN = telemetry?.magnus_force_n !== undefined
+  const magnusForceN = Number.isFinite(telemetry?.magnus_force_n)
     ? Number(telemetry.magnus_force_n).toFixed(3)
-    : '0.485';
+    : null;
 
-  const spinRpm = telemetry?.spin_rpm !== undefined
+  const spinRpm = Number.isFinite(telemetry?.spin_rpm)
     ? Math.round(telemetry.spin_rpm)
-    : 2100;
+    : null;
 
-  const reynoldsNum = telemetry?.reynolds_number !== undefined
+  const reynoldsNum = Number.isFinite(telemetry?.reynolds_number)
     ? Math.round(telemetry.reynolds_number).toLocaleString()
-    : '172,400';
+    : null;
 
-  const dragForceN = telemetry?.drag_force_n !== undefined
+  const dragForceN = Number.isFinite(telemetry?.drag_force_n)
     ? Number(telemetry.drag_force_n).toFixed(3)
-    : '0.840';
+    : null;
 
-  const speedKmh = telemetry?.speed_kmh !== undefined
+  const speedKmh = Number.isFinite(telemetry?.speed_kmh)
     ? Number(telemetry.speed_kmh).toFixed(1)
-    : '138.5';
+    : null;
 
   const pitchLabels = {
     standard_hard: 'Standard Hard',
@@ -337,7 +351,7 @@ export function PhysicsTelemetryBadge({
             </Box>
           </Tooltip>
           <Typography variant="caption" sx={{ fontWeight: 700, color: '#ff4d6d', fontSize: '0.78rem', fontFamily: 'monospace' }}>
-            {magnusForceN} N
+            {magnusForceN != null ? `${magnusForceN} N` : '—'}
           </Typography>
         </Box>
 
@@ -352,7 +366,7 @@ export function PhysicsTelemetryBadge({
             </Box>
           </Tooltip>
           <Typography variant="caption" sx={{ fontWeight: 700, color: '#ffffff', fontSize: '0.78rem', fontFamily: 'monospace' }}>
-            {spinRpm.toLocaleString()} RPM
+            {spinRpm != null ? `${spinRpm.toLocaleString()} RPM` : '—'}
           </Typography>
         </Box>
 
@@ -367,7 +381,7 @@ export function PhysicsTelemetryBadge({
             </Box>
           </Tooltip>
           <Typography variant="caption" sx={{ fontWeight: 700, color: '#38bdf8', fontSize: '0.78rem', fontFamily: 'monospace' }}>
-            {reynoldsNum}
+            {reynoldsNum != null ? reynoldsNum : '—'}
           </Typography>
         </Box>
 
@@ -382,7 +396,7 @@ export function PhysicsTelemetryBadge({
             </Box>
           </Tooltip>
           <Typography variant="caption" sx={{ fontWeight: 700, color: '#cbd5e1', fontSize: '0.78rem', fontFamily: 'monospace' }}>
-            {dragForceN} N
+            {dragForceN != null ? `${dragForceN} N` : '—'}
           </Typography>
         </Box>
 
@@ -395,7 +409,7 @@ export function PhysicsTelemetryBadge({
             </Typography>
           </Box>
           <Typography variant="caption" sx={{ fontWeight: 700, color: '#00e5ff', fontSize: '0.78rem', fontFamily: 'monospace' }}>
-            {speedKmh} km/h
+            {speedKmh != null ? `${speedKmh} km/h` : '—'}
           </Typography>
         </Box>
       </Box>
@@ -421,6 +435,9 @@ export function PhysicsTelemetryBadge({
       </Box>
 
       {/* Pitch Surface indicator */}
+      <Typography variant="caption" display="block" color="text.secondary" sx={{ mt: 1 }}>
+        Model estimates. Arrows use separate visual scales for m/s, N and spin direction; lengths are not comparable across quantities.
+      </Typography>
       {pitchType && (
         <Box sx={{ mt: 0.8, bgcolor: 'rgba(255,255,255,0.05)', p: 0.6, borderRadius: 1 }}>
           <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.62rem', display: 'block' }}>

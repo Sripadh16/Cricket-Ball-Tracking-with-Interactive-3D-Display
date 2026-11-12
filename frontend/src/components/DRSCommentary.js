@@ -77,41 +77,48 @@ export default function DRSCommentary({
 
   // Extract DRS telemetry values
   const drs = trajectoryData?.drs_evaluation;
-  const releaseSpeed = trajectoryData?.release_speed_kmh || 142;
-  const pitchingVerdict = (drs?.pitching || 'IN LINE').toUpperCase();
-  const impactVerdict = (drs?.impact || 'IN LINE').toUpperCase();
-  const wicketsVerdict = (drs?.wickets || 'HITTING').toUpperCase();
-  const hitStump = trajectoryData?.stump_plane_target?.hit_stump || drs?.hit_stump || 'Middle Stump';
+  const releaseSpeed = trajectoryData?.release_speed_kmh ?? null;
+  // Only show verdicts when DRS data is actually present — never invent verdicts for real uploads
+  const pitchingVerdict = drs?.pitching?.toUpperCase() ?? null;
+  const impactVerdict = drs?.impact?.toUpperCase() ?? null;
+  const wicketsVerdict = drs?.wickets?.toUpperCase() ?? null;
+  const hitStump = trajectoryData?.stump_plane_target?.hit_stump || drs?.hit_stump || 'the wicket';
 
   // Generate authoritative Third Umpire dialogue for each stage
   const dialogueScripts = useMemo(() => {
     // 1. Release
-    const releaseText = `Delivery released at ${releaseSpeed} kilometres per hour. Tracking trajectory down the pitch.`;
+    const releaseText = releaseSpeed != null
+      ? `Delivery released at ${releaseSpeed} kilometres per hour. Tracking trajectory down the pitch.`
+      : `Delivery tracking initiated. Speed measurement unavailable for this footage.`;
 
-    // 2. Pitching
-    let pitchText = `Pitching is in line. Legal delivery on the turf.`;
-    if (pitchingVerdict.includes('OUTSIDE OFF')) {
+    // 2. Pitching — only if DRS data is available
+    let pitchText = pitchingVerdict != null
+      ? `Pitching is in line with the stumps.`
+      : `Pitching analysis unavailable — DRS reconstruction requires calibrated camera data.`;
+    if (pitchingVerdict?.includes('OUTSIDE OFF')) {
       pitchText = `Pitching is outside off stump.`;
-    } else if (pitchingVerdict.includes('OUTSIDE LEG')) {
+    } else if (pitchingVerdict?.includes('OUTSIDE LEG')) {
       pitchText = `Pitching is outside leg stump. Ball pitched outside leg line.`;
     }
 
-    // 3. Impact
-    let impactText = `Impact is in line with the stumps. Ball has struck the pad.`;
-    if (impactVerdict.includes('OUTSIDE')) {
+    // 3. Impact — only if DRS data is available
+    let impactText = impactVerdict != null
+      ? `Impact is in line with the stumps. Ball has struck the pad.`
+      : `Impact analysis unavailable for this footage.`;
+    if (impactVerdict?.includes('OUTSIDE')) {
       impactText = `Impact is outside the off-stump line. Ball has struck the pad.`;
-    } else if (impactVerdict.includes('NO IMPACT') || !trajectoryData?.impact_point) {
+    } else if (impactVerdict?.includes('NO IMPACT')) {
       impactText = `No pad impact detected. Clean delivery passing directly through to the stumps.`;
     }
 
-    // 4. Wickets & TV Umpire Recommendation
-    let wicketsText = '';
+    // 4. Wickets & TV Umpire Recommendation — only if DRS data is available
+    let wicketsText = wicketsVerdict != null
+      ? `Wickets: Missing the stumps. I recommend you reverse your decision to NOT OUT.`
+      : `Wickets projection unavailable — insufficient geometric data for stump-plane reconstruction.`;
     if (wicketsVerdict === 'HITTING') {
       wicketsText = `Wickets: Hitting ${hitStump}. You can stay with your original on-field decision of OUT. Signal now.`;
     } else if (wicketsVerdict === "UMPIRE'S CALL") {
       wicketsText = `Wickets: Umpire's call clipping ${hitStump}. I recommend you stay with your on-field call.`;
-    } else {
-      wicketsText = `Wickets: Missing the stumps. I recommend you reverse your decision to NOT OUT.`;
     }
 
     return {
@@ -120,7 +127,7 @@ export default function DRSCommentary({
       impact: impactText,
       wickets: wicketsText
     };
-  }, [releaseSpeed, pitchingVerdict, impactVerdict, wicketsVerdict, hitStump, trajectoryData]);
+  }, [releaseSpeed, pitchingVerdict, impactVerdict, wicketsVerdict, hitStump]);
 
   // Find optimal voice matching selected accent
   const getSelectedVoice = useCallback(() => {

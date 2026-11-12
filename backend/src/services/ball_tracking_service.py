@@ -246,6 +246,10 @@ class BallTrackingService:
                         pts_3d, pts_2d, camera_matrix, dist_coeffs, flags=flag
                     )
                     if ok and r_cand is not None and t_cand is not None:
+                        if hasattr(cv2, 'solvePnPRefineLM'):
+                            r_cand, t_cand = cv2.solvePnPRefineLM(
+                                pts_3d, pts_2d, camera_matrix, dist_coeffs, r_cand, t_cand
+                            )
                         proj, _ = cv2.projectPoints(pts_3d, r_cand, t_cand, camera_matrix, dist_coeffs)
                         err = float(np.mean(np.linalg.norm(pts_2d - proj.reshape(-1, 2), axis=1)))
                         if err < best_err:
@@ -412,6 +416,16 @@ class BallTrackingService:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        # Validate FPS
+        fps_valid = isinstance(fps, (int, float)) and fps > 0 and fps < 10000
+        fps_source = "cap" if fps_valid else "fallback_30"
+        if not fps_valid:
+            cap.release()
+            raise ValueError("Video frame rate is unavailable; convert the source to a supported constant-frame-rate video.")
+
+        # Source duration from cap metadata (not from last detection)
+        source_duration_s = float(frame_count) / fps if fps > 0 else None
+
         logger.info(f"Video specs: {fps} FPS, {frame_count} frames, {width}x{height}")
 
         # Initialize tracking data
@@ -448,12 +462,22 @@ class BallTrackingService:
         prev_frame = None
         max_frames = min(frame_count, MAX_PROCESSING_FRAMES)
 
+        previous_pts = None
+        decoder_timing_valid = True
         while frame_idx < max_frames:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            current_time = frame_idx / fps
+            decoder_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if np.isfinite(decoder_time) and decoder_time >= 0 and (previous_pts is None or decoder_time > previous_pts):
+                current_time = float(decoder_time)
+            else:
+                decoder_timing_valid = False
+                current_time = frame_idx / fps
+                if previous_pts is not None:
+                    current_time = max(current_time, previous_pts + 1.0 / fps)
+            previous_pts = current_time
 
             # Report progress if callback is provided
             if self.progress_callback and (frame_idx % 5 == 0 or frame_idx == max_frames - 1):
@@ -495,7 +519,8 @@ class BallTrackingService:
                         expected_px = last_px + tracking_data['ball_pixel_velocity']['vx'] * time_diff
                         expected_py = last_py + tracking_data['ball_pixel_velocity']['vy'] * time_diff
                         prediction_error = float(np.sqrt((curr_px - expected_px)**2 + (curr_py - expected_py)**2))
-                        velocity_consistent = prediction_error < (self.prediction_tolerance * 2.0)
+                        velocity_consistent = prediction_error < max(self.prediction_tolerance * 2.0,
+                                                                     time_diff * self.max_velocity)
 
                     # If ball moved too far in pixel space or velocity is inconsistent, skip as false positive
                     if pixel_distance > max_expected_distance or not velocity_consistent:
@@ -533,10 +558,12 @@ class BallTrackingService:
 
             elif frame_data['ball_position'] is None and len(tracking_data['ball_trajectory']) > 0:
                 # No detection but we have previous trajectory - try to predict within gap limits
-                time_since_real = current_time - (tracking_data.get('last_real_detection_time') or current_time)
+                last_real = tracking_data.get('last_real_detection_time')
+                time_since_real = current_time - (last_real if last_real is not None else current_time)
                 if time_since_real <= MAX_PREDICTION_GAP_S and tracking_data.get('consecutive_predictions', 0) < 5:
                     predicted_pos = self._predict_ball_position(tracking_data, current_time)
-                    if predicted_pos:
+                    if (predicted_pos and 0 <= predicted_pos.get('pixel_x', -1) < width
+                            and 0 <= predicted_pos.get('pixel_y', -1) < height):
                         predicted_pos['frame_idx'] = frame_idx
                         tracking_data['ball_trajectory'].append(predicted_pos)
                         tracking_data['last_ball_position'] = predicted_pos
@@ -572,6 +599,9 @@ class BallTrackingService:
         # Synchronize timestamps with trajectory points
         timestamps = [point['t'] for point in tracking_data['ball_trajectory']]
 
+        tracking_start_s = float(timestamps[0]) if timestamps else None
+        tracking_end_s = float(timestamps[-1]) if timestamps else None
+
         result = {
             "points": tracking_data['ball_trajectory'],
             "timestamps": timestamps,
@@ -582,7 +612,9 @@ class BallTrackingService:
                 "fps": fps,
                 "frame_count": frame_count,
                 "width": width,
-                "height": height
+                "height": height,
+                "source_duration_s": source_duration_s,
+                "fps_source": fps_source
             },
             "pitch_info": pitch_info,
             "stumps_position": tracking_data['stumps_position'],
@@ -600,6 +632,14 @@ class BallTrackingService:
             "release_speed_kmh": drs_data.get("release_speed_kmh"),
             "bounce_speed_kmh": drs_data.get("bounce_speed_kmh"),
             "length_zone": drs_data.get("length_zone"),
+            "source_duration_s": source_duration_s,
+            "tracking_start_s": tracking_start_s,
+            "tracking_end_s": tracking_end_s,
+            "timing_source": "decoder_pts" if decoder_timing_valid else "approximate_fps_fallback",
+            "reconstruction_method": "single_camera_heuristic_height",
+            "calibration_status": "unverified",
+            "fps_source": fps_source,
+            "coordinate_space": "pitch_metric_xyz",
             "debug_info": {
                 "frames_processed": len(tracking_data['frame_data']),
                 "ball_detections": len(tracking_data['ball_trajectory']),
@@ -1440,6 +1480,10 @@ class BallTrackingService:
 
         # Method 0: YOLO Deep Learning detection
         yolo_ball = self._detect_ball_yolo(frame)
+        # A configured model's miss must not become an unrelated shirt/limb detection.
+        if self.yolo_detector is not None:
+            return yolo_ball if (yolo_ball and yolo_ball['confidence'] > self.min_confidence
+                                 and self._is_valid_ball_position(yolo_ball, frame.shape)) else None
         if yolo_ball:
             detections.append(yolo_ball)
             logger.debug(f"YOLO ball found at ({yolo_ball['x']:.1f}, {yolo_ball['y']:.1f}) conf={yolo_ball['confidence']:.2f}")

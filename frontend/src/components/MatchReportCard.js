@@ -25,46 +25,30 @@ export default function MatchReportCard({
 }) {
   const reportRef = useRef(null);
 
-  // Extract core metrics
+  // Extract core metrics — null means genuinely unknown, never use hardcoded fallbacks for real uploads
   const drs = trajectoryData?.drs_evaluation;
   const title = trajectoryData?.title || 'Hawk-Eye LBW Review';
-  const bowlerType = trajectoryData?.bowler_type || 'Right-Arm Fast';
-  const releaseSpeed = trajectoryData?.release_speed_kmh || 142.4;
-  const bounceSpeed = trajectoryData?.bounce_speed_kmh || (releaseSpeed * 0.83).toFixed(1);
-  const lengthZone = trajectoryData?.length_zone || 'Good Length';
+  const bowlerType = trajectoryData?.bowler_type || 'Unavailable';
+  const releaseSpeed = trajectoryData?.release_speed_kmh ?? null;
+  const bounceSpeed = trajectoryData?.bounce_speed_kmh ?? null;
+  const lengthZone = trajectoryData?.length_zone || 'Unavailable';
 
   // Compute calculated metrics
   const speedDecay = useMemo(() => {
-    if (!releaseSpeed || !bounceSpeed) return '17.2';
+    if (releaseSpeed == null || bounceSpeed == null) return null;
     const decay = ((releaseSpeed - bounceSpeed) / releaseSpeed) * 100;
     return decay.toFixed(1);
   }, [releaseSpeed, bounceSpeed]);
 
-  const spinRPM = useMemo(() => {
-    if (trajectoryData?.spin_rpm) return trajectoryData.spin_rpm;
-    if (bowlerType.toLowerCase().includes('spin')) return 2280;
-    if (releaseSpeed > 140) return 2140;
-    return 1960;
-  }, [trajectoryData, bowlerType, releaseSpeed]);
-
-  const bounceAngle = useMemo(() => {
-    if (trajectoryData?.bounce_angle_deg) return trajectoryData.bounce_angle_deg;
-    if (lengthZone.includes('Bouncer')) return 16.8;
-    if (lengthZone.includes('Yorker')) return 8.2;
-    return 12.4;
-  }, [trajectoryData, lengthZone]);
-
-  const seamDeviation = useMemo(() => {
-    if (trajectoryData?.seam_deviation_deg != null) return trajectoryData.seam_deviation_deg;
-    if (trajectoryData?.deviation_angle_deg != null) return trajectoryData.deviation_angle_deg;
-    return 3.2;
-  }, [trajectoryData]);
+  const spinRPM = trajectoryData?.spin_rpm ?? null;
+  const bounceAngle = trajectoryData?.bounce_angle_deg ?? null;
+  const seamDeviation = trajectoryData?.seam_deviation_deg ?? trajectoryData?.deviation_angle_deg ?? null;
 
   // Millimeter Stumps Target calculations
   const stumpTarget = trajectoryData?.stump_plane_target;
-  const targetXmm = stumpTarget?.x != null ? (stumpTarget.x * 1000).toFixed(1) : '14.2';
-  const targetZmm = stumpTarget?.z != null ? (stumpTarget.z * 1000).toFixed(1) : '384.6';
-  const hitStump = stumpTarget?.hit_stump || drs?.hit_stump || 'Middle Stump';
+  const targetXmm = stumpTarget?.x != null ? (stumpTarget.x * 1000).toFixed(1) : null;
+  const targetZmm = stumpTarget?.z != null ? (stumpTarget.z * 1000).toFixed(1) : null;
+  const hitStump = stumpTarget?.hit_stump || drs?.hit_stump || null;
 
   const certificateId = useMemo(() => {
     const chars = '0123456789ABCDEF';
@@ -109,7 +93,7 @@ export default function MatchReportCard({
 
     ctx.fillStyle = '#38bdf8';
     ctx.font = 'bold 32px sans-serif';
-    ctx.fillText('HAWK-EYE OFFICIAL DRS MATCH CERTIFICATE', 50, 80);
+    ctx.fillText('DELIVERY ANALYSIS REPORT', 50, 80);
 
     ctx.fillStyle = '#94a3b8';
     ctx.font = '18px sans-serif';
@@ -121,7 +105,7 @@ export default function MatchReportCard({
     ctx.fillRect(50, 140, 360, 60);
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 30px sans-serif';
-    ctx.fillText(`VERDICT: ${drs?.decision || 'OUT'}`, 70, 182);
+    ctx.fillText(`VERDICT: ${drs?.decision || 'Unavailable'}`, 70, 182);
 
     // Key Telemetry Text
     ctx.fillStyle = '#e2e8f0';
@@ -129,13 +113,13 @@ export default function MatchReportCard({
     const lines = [
       `Delivery: ${title}`,
       `Bowler: ${bowlerType}`,
-      `Release Speed: ${releaseSpeed} km/h (${(releaseSpeed * 0.621371).toFixed(1)} mph)`,
-      `Bounce Speed: ${bounceSpeed} km/h (Decay: ${speedDecay}%)`,
-      `Spin Rate: ${spinRPM} RPM  |  Bounce Angle: ${bounceAngle}°`,
-      `Seam Deviation: ${seamDeviation}°  |  Length Zone: ${lengthZone}`,
-      `Pitching: ${drs?.pitching || 'IN LINE'}  |  Impact: ${drs?.impact || 'IN LINE'}`,
-      `Wickets: ${drs?.wickets || 'HITTING'} (${hitStump})`,
-      `Millimeter Target Plane: X = ${targetXmm} mm, Z = ${targetZmm} mm`
+      `Release Speed: ${releaseSpeed != null ? `${releaseSpeed} km/h (${(releaseSpeed * 0.621371).toFixed(1)} mph)` : 'Unavailable'}`,
+      `Bounce Speed: ${bounceSpeed != null ? `${bounceSpeed} km/h${speedDecay != null ? ` (Decay: ${speedDecay}%)` : ''}` : 'Unavailable'}`,
+      `Spin Rate: ${spinRPM != null ? `${spinRPM} RPM` : '—'}  |  Bounce Angle: ${bounceAngle != null ? `${bounceAngle}°` : 'Unavailable'}`,
+      `Seam Deviation: ${seamDeviation != null ? `${seamDeviation}°` : 'Unavailable'}  |  Length Zone: ${lengthZone}`,
+      `Pitching: ${drs?.pitching || 'Unavailable'}  |  Impact: ${drs?.impact || 'Unavailable'}`,
+      `Wickets: ${drs?.wickets || 'Unavailable'}${hitStump ? ` (${hitStump})` : ''}`,
+      `Millimeter Target Plane: ${targetXmm != null ? `X = ${targetXmm} mm, Z = ${targetZmm} mm` : 'Unavailable'}`
     ];
 
     lines.forEach((line, idx) => {
@@ -148,11 +132,11 @@ export default function MatchReportCard({
     ctx.strokeRect(canvas.width - 320, 140, 270, 160);
     ctx.fillStyle = '#22c55e';
     ctx.font = 'bold 18px sans-serif';
-    ctx.fillText('ICC CERTIFIED HAWK-EYE', canvas.width - 300, 180);
+    ctx.fillText('EDUCATIONAL ANALYSIS', canvas.width - 300, 180);
     ctx.fillStyle = '#94a3b8';
     ctx.font = '14px sans-serif';
     ctx.fillText('Computer Vision & 3D Tracking', canvas.width - 300, 210);
-    ctx.fillText('Accuracy: ± 2.6 mm', canvas.width - 300, 235);
+    ctx.fillText('Accuracy depends on source calibration', canvas.width - 300, 235);
     ctx.fillText('Verification: PASSED', canvas.width - 300, 260);
 
     // Trigger download
@@ -386,7 +370,7 @@ export default function MatchReportCard({
         {/* Precise Millimeter Badge */}
         <Paper sx={{ mt: 0.5, px: 1.5, py: 0.5, bgcolor: 'rgba(15,23,42,0.9)', border: `1px solid ${targetColor}`, borderRadius: 1.5 }}>
           <Typography variant="caption" sx={{ fontWeight: 800, color: targetColor, fontFamily: 'monospace', fontSize: '0.72rem' }}>
-            Impact Offset: {targetXmm > 0 ? `+${targetXmm}` : targetXmm} mm | Height: {targetZmm} mm
+            Impact Offset: {targetXmm != null ? `${targetXmm > 0 ? `+${targetXmm}` : targetXmm} mm | Height: ${targetZmm} mm` : 'Target data unavailable'}
           </Typography>
         </Paper>
       </Box>
@@ -419,11 +403,11 @@ export default function MatchReportCard({
             <Box>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Typography variant="h6" sx={{ fontWeight: 900, letterSpacing: 0.8, color: '#f8fafc', lineHeight: 1.2 }}>
-                  HAWK-EYE DRS MATCH CERTIFICATE
+                  Delivery analysis report
                 </Typography>
                 <Chip
                   icon={<Verified sx={{ fontSize: '13px !important', color: '#22c55e' }} />}
-                  label="OFFICIAL VERIFIED"
+                  label="REVIEW SUMMARY"
                   size="small"
                   sx={{
                     bgcolor: 'rgba(34, 197, 94, 0.15)',
@@ -436,7 +420,7 @@ export default function MatchReportCard({
                 />
               </Box>
               <Typography variant="caption" sx={{ color: '#94a3b8' }}>
-                Certificate Serial: <strong style={{ color: '#38bdf8' }}>#{certificateId}</strong> • Timestamp: {reportDate}
+                Report reference: <strong style={{ color: '#38bdf8' }}>#{certificateId}</strong> • Timestamp: {reportDate}
               </Typography>
             </Box>
           </Box>
@@ -472,7 +456,7 @@ export default function MatchReportCard({
                 '&:hover': { bgcolor: '#0ea5e9' }
               }}
             >
-              Download Certificate (PNG)
+              Download report (PNG)
             </Button>
             {onClose && (
               <IconButton size="small" onClick={onClose} sx={{ color: '#94a3b8' }}>
@@ -500,7 +484,7 @@ export default function MatchReportCard({
             {/* Final Big Decision Chip */}
             <Grid item xs={12} sm={4} sx={{ textAlign: { xs: 'left', sm: 'right' } }}>
               <Chip
-                label={`VERDICT: ${drs?.decision || 'OUT'}`}
+                label={`VERDICT: ${drs?.decision || 'Unavailable'}`}
                 sx={{
                   bgcolor: (drs?.decision || '').includes('OUT') && !(drs?.decision || '').includes('NOT')
                     ? 'rgba(239, 68, 68, 0.25)'
@@ -565,10 +549,10 @@ export default function MatchReportCard({
               <Box sx={{ p: 1.2, bgcolor: 'rgba(255,255,255,0.04)', borderRadius: 2 }}>
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Release Speed</Typography>
                 <Typography variant="subtitle1" sx={{ fontWeight: 900, color: '#38bdf8', fontFamily: 'monospace' }}>
-                  {releaseSpeed} <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>km/h</span>
+                  {releaseSpeed != null ? <>{releaseSpeed} <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>km/h</span></> : <span style={{ color: '#adb8c7' }}>—</span>}
                 </Typography>
-                <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.65rem' }}>
-                  {(releaseSpeed * 0.621371).toFixed(1)} mph
+                <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.65rem' }}>
+                  {releaseSpeed != null ? `${(releaseSpeed * 0.621371).toFixed(1)} mph` : 'Speed unavailable'}
                 </Typography>
               </Box>
             </Grid>
@@ -578,9 +562,9 @@ export default function MatchReportCard({
               <Box sx={{ p: 1.2, bgcolor: 'rgba(255,255,255,0.04)', borderRadius: 2 }}>
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Ball Spin Rate</Typography>
                 <Typography variant="subtitle1" sx={{ fontWeight: 900, color: '#e2e8f0', fontFamily: 'monospace' }}>
-                  {spinRPM} <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>RPM</span>
+                  {spinRPM != null ? <>{spinRPM} <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>RPM</span></> : <span style={{ color: '#adb8c7' }}>—</span>}
                 </Typography>
-                <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.65rem' }}>
+                <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.65rem' }}>
                   High Seam Rotation
                 </Typography>
               </Box>
@@ -591,9 +575,9 @@ export default function MatchReportCard({
               <Box sx={{ p: 1.2, bgcolor: 'rgba(255,255,255,0.04)', borderRadius: 2 }}>
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Bounce Angle</Typography>
                 <Typography variant="subtitle1" sx={{ fontWeight: 900, color: '#fbbf24', fontFamily: 'monospace' }}>
-                  {bounceAngle}° <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>rebound</span>
+                  {bounceAngle != null ? `${bounceAngle}°` : 'Unavailable'} <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>rebound</span>
                 </Typography>
-                <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.65rem' }}>
+                <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.65rem' }}>
                   {lengthZone}
                 </Typography>
               </Box>
@@ -604,9 +588,9 @@ export default function MatchReportCard({
               <Box sx={{ p: 1.2, bgcolor: 'rgba(255,255,255,0.04)', borderRadius: 2 }}>
                 <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem' }}>Seam Movement</Typography>
                 <Typography variant="subtitle1" sx={{ fontWeight: 900, color: '#f72585', fontFamily: 'monospace' }}>
-                  {seamDeviation > 0 ? `+${seamDeviation}°` : `${seamDeviation}°`}
+                  {seamDeviation == null ? 'Unavailable' : `${seamDeviation > 0 ? '+' : ''}${seamDeviation}°`}
                 </Typography>
-                <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.65rem' }}>
+                <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.65rem' }}>
                   Turf Deviation
                 </Typography>
               </Box>
@@ -622,7 +606,7 @@ export default function MatchReportCard({
               System Certified by ICC Hawk-Eye Innovations • Ball Tracking Pipeline Accuracy: 99.4%
             </Typography>
           </Box>
-          <Typography variant="caption" sx={{ color: '#64748b', fontSize: '0.68rem', fontFamily: 'monospace' }}>
+          <Typography variant="caption" sx={{ color: '#adb8c7', fontSize: '0.68rem', fontFamily: 'monospace' }}>
             HASH: 8F7E-2B4A-99C1-D5E3
           </Typography>
         </Box>

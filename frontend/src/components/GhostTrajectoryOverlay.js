@@ -1,8 +1,9 @@
-import React, { useRef, useMemo } from 'react';
+import React, { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Box, Typography, Chip, Tooltip, IconButton, Paper, Collapse } from '@mui/material';
 import { CompareArrows, ExpandMore, ExpandLess } from '@mui/icons-material';
 import * as THREE from 'three';
+import { prepareTrajectory, sampleTrajectoryAtTime } from '../utils/trajectory';
 
 // Standard Cricket Pitch Constants (meters)
 const PITCH_LENGTH = 20.12;
@@ -417,24 +418,7 @@ function PulsatingHoloTube({ points, radius = 0.024 }) {
     return new THREE.TubeGeometry(curve, Math.max(30, points.length * 3), radius, 10, false);
   }, [curve, points, radius]);
 
-  useFrame(({ clock }) => {
-    const elapsed = clock.getElapsedTime();
-    const pulse = 0.5 + 0.5 * Math.sin(elapsed * 3.6);
-    const wireOpacity = 0.45 + 0.35 * pulse;
-    const innerOpacity = 0.18 + 0.16 * pulse;
-
-    if (wireMatRef.current) {
-      wireMatRef.current.opacity = wireOpacity;
-      // Oscillate hue subtly between neon cyan and electric purple
-      const hue = 0.5 + 0.25 * Math.sin(elapsed * 2.0); // 0.5 = cyan, 0.75 = magenta
-      wireMatRef.current.color.setHSL(hue, 1.0, 0.55);
-    }
-    if (innerMatRef.current) {
-      innerMatRef.current.opacity = innerOpacity;
-      const hueInner = 0.6 + 0.2 * Math.sin(elapsed * 2.0 + 0.5);
-      innerMatRef.current.color.setHSL(hueInner, 0.95, 0.65);
-    }
-  });
+  useEffect(() => () => geometry?.dispose(), [geometry]);
 
   if (!geometry) return null;
 
@@ -469,24 +453,24 @@ function PulsatingHoloTube({ points, radius = 0.024 }) {
 // ---------------------------------------------------------------------------
 // 3D Ethereal Pulsating Holographic Ghost Ball with Spinning Hologram Rings
 // ---------------------------------------------------------------------------
-function HolographicGhostBall({ position }) {
+function HolographicGhostBall({ position, currentTime = 0 }) {
   const groupRef = useRef();
   const ringRef1 = useRef();
   const ringRef2 = useRef();
   const sphereMatRef = useRef();
 
-  useFrame(({ clock }, delta) => {
-    const elapsed = clock.getElapsedTime();
+  useFrame(() => {
+    const elapsed = currentTime;
     if (groupRef.current) {
-      groupRef.current.rotation.y += 2.8 * delta;
+      groupRef.current.rotation.y = 2.8 * elapsed;
     }
     if (ringRef1.current) {
-      ringRef1.current.rotation.x += 4.5 * delta;
-      ringRef1.current.rotation.z += 2.0 * delta;
+      ringRef1.current.rotation.x = 4.5 * elapsed;
+      ringRef1.current.rotation.z = 2.0 * elapsed;
     }
     if (ringRef2.current) {
-      ringRef2.current.rotation.y += 3.8 * delta;
-      ringRef2.current.rotation.x -= 2.2 * delta;
+      ringRef2.current.rotation.y = 3.8 * elapsed;
+      ringRef2.current.rotation.x = -2.2 * elapsed;
     }
     if (sphereMatRef.current) {
       const pulse = 0.5 + 0.5 * Math.sin(elapsed * 4.0);
@@ -630,6 +614,7 @@ function DivergenceConnectors({ divergence }) {
 // Master 3D Ghost Overlay Scene Component (rendered inside React Three Fiber Canvas)
 // ---------------------------------------------------------------------------
 export default function GhostTrajectoryOverlay({
+  reducedMotion = false,
   primaryTrajectory,
   ghostTrajectoryData,
   ghostPreset = 'outswinger',
@@ -673,29 +658,8 @@ export default function GhostTrajectoryOverlay({
   }, [ghostData]);
 
   // Interpolate ghost ball position according to currentTime
-  const currentGhostBallPos = useMemo(() => {
-    if (!allGhostPoints || allGhostPoints.length === 0) return null;
-    if (allGhostPoints.length === 1) return allGhostPoints[0];
-
-    let idx = 0;
-    for (let i = 0; i < allGhostPoints.length - 1; i++) {
-      if (allGhostPoints[i].t <= currentTime) idx = i;
-      else break;
-    }
-
-    const p1 = allGhostPoints[idx];
-    const p2 = allGhostPoints[Math.min(idx + 1, allGhostPoints.length - 1)];
-    if (p1 === p2 || p1.t === p2.t) return p1;
-
-    const t = (currentTime - p1.t) / (p2.t - p1.t);
-    const clampedT = Math.max(0, Math.min(1, t));
-
-    return {
-      x: p1.x + (p2.x - p1.x) * clampedT,
-      y: p1.y + (p2.y - p1.y) * clampedT,
-      z: p1.z + (p2.z - p1.z) * clampedT
-    };
-  }, [allGhostPoints, currentTime]);
+  const preparedGhost = useMemo(() => prepareTrajectory(allGhostPoints), [allGhostPoints]);
+  const currentGhostBallPos = useMemo(() => sampleTrajectoryAtTime(preparedGhost, currentTime), [preparedGhost, currentTime]);
 
   // Real-time divergence metrics
   const divergence = useMemo(() => {
@@ -723,7 +687,7 @@ export default function GhostTrajectoryOverlay({
       )}
 
       {/* Floating Holographic Ghost Ball */}
-      <HolographicGhostBall position={currentGhostBallPos} />
+      <HolographicGhostBall position={currentGhostBallPos} currentTime={reducedMotion ? 0 : currentTime} />
 
       {/* Divergence Connectors & Markers */}
       <DivergenceConnectors divergence={divergence} />
@@ -841,7 +805,7 @@ export function GhostDivergencePill({
         justifyContent: 'space-between'
       }}>
         <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.7rem', fontWeight: 600 }}>
-          Ghost Divergence:
+          Model comparison (illustrative):
         </Typography>
         <Typography variant="body2" sx={{
           color: '#00f5ff',
@@ -855,7 +819,7 @@ export function GhostDivergencePill({
 
       {/* Comparing Subtitle */}
       <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: '#cbd5e1', fontSize: '0.68rem' }}>
-        Comparing with: <strong style={{ color: '#c084fc' }}>{currentGhostPreset?.name || ghostData.title}</strong>
+        Separate simplified physics model; not an accuracy measurement. Comparing with: <strong style={{ color: '#c084fc' }}>{currentGhostPreset?.name || ghostData.title}</strong>
       </Typography>
 
       {/* Quick Metrics Bar */}
