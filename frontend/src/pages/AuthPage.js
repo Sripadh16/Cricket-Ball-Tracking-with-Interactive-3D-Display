@@ -30,6 +30,20 @@ export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
     }
   };
 
+  const handleGuest = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await api.post('/auth/guest');
+      localStorage.setItem('token', response.data.access_token);
+      onAuthSuccess();
+    } catch {
+      setError('Guest access could not connect. Try again or sign in.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <main id="main-content" tabIndex={-1} className="auth-layout">
       <section className="auth-story" aria-label="About the project">
@@ -58,6 +72,7 @@ export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
           <div className="auth-demo">
             <span className="muted" style={{ fontSize: 13 }}>Explore simulated deliveries. No account needed.</span>
             <Button onClick={onExploreDemo} startIcon={<PlayArrow />} sx={{ mt: 1.5 }} fullWidth>Continue without account</Button>
+            <Button onClick={handleGuest} disabled={loading} variant="outlined" fullWidth>Open shared guest workspace</Button>
           </div>
         </div>
       </section>
