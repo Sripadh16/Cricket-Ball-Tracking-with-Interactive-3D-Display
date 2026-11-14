@@ -43,3 +43,42 @@ test('partial clip coverage offers a direct jump to its first tracked source fra
   fireEvent.click(screen.getByRole('button', { name: 'Jump to first tracked frame (0.92s)' }));
   expect(container.querySelector('video').currentTime).toBe(0.92);
 });
+
+test('displays Hawk-Eye predictive trajectory card when drs_evaluation and extrapolated_points are provided', () => {
+  const trajectoryData = {
+    ball_detected: true,
+    points: [{ t: 0.1, x: 0, y: 0, z: 1 }],
+    extrapolated_points: [{ t: 0.8, x: 0.01, y: 10.06, z: 0.45 }],
+    stump_plane_target: { x: 0.01, y: 10.06, z: 0.45, hit_stump: 'Middle Stump' },
+    drs_evaluation: {
+      decision: 'OUT',
+      pitching: 'IN LINE',
+      impact: 'IN LINE',
+      wickets: 'HITTING',
+      hit_stump: 'Middle Stump'
+    }
+  };
+  render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
+  expect(screen.getByText('Hawk-Eye Predicted Trajectory')).toBeInTheDocument();
+  expect(screen.getByText('Pitching')).toBeInTheDocument();
+  expect(screen.getAllByText('IN LINE')).toHaveLength(2);
+  expect(screen.getByText('Wickets')).toBeInTheDocument();
+  expect(screen.getByText('HITTING (Middle Stump)')).toBeInTheDocument();
+  expect(screen.getByText('OUT')).toBeInTheDocument();
+});
+
+test('derives Hawk-Eye predicted path when extrapolated_points are present without explicit drs_evaluation', () => {
+  const trajectoryData = {
+    ball_detected: true,
+    points: [{ t: 0.1, x: 0, y: 0, z: 1 }],
+    bounce_point: { x: 0.02, y: 5.5, z: 0.02 },
+    extrapolated_points: [{ t: 0.8, x: 0.02, y: 10.06, z: 0.50 }],
+    stump_plane_target: { x: 0.02, y: 10.06, z: 0.50, hit_stump: 'Off Stump' }
+  };
+  render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
+  expect(screen.getByText('Hawk-Eye Predicted Trajectory')).toBeInTheDocument();
+  expect(screen.getByText('HAWK-EYE PREDICTED')).toBeInTheDocument();
+  expect(screen.getByText('Predicted path to wickets')).toBeInTheDocument();
+  expect(screen.getByText('HITTING (Off Stump)')).toBeInTheDocument();
+  expect(screen.getByText('OUT')).toBeInTheDocument();
+});

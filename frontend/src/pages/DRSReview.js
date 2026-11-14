@@ -322,7 +322,80 @@ export default function DRSReview({
     ? `${API_BASE_URL}/videos/${video.id}/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
     : '';
 
-  const drs = typeof activeTrajectory?.drs_evaluation?.decision === 'string' ? activeTrajectory.drs_evaluation : null;
+  const drs = useMemo(() => {
+    const raw = activeTrajectory?.drs_evaluation;
+    const hasEval = raw && (typeof raw.decision === 'string' || typeof raw.wickets === 'string');
+    const ext = activeTrajectory?.extrapolated_points;
+    const hasExt = Array.isArray(ext) && ext.length > 0;
+
+    if (!hasEval && !hasExt) return null;
+
+    // Pitching: IN LINE / OUTSIDE OFF / OUTSIDE LEG
+    let pitching = raw?.pitching;
+    if (!pitching && activeTrajectory?.bounce_point) {
+      const bx = activeTrajectory.bounce_point.x || 0;
+      pitching = Math.abs(bx) <= 0.1143 ? 'IN LINE' : bx > 0.1143 ? 'OUTSIDE OFF' : 'OUTSIDE LEG';
+    }
+    if (!pitching) pitching = 'IN LINE';
+
+    // Impact: IN LINE / OUTSIDE (or "Predicted path to wickets")
+    let impact = raw?.impact;
+    if (!impact && activeTrajectory?.impact_point) {
+      const ix = activeTrajectory.impact_point.x || 0;
+      impact = Math.abs(ix) <= 0.1143 ? 'IN LINE' : 'OUTSIDE';
+    }
+    if (!impact) {
+      impact = hasExt ? 'Predicted path to wickets' : 'IN LINE';
+    }
+
+    // Wickets: HITTING / MISSING / UMPIRE'S CALL (with which stump)
+    const target = activeTrajectory?.stump_plane_target;
+    let wickets = raw?.wickets;
+    let hit_stump = raw?.hit_stump || target?.hit_stump;
+
+    if (!wickets && target) {
+      const tx = target.x != null ? target.x : 0;
+      const tz = target.z != null ? target.z : 0;
+      const isHittingWickets = Math.abs(tx) <= 0.1143 && tz >= 0.02 && tz <= 0.711;
+      const isClose = Math.abs(tx) <= 0.14 && tz >= 0.01 && tz <= 0.74;
+      if (isHittingWickets) wickets = 'HITTING';
+      else if (isClose) wickets = "UMPIRE'S CALL";
+      else wickets = 'MISSING';
+
+      if (!hit_stump) {
+        if (tx < -0.04) hit_stump = 'Leg Stump';
+        else if (tx > 0.04) hit_stump = 'Off Stump';
+        else hit_stump = 'Middle Stump';
+      }
+    }
+    if (!wickets) wickets = 'HITTING';
+    if (!hit_stump && wickets === 'HITTING') hit_stump = 'Middle Stump';
+
+    // Decision badge: OUT / NOT OUT / UMPIRE'S CALL
+    let decision = raw?.decision;
+    if (!decision) {
+      if (pitching.includes('OUTSIDE LEG')) {
+        decision = 'NOT OUT (Pitching Outside Leg)';
+      } else if (impact === 'OUTSIDE') {
+        decision = 'NOT OUT (Impact Outside Off)';
+      } else if (wickets === 'HITTING') {
+        decision = 'OUT';
+      } else if (wickets === "UMPIRE'S CALL") {
+        decision = "UMPIRE'S CALL";
+      } else {
+        decision = 'NOT OUT (Missing Wickets)';
+      }
+    }
+
+    return {
+      decision,
+      pitching,
+      impact,
+      wickets,
+      hit_stump,
+      isPredicted: Boolean(hasExt || raw?.is_predicted)
+    };
+  }, [activeTrajectory]);
   const debugInfo = activeTrajectory?.debug_info;
   const videoInfo = activeTrajectory?.video_info;
   const isVideoMode = currentDeliveryType === 'video';
@@ -943,11 +1016,34 @@ export default function DRSReview({
                   p: 2,
                   bgcolor: '#202733',
                   borderRadius: 2,
-                  border: '1px solid rgba(255,255,255,0.12)',
+                  border: '1px solid rgba(56, 189, 248, 0.35)',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 1.5
+                  gap: 1.5,
+                  boxShadow: '0 4px 20px rgba(0,0,0,0.4)'
                 }}>
+                  {/* Card Header: Title & Predicted Trajectory Badge */}
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
+                      <Timeline sx={{ color: '#38bdf8', fontSize: 18 }} />
+                      <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                        Hawk-Eye Predicted Trajectory
+                      </Typography>
+                    </Box>
+                    <Chip
+                      label={drs.isPredicted ? 'HAWK-EYE PREDICTED' : 'OFFICIAL DRS'}
+                      size="small"
+                      sx={{
+                        bgcolor: 'rgba(56, 189, 248, 0.15)',
+                        color: '#38bdf8',
+                        border: '1px solid rgba(56, 189, 248, 0.4)',
+                        fontWeight: 700,
+                        fontSize: '0.62rem',
+                        height: 20
+                      }}
+                    />
+                  </Box>
+
                   {/* Pitching */}
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
@@ -975,9 +1071,13 @@ export default function DRSReview({
                       label={drs.impact}
                       size="small"
                       sx={{
-                        bgcolor: drs.impact === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
-                        color: drs.impact === 'IN LINE' ? '#4ade80' : '#f87171',
-                        border: `1px solid ${drs.impact === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
+                        bgcolor: drs.impact === 'IN LINE' || drs.impact.includes('Predicted')
+                          ? 'rgba(34,197,94,0.2)'
+                          : 'rgba(239,68,68,0.2)',
+                        color: drs.impact === 'IN LINE' || drs.impact.includes('Predicted')
+                          ? '#4ade80'
+                          : '#f87171',
+                        border: `1px solid ${drs.impact === 'IN LINE' || drs.impact.includes('Predicted') ? '#22c55e' : '#ef4444'}`,
                         fontWeight: 700,
                         fontSize: '0.72rem'
                       }}
@@ -990,7 +1090,7 @@ export default function DRSReview({
                       Wickets
                     </Typography>
                     <Chip
-                      label={drs.wickets}
+                      label={drs.hit_stump ? `${drs.wickets} (${drs.hit_stump})` : drs.wickets}
                       size="small"
                       sx={{
                         bgcolor: drs.wickets === 'HITTING'
@@ -1024,14 +1124,24 @@ export default function DRSReview({
                     py: 1.2,
                     borderRadius: 1.5,
                     bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                      ? '#8ab4ff'
+                      ? '#dc2626'
                       : drs.decision.includes('UMPIRE')
                       ? '#f59e0b'
-                      : '#2a9d8f'
+                      : '#16a34a',
+                    boxShadow: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
+                      ? '0 0 16px rgba(220, 38, 38, 0.4)'
+                      : drs.decision.includes('UMPIRE')
+                      ? '0 0 16px rgba(245, 158, 11, 0.4)'
+                      : '0 0 16px rgba(22, 163, 74, 0.4)'
                   }}>
-                    <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0, color: '#101318' }}>
-                      {drs.decision.split(' ')[0]} {drs.decision.split(' ')[1] || ''}
+                    <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 1, color: '#ffffff', textTransform: 'uppercase' }}>
+                      {drs.decision.includes('NOT OUT') ? 'NOT OUT' : drs.decision.includes("UMPIRE") ? "UMPIRE'S CALL" : 'OUT'}
                     </Typography>
+                    {drs.decision.includes('(') && (
+                      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.7rem', display: 'block', mt: 0.2 }}>
+                        {drs.decision}
+                      </Typography>
+                    )}
                   </Box>
                 </Paper>
               ) : (

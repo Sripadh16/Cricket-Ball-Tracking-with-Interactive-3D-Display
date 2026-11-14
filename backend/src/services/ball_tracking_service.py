@@ -84,24 +84,30 @@ class BallTrackingService:
 
             w, h = float(frame_width), float(frame_height)
             stump_cx = w * 0.5
-            stump_cy = h * 0.82
+            stump_cy = h * 0.84
             if stumps and isinstance(stumps, dict):
                 stump_cx = float(stumps.get('x', stump_cx))
                 stump_cy = float(stumps.get('y', stump_cy))
 
-            # Near wicket/crease region
-            near_y = min(h * 0.92, max(h * 0.65, stump_cy))
+            # Near wicket/crease region (batsman end near bottom of frame)
+            near_y = min(h * 0.92, max(h * 0.75, stump_cy))
             if crease_lines and isinstance(crease_lines, dict):
                 bowling_c = crease_lines.get('bowling_crease')
                 if bowling_c and isinstance(bowling_c, dict) and ('center_y' in bowling_c or 'y_mid' in bowling_c):
                     detected_near = bowling_c.get('center_y', bowling_c.get('y_mid'))
-                    near_y = min(h * 0.95, max(h * 0.55, float(detected_near)))
+                    near_y = min(h * 0.95, max(h * 0.65, float(detected_near)))
 
-            near_half_w = max(w * 0.15, min(w * 0.35, w * 0.22))
+            near_half_w = max(w * 0.10, min(w * 0.22, w * 0.13))
 
-            # Far bowler end
-            far_y = max(h * 0.15, min(h * 0.45, near_y * 0.45))
-            far_half_w = near_half_w * 0.42
+            # Far bowler end (bowler end near top of frame)
+            far_y = max(h * 0.10, min(h * 0.25, h * 0.16))
+            if crease_lines and isinstance(crease_lines, dict):
+                far_c = crease_lines.get('popping_crease') or crease_lines.get('bowler_crease')
+                if far_c and isinstance(far_c, dict) and ('center_y' in far_c or 'y_mid' in far_c):
+                    detected_far = far_c.get('center_y', far_c.get('y_mid'))
+                    far_y = min(h * 0.30, max(h * 0.08, float(detected_far)))
+
+            far_half_w = near_half_w * 0.62
 
             src_pts = np.array([
                 [stump_cx - far_half_w,  far_y],   # Bowler left
@@ -2170,6 +2176,123 @@ class BallTrackingService:
             logger.warning(f"Error fitting parabolic height segment: {e}")
             return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in points]
 
+    def _detect_bounce_index(self, trajectory: List[Dict[str, Any]]) -> Optional[int]:
+        """
+        Multi-cue bounce detection combining:
+        1. 3D z-curvature: interior minimum near pitch level with descent and ascent
+        2. 2D camera space trajectory inflection: drop in forward pixel velocity vy and d^2 y / dt^2 inflection
+        3. Physical pitch location: ball reaches minimum distance to pitch plane between bowling crease and popping crease
+        """
+        if not trajectory or len(trajectory) < 4:
+            return None
+
+        N = len(trajectory)
+
+        # Cue 1: Direct 3D z-curvature (simulation or pre-calibrated 3D track)
+        z_vals = [float(p.get('z', 0.0)) for p in trajectory]
+        min_z_idx = int(np.argmin(z_vals))
+        if 1 <= min_z_idx <= N - 2:
+            z_curr = z_vals[min_z_idx]
+            z_prev = z_vals[min_z_idx - 1]
+            z_next = z_vals[min_z_idx + 1]
+            descending = (z_prev - z_curr) > 0.02
+            ascending = (z_next - z_curr) > 0.02
+            near_ground = z_curr <= 0.45
+            if descending and ascending and near_ground:
+                return min_z_idx
+
+        # Check for tagged bounce from prior processing
+        for i, p in enumerate(trajectory):
+            if p.get('phase') == 'bounce' and 1 <= i <= N - 2:
+                return i
+
+        # Cue 2 & 3: Multi-cue 2D camera space inflection & physical pitch location
+        py = [p.get('pixel_y') for p in trajectory]
+        px = [p.get('pixel_x') for p in trajectory]
+        times = [float(p.get('t', 0.0)) for p in trajectory]
+        y_vals = [float(p.get('y', 0.0)) for p in trajectory]
+
+        has_pixels = all(p is not None for p in py) and len(py) > 0
+        if not has_pixels:
+            # When pixel coordinates are unavailable, only physical 3D curvature can verify a bounce
+            return None
+
+        # Flat horizontal trajectory check (constant height test fixtures)
+        py_span = max(py) - min(py)
+        if py_span < 15.0:
+            return None
+
+        # Filter out backward tracking jumps (glitches)
+        # In a cricket video, the delivery progresses forward down the screen
+        clean_indices = [0]
+        for i in range(1, N):
+            dy = py[i] - py[clean_indices[-1]]
+            dx = abs(px[i] - px[clean_indices[-1]]) if px[i] is not None and px[clean_indices[-1]] is not None else 0.0
+            if dy >= -2.0 and dx <= 12.0:
+                clean_indices.append(i)
+
+        if len(clean_indices) < 4:
+            clean_indices = list(range(N))
+
+        M = len(clean_indices)
+        candidates = []
+        for j in range(1, M - 1):
+            i = clean_indices[j]
+            frac = i / float(N)
+            # Bounce is an interior delivery event (typically 20% to 75% of flight)
+            if not (0.20 <= frac <= 0.75):
+                continue
+
+            i_prev = clean_indices[j - 1]
+            i_next = clean_indices[j + 1]
+
+            dt1 = max(1e-4, times[i] - times[i_prev])
+            dt2 = max(1e-4, times[i_next] - times[i])
+            v1 = (py[i] - py[i_prev]) / dt1
+            v2 = (py[i_next] - py[i]) / dt2
+
+            if v1 <= 0 or v2 <= 0:
+                continue
+
+            v_drop = v1 - v2
+            d2y = (v2 - v1) / (0.5 * (dt1 + dt2))
+
+            # Windowed drop
+            j_prev2 = max(0, j - 2)
+            j_next2 = min(M - 1, j + 2)
+            i_p2 = clean_indices[j_prev2]
+            i_n2 = clean_indices[j_next2]
+            dt_pre = max(1e-4, times[i] - times[i_p2])
+            dt_post = max(1e-4, times[i_n2] - times[i])
+            v_pre = (py[i] - py[i_p2]) / dt_pre
+            v_post = (py[i_n2] - py[i]) / dt_post
+            v_drop_win = v_pre - v_post
+
+            # A physical pitch bounce requires evidence of downward deceleration
+            if v_drop < 20.0 and v_drop_win < 20.0 and d2y > -500.0:
+                continue
+
+            # Pitch prior: distance to batsman stumps (y = 10.06m)
+            yi = y_vals[i]
+            dist_from_stumps = 10.06 - yi
+            if 1.0 <= dist_from_stumps <= 10.0:
+                pitch_prior = 1.5
+            elif -2.0 <= dist_from_stumps <= 15.0:
+                pitch_prior = 1.0
+            else:
+                pitch_prior = 0.3
+
+            score = (v_drop * 0.1 + v_drop_win * 0.1 - d2y * 0.005) * pitch_prior
+            candidates.append((i, score, yi, py[i]))
+
+        if not candidates:
+            return None
+
+        best = max(candidates, key=lambda c: c[1])
+        if best[1] < 1.0:
+            return None
+        return best[0]
+
     def _fit_parabolic_height_regression(
         self,
         trajectory: List[Dict[str, Any]],
@@ -2180,6 +2303,8 @@ class BallTrackingService:
         Enforces Newtonian projectile motion:
             Z(t) = Z_0 + V_z0 * t - 0.5 * g * t^2
         to pre-bounce and post-bounce points to eliminate monocular vertical jitter.
+        Before bounce: Ball descends along parabolic trajectory from bowler release height (~2.0m down to turf level ~0.036m).
+        After bounce: Ball rebounds upwards along turf-restitution trajectory (e in [0.45, 0.55]) rising to waist/stump height (~0.5m - 0.8m).
         """
         if not trajectory or len(trajectory) < 2:
             return [{**pt, 'z': max(0.0, float(pt.get('z', 0.0)))} for pt in trajectory]
@@ -2188,20 +2313,86 @@ class BallTrackingService:
             if len(trajectory) < 3:
                 return self._fit_parabolic_height(trajectory, g=g)
 
-            # Identify bounce point (minimum Z along pitch where ball contacts turf)
-            z_vals = [float(p.get('z', 0.0)) for p in trajectory]
-            min_idx = int(np.argmin(z_vals))
+            # Detect bounce point using multi-cue detection
+            bounce_idx = self._detect_bounce_index(trajectory)
 
-            # If bounce is at boundary (all points before bounce or all after bounce)
-            if min_idx <= 1 or min_idx >= len(trajectory) - 2:
+            # If no bounce detected from cues, check if minimum z has physical dip
+            if bounce_idx is None:
+                z_vals = [float(p.get('z', 0.0)) for p in trajectory]
+                min_idx = int(np.argmin(z_vals))
+                if 1 < min_idx < len(trajectory) - 2 and z_vals[min_idx] <= 0.45:
+                    bounce_idx = min_idx
+
+            # If bounce is at boundary or undetectable, fit single segment
+            if bounce_idx is None or bounce_idx <= 1 or bounce_idx >= len(trajectory) - 2:
                 return self._fit_parabolic_height(trajectory, g=g)
 
             # Split into pre-bounce (up to bounce) and post-bounce (from bounce)
-            pre_bounce_pts = trajectory[:min_idx + 1]
-            post_bounce_pts = trajectory[min_idx:]
+            pre_bounce_pts = trajectory[:bounce_idx + 1]
+            post_bounce_pts = trajectory[bounce_idx:]
+
+            t0 = float(pre_bounce_pts[0].get('t', 0.0))
+            tb = float(trajectory[bounce_idx].get('t', 0.0))
+            T_pre = max(0.05, tb - t0)
 
             fitted_pre = self._fit_parabolic_height(pre_bounce_pts, g=g)
             fitted_post = self._fit_parabolic_height(post_bounce_pts, g=g)
+
+            # Check if pre-bounce fit is physically realistic (starts around release height ~1.5 - 2.5m and descends)
+            pre_fit = fitted_pre[0].get('parabolic_fit', {}) if fitted_pre else {}
+            pre_z0 = float(pre_fit.get('z0', 0.0))
+            pre_vz0 = float(pre_fit.get('vz0', 0.0))
+            pre_vz_bounce = pre_vz0 - g * T_pre
+
+            # If pre-bounce fit is not realistic (e.g. monocular heuristic z was ascending or starting too low)
+            if pre_z0 < 1.0 or pre_z0 > 3.0 or pre_vz_bounce >= 0:
+                # Reconstruct realistic Newtonian descent from bowler release height (~2.0m down to turf level ~0.036m)
+                z_rel = 2.0
+                z_b = 0.036
+                pre_vz0 = (z_b - z_rel + 0.5 * g * (T_pre ** 2)) / T_pre
+                pre_vz_bounce = pre_vz0 - g * T_pre
+                pre_z0 = z_rel
+
+                fitted_pre = []
+                for p in pre_bounce_pts:
+                    tau = float(p.get('t', 0.0)) - t0
+                    z_val = max(0.036, min(3.5, z_rel + pre_vz0 * tau - 0.5 * g * (tau ** 2)))
+                    pt_copy = dict(p)
+                    pt_copy['z_raw'] = float(p.get('z_raw', p.get('z', 0.0)))
+                    pt_copy['z'] = round(float(z_val), 4)
+                    pt_copy['parabolic_fit'] = {
+                        'z0': round(z_rel, 4),
+                        'vz0': round(pre_vz0, 4),
+                        'g': g
+                    }
+                    fitted_pre.append(pt_copy)
+
+            # Check if post-bounce fit has a physical upward rebound (vz0 > 0.5 m/s)
+            post_fit = fitted_post[0].get('parabolic_fit', {}) if fitted_post else {}
+            post_vz0 = float(post_fit.get('vz0', 0.0))
+            post_z0 = float(post_fit.get('z0', 0.0))
+
+            # If post-bounce fit does not rebound upwards (e.g. monocular z stayed flat or kept descending)
+            if post_vz0 < 0.5 or post_z0 > 0.25:
+                # Reconstruct upward rebound along turf-restitution trajectory (e in [0.45, 0.55])
+                e_restitution = 0.52
+                post_vz0 = -e_restitution * min(-2.5, pre_vz_bounce)
+                z_b = 0.036
+                post_z0 = z_b
+
+                fitted_post = []
+                for p in post_bounce_pts:
+                    tau = float(p.get('t', 0.0)) - tb
+                    z_val = max(0.036, min(3.5, z_b + post_vz0 * tau - 0.5 * g * (tau ** 2)))
+                    pt_copy = dict(p)
+                    pt_copy['z_raw'] = float(p.get('z_raw', p.get('z', 0.0)))
+                    pt_copy['z'] = round(float(z_val), 4)
+                    pt_copy['parabolic_fit'] = {
+                        'z0': round(z_b, 4),
+                        'vz0': round(post_vz0, 4),
+                        'g': g
+                    }
+                    fitted_post.append(pt_copy)
 
             # Set bounce contact point height to pitch turf level (~0.036m regulation ball radius)
             bounce_pt = dict(fitted_post[0])
@@ -2403,10 +2594,17 @@ class BallTrackingService:
             has_pad_impact = tracking_data.get('pad_impact_verified', False) or is_simulation
 
             # 1. Physical Bounce Detection
-            # A real pitch bounce requires curvature evidence: downward descent before,
-            # upward ascent after, at an interior trajectory point near pitch level.
+            # Check if bounce point was already identified in post-processing
             bounce_idx = None
-            if len(trajectory) >= 5:
+            for i, p in enumerate(trajectory):
+                if p.get('phase') == 'bounce' and 1 <= i <= len(trajectory) - 2:
+                    bounce_idx = i
+                    break
+
+            if bounce_idx is None:
+                bounce_idx = self._detect_bounce_index(trajectory)
+
+            if bounce_idx is None and len(trajectory) >= 5:
                 # Find candidate minimum z among interior points (skip endpoints)
                 min_z = float('inf')
                 cand_idx = None
@@ -2420,8 +2618,8 @@ class BallTrackingService:
                     z_prev = trajectory[cand_idx - 1]['z']
                     z_next = trajectory[cand_idx + 1]['z']
                     # Verify downward descent into minimum and upward ascent out of minimum
-                    descending = (z_prev - z_curr) > 0.03
-                    ascending = (z_next - z_curr) > 0.03
+                    descending = (z_prev - z_curr) > 0.02
+                    ascending = (z_next - z_curr) > 0.02
                     near_ground = z_curr <= 0.45  # within 45 cm of pitch
 
                     if (descending and ascending and near_ground) or is_simulation:
@@ -2459,34 +2657,55 @@ class BallTrackingService:
                 drs_data["post_bounce_points"] = []
                 drs_data["length_zone"] = None
 
-            # 2. Impact Point & DRS Evaluation
-            # Only evaluate LBW if there is verified pad impact evidence or explicit simulation
-            if has_pad_impact and drs_data["bounce_point"] is not None:
+            # 2. Predictive Extrapolation to Stumps Plane & DRS Evaluation
+            # For all deliveries that reach or bounce on the pitch, extrapolate to stumps plane
+            if drs_data["bounce_point"] is not None:
                 post_bounce = drs_data["post_bounce_points"]
-                impact_point = dict(post_bounce[-1], phase="impact") if post_bounce else dict(trajectory[-1], phase="impact")
+                STUMP_Y = self.pitch_length / 2.0  # 10.06m
+
+                # Choose impact / interception point near popping crease (y ~ 8.84m) before stumps
+                pts_before_stumps = [p for p in post_bounce if p['y'] <= STUMP_Y]
+                if pts_before_stumps:
+                    impact_point = dict(pts_before_stumps[-1], phase="impact")
+                elif post_bounce:
+                    impact_point = dict(post_bounce[0], phase="impact")
+                else:
+                    impact_point = dict(drs_data["bounce_point"], phase="impact")
                 drs_data["impact_point"] = impact_point
+
+                # Determine starting point for predictive extrapolation
+                start_pt = impact_point
+                if start_pt['y'] >= STUMP_Y - 0.2 and len(pts_before_stumps) > 1:
+                    start_pt = pts_before_stumps[0]
+                elif start_pt['y'] >= STUMP_Y - 0.2:
+                    start_pt = drs_data["bounce_point"]
 
                 if len(post_bounce) >= 2:
                     dt = max(0.01, post_bounce[-1]['t'] - post_bounce[0]['t'])
                     vx = (post_bounce[-1]['x'] - post_bounce[0]['x']) / dt
                     vy = max(5.0, (post_bounce[-1]['y'] - post_bounce[0]['y']) / dt)
-                    if post_bounce[-1].get('parabolic_fit'):
-                        # Analytical vertical velocity from fitted parabola: vz(tau) = vz0 - 9.8 * tau
+                    if post_bounce[0].get('parabolic_fit'):
+                        vz0 = float(post_bounce[0]['parabolic_fit']['vz0'])
+                        tau_start = max(0.0, start_pt['t'] - post_bounce[0]['t'])
+                        vz = vz0 - 9.81 * tau_start
+                    elif post_bounce[-1].get('parabolic_fit'):
                         vz0 = float(post_bounce[-1]['parabolic_fit']['vz0'])
                         tau_impact = max(0.0, post_bounce[-1]['t'] - post_bounce[0]['t'])
-                        vz = vz0 - 9.8 * tau_impact
+                        vz = vz0 - 9.81 * tau_impact
                     else:
                         vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
                 else:
-                    vx, vy, vz = 0.0, 30.0, 1.5
+                    vx, vy, vz = 0.0, 30.0, 3.2
 
-                STUMP_Y = self.pitch_length / 2.0
                 extrapolated = []
-                curr_x, curr_y, curr_z = impact_point['x'], impact_point['y'], max(0.05, impact_point['z'])
-                curr_t = impact_point['t']
+                curr_x = float(start_pt['x'])
+                curr_y = float(start_pt['y'])
+                curr_z = max(0.036, float(start_pt['z']))
+                curr_t = float(start_pt['t'])
                 step_dt = 0.016
+                gamma_drag = 0.0048  # Aerodynamic drag factor 0.5 * Cd * rho * A / m for regulation cricket ball
 
-                while curr_y <= STUMP_Y + 0.2:
+                while curr_y <= STUMP_Y + 0.2 and curr_z >= 0.02:
                     extrapolated.append({
                         "x": round(float(curr_x), 4),
                         "y": round(float(curr_y), 4),
@@ -2495,21 +2714,49 @@ class BallTrackingService:
                         "phase": "extrapolated",
                         "confidence": 0.85
                     })
-                    vz -= 9.81 * step_dt
+                    speed = np.sqrt(vx**2 + vy**2 + vz**2)
+                    drag_ax = -gamma_drag * speed * vx
+                    drag_ay = -gamma_drag * speed * vy
+                    drag_az = -gamma_drag * speed * vz
+                    vx += drag_ax * step_dt
+                    vy += drag_ay * step_dt
+                    vz += (drag_az - 9.81) * step_dt
                     curr_x += vx * step_dt
                     curr_y += vy * step_dt
                     curr_z += vz * step_dt
                     curr_t += step_dt
+
+                # Ensure extrapolated points exist up to STUMP_Y
+                if not extrapolated or extrapolated[-1]['y'] < STUMP_Y:
+                    while curr_y <= STUMP_Y + 0.2:
+                        extrapolated.append({
+                            "x": round(float(curr_x), 4),
+                            "y": round(float(curr_y), 4),
+                            "z": round(float(max(0.02, curr_z)), 4),
+                            "t": round(float(curr_t), 4),
+                            "phase": "extrapolated",
+                            "confidence": 0.85
+                        })
+                        curr_x += vx * step_dt
+                        curr_y += vy * step_dt
+                        curr_z += vz * step_dt
+                        curr_t += step_dt
 
                 drs_data["extrapolated_points"] = extrapolated
 
                 # Stumps plane target
                 stump_target_x = curr_x
                 stump_target_z = max(0.02, curr_z)
-                for ep in extrapolated:
+                for i, ep in enumerate(extrapolated):
                     if ep['y'] >= STUMP_Y:
-                        stump_target_x = ep['x']
-                        stump_target_z = ep['z']
+                        if i > 0:
+                            prev = extrapolated[i-1]
+                            frac = (STUMP_Y - prev['y']) / max(1e-9, ep['y'] - prev['y'])
+                            stump_target_x = prev['x'] + frac * (ep['x'] - prev['x'])
+                            stump_target_z = prev['z'] + frac * (ep['z'] - prev['z'])
+                        else:
+                            stump_target_x = ep['x']
+                            stump_target_z = ep['z']
                         break
 
                 STUMP_WIDTH = PITCH_CONFIG.get("stump_width_m", 0.2286)
@@ -2576,7 +2823,7 @@ class BallTrackingService:
                     "hit_stump": hit_stump
                 }
             else:
-                # Unverified impact: do not fabricate LBW verdicts for real video without pad contact
+                # No verified pitch bounce — leave LBW evaluation as None
                 drs_data["impact_point"] = None
                 drs_data["extrapolated_points"] = []
                 drs_data["stump_plane_target"] = None

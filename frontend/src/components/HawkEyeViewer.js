@@ -1,5 +1,6 @@
 import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
+import { Html } from '@react-three/drei';
 import {
   Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
   FormControlLabel, Switch, Paper, Tooltip, IconButton, Button,
@@ -375,13 +376,18 @@ function BallCometTail({ currentBallPos, allPoints, currentTime, theme }) {
 }
 
 // Concentric Animated Halo at Pitch Bounce Spot
-function PitchingSpotMarker({ bouncePoint, onSelectPoint, theme }) {
-  const ringRef = useRef();
+function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme }) {
+  const outerRingRef = useRef();
+  const pulseRingRef = useRef();
 
   useFrame(({ clock }) => {
-    if (ringRef.current) {
-      const s = 1;
-      ringRef.current.scale.set(s, s, s);
+    const t = clock.getElapsedTime();
+    if (pulseRingRef.current) {
+      const scale = 1 + (Math.sin(t * 3.5) + 1) * 0.22;
+      pulseRingRef.current.scale.set(scale, scale, 1);
+    }
+    if (outerRingRef.current) {
+      outerRingRef.current.rotation.z = t * 0.4;
     }
   });
 
@@ -389,33 +395,164 @@ function PitchingSpotMarker({ bouncePoint, onSelectPoint, theme }) {
 
   const spotColor = theme?.trajectory?.postBounce || '#ffb703';
 
+  // Distance from batsman stumps (Z = 10.06m in Three.js coordinates)
+  const distFromStumps = Math.max(0, 10.06 - bouncePoint.z);
+
+  // Determine length zone
+  let zoneName = lengthZone;
+  let zoneColor = '#22c55e';
+  if (!zoneName) {
+    if (distFromStumps < 2.0) {
+      zoneName = 'Yorker';
+      zoneColor = '#ef4444';
+    } else if (distFromStumps < 4.0) {
+      zoneName = 'Full';
+      zoneColor = '#f97316';
+    } else if (distFromStumps < 7.0) {
+      zoneName = 'Good Length';
+      zoneColor = '#22c55e';
+    } else if (distFromStumps < 9.5) {
+      zoneName = 'Short of Length';
+      zoneColor = '#eab308';
+    } else {
+      zoneName = 'Bouncer';
+      zoneColor = '#3b82f6';
+    }
+  } else {
+    const zl = zoneName.toLowerCase();
+    if (zl.includes('yorker')) zoneColor = '#ef4444';
+    else if (zl.includes('full')) zoneColor = '#f97316';
+    else if (zl.includes('good')) zoneColor = '#22c55e';
+    else if (zl.includes('short')) zoneColor = '#eab308';
+    else if (zl.includes('bouncer')) zoneColor = '#3b82f6';
+  }
+
+  const crosshairPointsH = [
+    new THREE.Vector3(-0.28, 0.003, 0),
+    new THREE.Vector3(0.28, 0.003, 0)
+  ];
+  const crosshairPointsV = [
+    new THREE.Vector3(0, 0.003, -0.28),
+    new THREE.Vector3(0, 0.003, 0.28)
+  ];
+
   return (
     <group position={[bouncePoint.x, 0.005, bouncePoint.z]}>
-      {/* Outer pulsing ring */}
-      <mesh ref={ringRef} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.16, 0.22, 32]} />
-        <meshBasicMaterial color={spotColor} transparent opacity={0.8} side={THREE.DoubleSide} />
+      {/* Outer pulsing wave ring */}
+      <mesh ref={pulseRingRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.20, 0.27, 32]} />
+        <meshBasicMaterial color={spotColor} transparent opacity={0.65} side={THREE.DoubleSide} />
       </mesh>
-      {/* Inner bullseye spot */}
+
+      {/* Rotating outer compass ring */}
+      <mesh ref={outerRingRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.15, 0.18, 32]} />
+        <meshBasicMaterial color={zoneColor} transparent opacity={0.8} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* Turf contact disc */}
       <mesh rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[0.08, 32]} />
-        <meshBasicMaterial color={theme?.ball?.color || '#e63946'} />
+        <circleGeometry args={[0.15, 32]} />
+        <meshBasicMaterial color={spotColor} transparent opacity={0.25} side={THREE.DoubleSide} />
       </mesh>
-      {/* Vertical guide line */}
+
+      {/* Turf crosshair lines */}
+      <line>
+        <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints(crosshairPointsH)} />
+        <lineBasicMaterial attach="material" color={spotColor} transparent opacity={0.7} />
+      </line>
+      <line>
+        <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints(crosshairPointsV)} />
+        <lineBasicMaterial attach="material" color={spotColor} transparent opacity={0.7} />
+      </line>
+
+      {/* Inner bullseye spot */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.004, 0]}>
+        <circleGeometry args={[0.06, 32]} />
+        <meshStandardMaterial
+          color={theme?.ball?.color || '#e63946'}
+          emissive={theme?.ball?.color || '#e63946'}
+          emissiveIntensity={0.8}
+        />
+      </mesh>
+
+      {/* Vertical guide beacon */}
       <line>
         <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints([
           new THREE.Vector3(0, 0, 0),
-          new THREE.Vector3(0, 0.45, 0)
+          new THREE.Vector3(0, 0.55, 0)
         ])} />
-        <lineDashedMaterial attach="material" color={spotColor} dashSize={0.05} gapSize={0.03} />
+        <lineDashedMaterial attach="material" color={zoneColor} dashSize={0.04} gapSize={0.02} />
       </line>
+
+      {/* Length Zone Pill and Bounce Impact Coordinates */}
+      <Html
+        position={[0, 0.65, 0]}
+        center
+        distanceFactor={12}
+        style={{
+          pointerEvents: 'none',
+          userSelect: 'none',
+          whiteSpace: 'nowrap'
+        }}
+      >
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '3px',
+          filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.85))'
+        }}>
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '5px',
+            background: 'rgba(15, 23, 42, 0.94)',
+            border: `1.5px solid ${zoneColor}`,
+            borderRadius: '12px',
+            padding: '2px 8px',
+            boxShadow: `0 0 12px ${zoneColor}66`
+          }}>
+            <span style={{
+              display: 'inline-block',
+              width: '6px',
+              height: '6px',
+              borderRadius: '50%',
+              backgroundColor: zoneColor
+            }} />
+            <span style={{
+              color: '#ffffff',
+              fontWeight: 800,
+              fontSize: '11px',
+              letterSpacing: '0.6px',
+              textTransform: 'uppercase',
+              fontFamily: 'system-ui, -apple-system, sans-serif'
+            }}>
+              {zoneName}
+            </span>
+          </div>
+          <div style={{
+            background: 'rgba(10, 15, 26, 0.90)',
+            border: '1px solid rgba(255, 255, 255, 0.2)',
+            borderRadius: '6px',
+            padding: '2px 6px',
+            color: '#cbd5e1',
+            fontSize: '9.5px',
+            fontWeight: 600,
+            fontFamily: 'monospace'
+          }}>
+            {distFromStumps.toFixed(2)}m from stumps • {bouncePoint.x >= 0 ? `+${bouncePoint.x.toFixed(2)}m off` : `${bouncePoint.x.toFixed(2)}m leg`}
+          </div>
+        </div>
+      </Html>
+
       {/* Clickable interactive sensor */}
       <mesh
         position={[0, 0.05, 0]}
         onClick={() => onSelectPoint && onSelectPoint(bouncePoint)}
         visible={false}
       >
-        <sphereGeometry args={[0.25, 8, 8]} />
+        <sphereGeometry args={[0.3, 8, 8]} />
         <meshBasicMaterial transparent opacity={0} />
       </mesh>
     </group>
@@ -455,31 +592,138 @@ function ImpactMarker({ impactPoint, onSelectPoint, theme }) {
 
 // Stumps Target Plane & Impact Marker at Y = 10.06m
 function StumpsTargetPlane({ target, drsVerdict }) {
+  const pulseRef = useRef();
+
+  useFrame(({ clock }) => {
+    if (pulseRef.current) {
+      const s = 1 + (Math.sin(clock.getElapsedTime() * 4) + 1) * 0.18;
+      pulseRef.current.scale.set(s, s, 1);
+    }
+  });
+
   if (!target) return null;
 
   const isHitting = drsVerdict?.wickets === 'HITTING';
   const isUmpiresCall = drsVerdict?.wickets === "UMPIRE'S CALL";
   const glowColor = isHitting ? '#e63946' : isUmpiresCall ? '#ffb703' : '#2a9d8f';
+  const targetStump = target.hit_stump || (isHitting ? 'Wickets' : 'Missing');
+
+  const crosshairH = [
+    new THREE.Vector3(target.x - 0.08, target.z, 0.002),
+    new THREE.Vector3(target.x + 0.08, target.z, 0.002)
+  ];
+  const crosshairV = [
+    new THREE.Vector3(target.x, target.z - 0.08, 0.002),
+    new THREE.Vector3(target.x, target.z + 0.08, 0.002)
+  ];
 
   return (
     <group position={[0, 0, target.y]}>
-      {/* Stumps projected boundary box */}
+      {/* Stumps projected boundary backdrop */}
       <mesh position={[0, STUMP_HEIGHT / 2, 0]}>
         <planeGeometry args={[STUMP_WIDTH + 0.04, STUMP_HEIGHT + 0.06]} />
-        <meshBasicMaterial color={glowColor} wireframe transparent opacity={0.5} />
+        <meshBasicMaterial color={glowColor} wireframe transparent opacity={0.4} />
       </mesh>
 
-      {/* Ball arrival position indicator */}
+      {/* Three vertical stump guide lines on target plane */}
+      {[-0.0953, 0, 0.0953].map((sx, idx) => (
+        <line key={idx}>
+          <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(sx, 0, 0.001),
+            new THREE.Vector3(sx, STUMP_HEIGHT, 0.001)
+          ])} />
+          <lineBasicMaterial attach="material" color={glowColor} transparent opacity={0.35} />
+        </line>
+      ))}
+
+      {/* Bail guideline */}
+      <line>
+        <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(-(STUMP_WIDTH / 2), STUMP_HEIGHT, 0.001),
+          new THREE.Vector3((STUMP_WIDTH / 2), STUMP_HEIGHT, 0.001)
+        ])} />
+        <lineBasicMaterial attach="material" color={glowColor} transparent opacity={0.5} />
+      </line>
+
+      {/* Reticle Crosshair Lines */}
+      <line>
+        <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints(crosshairH)} />
+        <lineBasicMaterial attach="material" color={glowColor} />
+      </line>
+      <line>
+        <bufferGeometry attach="geometry" {...new THREE.BufferGeometry().setFromPoints(crosshairV)} />
+        <lineBasicMaterial attach="material" color={glowColor} />
+      </line>
+
+      {/* Outer pulsing ripple ring */}
+      <mesh ref={pulseRef} position={[target.x, target.z, 0.003]}>
+        <ringGeometry args={[BALL_RADIUS * 1.05, BALL_RADIUS * 1.45, 32]} />
+        <meshBasicMaterial color={glowColor} transparent opacity={0.65} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* Concentric target impact circle */}
+      <mesh position={[target.x, target.z, 0.004]}>
+        <ringGeometry args={[BALL_RADIUS * 0.75, BALL_RADIUS * 0.95, 32]} />
+        <meshBasicMaterial color="#ffffff" transparent opacity={0.9} side={THREE.DoubleSide} />
+      </mesh>
+
+      {/* Ball arrival position indicator sphere */}
       <mesh position={[target.x, target.z, 0]}>
-        <sphereGeometry args={[BALL_RADIUS, 20, 20]} />
+        <sphereGeometry args={[BALL_RADIUS, 24, 24]} />
         <meshStandardMaterial
           color={glowColor}
           emissive={glowColor}
-          emissiveIntensity={0.8}
+          emissiveIntensity={1.0}
           transparent
-          opacity={0.8}
+          opacity={0.85}
         />
       </mesh>
+
+      {/* Target Impact HUD Pill */}
+      <Html
+        position={[target.x, target.z + BALL_RADIUS + 0.12, 0]}
+        center
+        distanceFactor={10}
+        style={{
+          pointerEvents: 'none',
+          userSelect: 'none',
+          whiteSpace: 'nowrap'
+        }}
+      >
+        <div style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: '2px',
+          filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.85))'
+        }}>
+          <div style={{
+            background: isHitting ? 'rgba(239, 68, 68, 0.92)' : isUmpiresCall ? 'rgba(245, 158, 11, 0.92)' : 'rgba(34, 197, 94, 0.92)',
+            borderRadius: '10px',
+            padding: '2px 8px',
+            color: '#ffffff',
+            fontWeight: 800,
+            fontSize: '10px',
+            letterSpacing: '0.5px',
+            textTransform: 'uppercase',
+            fontFamily: 'system-ui, -apple-system, sans-serif',
+            boxShadow: `0 0 10px ${glowColor}66`
+          }}>
+            {drsVerdict?.wickets || (isHitting ? 'HITTING' : 'MISSING')} • {targetStump}
+          </div>
+          <div style={{
+            background: 'rgba(15, 23, 42, 0.88)',
+            border: '1px solid rgba(255, 255, 255, 0.2)',
+            borderRadius: '5px',
+            padding: '1px 5px',
+            color: '#cbd5e1',
+            fontSize: '9px',
+            fontFamily: 'monospace'
+          }}>
+            X: {(target.x * 100).toFixed(1)}cm • H: {(target.z * 100).toFixed(1)}cm
+          </div>
+        </div>
+      </Html>
     </group>
   );
 }
@@ -697,13 +941,36 @@ function Scene({
       };
     };
 
-    if (trajectoryData.pre_bounce_points) {
+    if (trajectoryData.pre_bounce_points || trajectoryData.bounce_point || trajectoryData.extrapolated_points) {
       const pre = (trajectoryData.pre_bounce_points || []).map(convert);
       const post = (trajectoryData.post_bounce_points || []).map(convert);
       const ext = (trajectoryData.extrapolated_points || []).map(convert);
       const bnc = convert(trajectoryData.bounce_point);
       const imp = convert(trajectoryData.impact_point);
-      const all = prepareTrajectory(trajectoryData.points).map(convert);
+      let all = prepareTrajectory(trajectoryData.points).map(convert);
+
+      if (all.length === 0 && (pre.length > 0 || post.length > 0)) {
+        all = [...pre, ...post, ...ext];
+      } else if (ext.length > 0 && all.length > 0) {
+        const lastT = all[all.length - 1].t;
+        const newExt = ext.filter(p => p.t > lastT);
+        all = [...all, ...newExt];
+      }
+
+      // If stump_plane_target not provided but extrapolated points exist, derive target at y = 10.06m
+      let target = trajectoryData.stump_plane_target;
+      if (!target && ext.length > 0) {
+        const lastExt = ext[ext.length - 1];
+        if (lastExt.z >= 9.5) {
+          const hitStump = Math.abs(lastExt.x) <= 0.04 ? 'Middle Stump' : lastExt.x < -0.04 ? 'Leg Stump' : 'Off Stump';
+          target = {
+            x: lastExt.x,
+            y: 10.06,
+            z: lastExt.y,
+            hit_stump: hitStump
+          };
+        }
+      }
 
       return {
         preBouncePoints: pre,
@@ -711,7 +978,7 @@ function Scene({
         extrapolatedPoints: ext,
         bouncePoint: bnc,
         impactPoint: imp,
-        stumpTarget: trajectoryData.stump_plane_target,
+        stumpTarget: target,
         allPoints: all
       };
     }
@@ -735,9 +1002,9 @@ function Scene({
       preBouncePoints: pre,
       postBouncePoints: post,
       extrapolatedPoints: [],
-      bouncePoint: isSimulation ? pts[minZIdx] : null,
-      impactPoint: isSimulation ? pts[pts.length - 1] : null,
-      stumpTarget: null,
+      bouncePoint: convert(trajectoryData.bounce_point) || (minZ < 0.35 ? pts[minZIdx] : null),
+      impactPoint: convert(trajectoryData.impact_point) || (isSimulation ? pts[pts.length - 1] : null),
+      stumpTarget: trajectoryData.stump_plane_target || null,
       allPoints: pts
     };
   }, [trajectoryData, isSimulation]);
@@ -897,7 +1164,12 @@ function Scene({
       )}
 
       {/* 3D Event Markers */}
-      <PitchingSpotMarker bouncePoint={bouncePoint} onSelectPoint={onSelectPoint} theme={theme} />
+      <PitchingSpotMarker
+        bouncePoint={bouncePoint}
+        lengthZone={trajectoryData?.length_zone}
+        onSelectPoint={onSelectPoint}
+        theme={theme}
+      />
       <ImpactMarker impactPoint={impactPoint} onSelectPoint={onSelectPoint} theme={theme} />
 
       {showExtrapolation && stumpTarget && (
@@ -989,10 +1261,17 @@ export default function HawkEyeViewer({
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   const [cameraView, setCameraView] = useState('side');
   const [ghostPreset, setGhostPreset] = useState(initialGhostPreset);
-  const [showExtrapolation, setShowExtrapolation] = useState(isSimulation);
-  const [showFullPath, setShowFullPath] = useState(isSimulation);
+  const [showExtrapolation, setShowExtrapolation] = useState(true);
+  const [showFullPath, setShowFullPath] = useState(true);
   const [showZones, setShowZones] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState(null);
+
+  useEffect(() => {
+    if (trajectoryData?.extrapolated_points?.length > 0 || trajectoryData?.drs_evaluation || trajectoryData?.points?.length > 0) {
+      setShowExtrapolation(true);
+      setShowFullPath(true);
+    }
+  }, [trajectoryData]);
 
   // 3D Aerodynamic Force Vectors & Physics HUD State
   const [showForceVectors, setShowForceVectors] = useState(false);
