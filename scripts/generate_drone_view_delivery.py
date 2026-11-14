@@ -2,12 +2,16 @@
 """
 High-Resolution Drone / Aerial View Cricket Delivery Video Generator.
 Produces photorealistic single-delivery broadcast clips from an aerial drone perspective,
-specifically designed for Computer Vision ball tracking and 3D Hawk-Eye reconstruction.
+encoded in standard H.264 (AVC1, yuv420p, +faststart) for seamless HTML5 browser playback,
+computer vision ball tracking, and 3D Hawk-Eye reconstruction.
 """
 import cv2
 import numpy as np
 import math
+import subprocess
+import sys
 from pathlib import Path
+import imageio_ffmpeg
 
 def generate_drone_view_clip(
     output_path="sample_videos/drone_view_inswinger.mp4",
@@ -16,11 +20,27 @@ def generate_drone_view_clip(
     fps=60,
     delivery_style="inswinger"
 ):
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    # Setup H.264 encoder with yuv420p and faststart for 100% browser compatibility
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg_exe, '-y',
+        '-f', 'rawvideo',
+        '-vcodec', 'rawvideo',
+        '-s', f'{width}x{height}',
+        '-pix_fmt', 'bgr24',
+        '-r', str(fps),
+        '-i', '-',
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '18',
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        str(output_path)
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
     
     # Perspective pitch dimensions
     pitch_w_top = int(width * 0.16)
@@ -42,20 +62,20 @@ def generate_drone_view_clip(
     # Delivery style configurations
     if delivery_style == "bouncer":
         title_text = "DRS AERIAL DRONE VIEW | SHARP BOUNCER (145 KM/H)"
-        bounce_frame = 54  # Short-pitch early bounce
+        bounce_frame = 54
         impact_frame = 104
         start_pos = (center_x + 18, bowling_crease_y + 10, 52)
         bounce_pos = (center_x + 8, int(pitch_top_y + pitch_len_px * 0.42), 0)
-        impact_pos = (center_x + 6, popping_crease_bottom_y + 6, 68)  # High over stumps
+        impact_pos = (center_x + 6, popping_crease_bottom_y + 6, 68)
         rebound_h = 75
         drift_x = 2
     elif delivery_style == "legspin":
         title_text = "DRS AERIAL DRONE VIEW | LEG BREAK SPIN (88 KM/H)"
-        bounce_frame = 74  # Fuller length
+        bounce_frame = 74
         impact_frame = 110
         start_pos = (center_x - 12, bowling_crease_y + 10, 42)
-        bounce_pos = (center_x - 16, int(pitch_top_y + pitch_len_px * 0.68), 0) # Pitches outside leg
-        impact_pos = (center_x + 10, popping_crease_bottom_y + 6, 26) # Turns sharply towards off
+        bounce_pos = (center_x - 16, int(pitch_top_y + pitch_len_px * 0.68), 0)
+        impact_pos = (center_x + 10, popping_crease_bottom_y + 6, 26)
         rebound_h = 24
         drift_x = 8
     else:  # inswinger
@@ -68,7 +88,6 @@ def generate_drone_view_clip(
         rebound_h = 28
         drift_x = -5
     
-    # Base grass and mowing pattern
     base_grass = np.full((height, width, 3), (38, 115, 45), dtype=np.uint8)
     stripe_w = 40
     for x in range(0, width, stripe_w * 2):
@@ -200,13 +219,16 @@ def generate_drone_view_clip(
             cv2.line(frame, (bx - ball_r // 2, by), (bx + ball_r // 2, by), (240, 240, 255), 1)
             
         cv2.putText(frame, title_text, (30, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (235, 245, 255), 2, cv2.LINE_AA)
-        out.write(frame)
+        proc.stdin.write(frame.tobytes())
         
-    out.release()
-    print(f"Generated: {output_path} ({delivery_style})")
+    proc.stdin.close()
+    proc.wait()
+    print(f"Generated H.264 video: {output_path} ({delivery_style})")
     return output_path
 
 if __name__ == "__main__":
     generate_drone_view_clip("sample_videos/drone_view_inswinger.mp4", delivery_style="inswinger")
     generate_drone_view_clip("sample_videos/drone_view_bouncer.mp4", delivery_style="bouncer")
     generate_drone_view_clip("sample_videos/drone_view_legspin.mp4", delivery_style="legspin")
+    # Also update sample_delivery.mp4 with H.264
+    generate_drone_view_clip("sample_delivery.mp4", delivery_style="inswinger")
