@@ -4,7 +4,7 @@ import {
   CircularProgress, Alert, Dialog, LinearProgress, Fab
 } from '@mui/material';
 import {
-  CloudUpload, Videocam, Refresh, Delete, Logout,
+  CloudUpload, Videocam, Refresh, Delete,
   Close, Stop,
   FlipCameraIos, SportsCricket, ArrowForward, Search, InfoOutlined, VideoLibrary
 } from '@mui/icons-material';
@@ -212,7 +212,7 @@ function VideoRecorder({ open, onClose, onRecorded }) {
 }
 
 
-function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
+function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -233,7 +233,21 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
       setVideos(response.data.videos || []);
       setError('');
     } catch (err) {
-      setError(err.response?.status === 401 ? 'Your session has expired. Sign in again to access your clips.' : 'Could not load your deliveries. Check the connection and refresh.');
+      if (err.response?.status === 401) {
+        try {
+          const guestRes = await api.post('/auth/guest');
+          if (guestRes.data?.access_token) {
+            localStorage.setItem('token', guestRes.data.access_token);
+            const retryRes = await api.get('/videos/');
+            setVideos(retryRes.data.videos || []);
+            setError('');
+            return;
+          }
+        } catch {
+          // ignore fallback error
+        }
+      }
+      setError('Could not load deliveries. Check the connection and refresh.');
     } finally {
       if (showSpinner) setLoading(false);
     }
@@ -263,10 +277,13 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
     const formData = new FormData();
     formData.append('file', file);
     try {
-      await api.post('/videos/upload', formData, { onUploadProgress: e => {
+      const res = await api.post('/videos/upload', formData, { onUploadProgress: e => {
         if (e.total) setUploadProgress(Math.min(100, Math.round(e.loaded * 100 / e.total)));
       }});
       await loadVideos(false);
+      if (res.data?.id) {
+        onVideoSelect(res.data);
+      }
     } catch (err) {
       const detail = err.response?.data?.detail;
       setError(typeof detail === 'string' ? detail : 'Upload failed. Your clip was not added. Please try again.');
@@ -306,14 +323,28 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
       <nav className="studio-nav" aria-label="Workspace navigation">
         <div className="wordmark"><span className="brand-symbol"><SportsCricket sx={{ fontSize: 17 }} /></span>crease<span className="muted" style={{ fontWeight: 400 }}>/ lab</span></div>
         <div className="nav-links">
-          <span className="nav-active" aria-current="page">Workspace</span>
-          <Button size="small" color="inherit" onClick={onLaunchDemo}>Simulation <ArrowForward sx={{ fontSize: 15, ml: 1 }} /></Button>
-          <Tooltip title="Sign out"><IconButton onClick={onLogout} aria-label="Sign out"><Logout fontSize="small" /></IconButton></Tooltip>
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={onLaunchDemo}
+            startIcon={<SportsCricket fontSize="small" />}
+            sx={{ borderColor: '#8ab4ff', color: '#8ab4ff' }}
+          >
+            Simulation (3D Hawk-Eye)
+          </Button>
+          <Button
+            size="small"
+            variant="contained"
+            onClick={() => fileInputRef.current?.click()}
+            startIcon={<CloudUpload fontSize="small" />}
+          >
+            Upload Video to Analyse
+          </Button>
         </div>
       </nav>
       <main id="main-content" className="studio-main" tabIndex={-1}>
         <header className="page-intro">
-          <div><h1>Your delivery workspace</h1><p>Upload a clip, review the track, and inspect the evidence.</p></div>
+          <div><h1>Cricket Ball Tracking & DRS Lab</h1><p>Run 3D Hawk-Eye simulations or upload a match clip for automated ball tracking and LBW analysis.</p></div>
           <span className="eyebrow nav-context" style={{ color: '#adb8c7' }}>Computer vision / 3D visualization</span>
         </header>
         <div className="workspace-grid">
@@ -321,8 +352,23 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
             onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
             onDrop={e => { e.preventDefault(); setDragging(false); const file = e.dataTransfer.files[0]; if (file) uploadVideo(file); }}>
             <div className="upload-icon"><CloudUpload fontSize="small" /></div>
-            <h2 id="upload-heading">Upload a delivery</h2><p>Drop a clip here, or choose a file to start tracking.<br />MP4, MOV, AVI, MKV, WebM · Up to {MAX_UPLOAD_SIZE_MB} MB</p>
-            <div className="upload-actions"><Button variant="contained" onClick={() => fileInputRef.current.click()} disabled={uploading} startIcon={<CloudUpload fontSize="small" />}>Upload delivery</Button><Button color="inherit" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>Record</Button></div>
+            <h2 id="upload-heading">Upload Video to Analyse</h2>
+            <p>Drop a cricket delivery video here, or click below to upload and analyse directly.<br />MP4, MOV, AVI, MKV, WebM · Up to {MAX_UPLOAD_SIZE_MB} MB</p>
+            <div className="upload-actions">
+              <Button
+                variant="contained"
+                size="large"
+                onClick={() => fileInputRef.current.click()}
+                disabled={uploading}
+                startIcon={<CloudUpload />}
+                sx={{ px: 3, py: 1.2, fontWeight: 700 }}
+              >
+                Upload Video to Analyse
+              </Button>
+              <Button color="inherit" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
+                Record Clip
+              </Button>
+            </div>
             <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.mkv,.webm" hidden aria-label="Choose cricket video" onChange={e => { const file = e.target.files?.[0]; if (file) uploadVideo(file); e.target.value = ''; }} />
             {uploading && <Box sx={{ width: '100%', mt: 2 }} role="status"><Typography variant="caption">{uploadProgress < 100 ? 'Uploading clip · ' + uploadProgress + '%' : 'Upload received · preparing analysis…'}</Typography><LinearProgress sx={{ mt: 1 }} variant={uploadProgress < 100 ? 'determinate' : 'indeterminate'} value={uploadProgress} /></Box>}
           </section>
@@ -330,15 +376,23 @@ function Dashboard({ onVideoSelect, onLaunchDemo, onLogout }) {
             <PitchDiagram />
             <div className="simulation-copy">
               <div className="simulation-copy-text">
-                <h2 id="simulation-heading">Explore simulated deliveries in 3D</h2>
-                <p>No upload needed. Four preset deliveries with physics simulation.</p>
+                <h2 id="simulation-heading">3D Hawk-Eye Simulation</h2>
+                <p>Interactive 3D physics demonstration with ball flight paths, pitch bounce, dynamic stumps, and LBW decisions.</p>
               </div>
-              <Button variant="outlined" size="small" endIcon={<ArrowForward />} onClick={onLaunchDemo} sx={{ flexShrink: 0 }}>Explore in 3D</Button>
+              <Button
+                variant="contained"
+                color="primary"
+                endIcon={<ArrowForward />}
+                onClick={onLaunchDemo}
+                sx={{ flexShrink: 0, px: 2.5, py: 1, fontWeight: 600 }}
+              >
+                Launch Simulation
+              </Button>
             </div>
           </section>
         </div>
         <p className="capture-note"><InfoOutlined sx={{ fontSize: 16, mt: .2 }} /><span>For a clearer track: use a fixed camera, keep the ball visible, and capture one delivery per clip. Reconstructed 3D positions are approximate.</span></p>
-        {error && <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')} action={<Button size="small" color="inherit" onClick={() => localStorage.getItem('token') ? loadVideos() : onLogout()}>{localStorage.getItem('token') ? 'Retry' : 'Sign in'}</Button>}>{error}</Alert>}
+        {error && <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')} action={<Button size="small" color="inherit" onClick={() => loadVideos()}>Retry</Button>}>{error}</Alert>}
         <section aria-labelledby="library-heading">
           <div className="library-heading">
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}><h2 id="library-heading">Your deliveries</h2><span className="muted mono" style={{ fontSize: 11 }}>{loading ? '—' : readyCount + ' ready / ' + videos.length + ' total'}</span></div>

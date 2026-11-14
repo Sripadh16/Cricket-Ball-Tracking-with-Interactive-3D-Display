@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { ThemeProvider, createTheme, CssBaseline } from '@mui/material';
 import Dashboard from './pages/Dashboard';
-import AuthPage from './pages/AuthPage';
 import api from './api/client';
 
 const DRSReview = lazy(() => import('./pages/DRSReview'));
@@ -38,7 +37,6 @@ const theme = createTheme({
 });
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentView, setCurrentView] = useState('dashboard');
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [trajectoryData, setTrajectoryData] = useState(null);
@@ -49,25 +47,21 @@ function App() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    setIsAuthenticated(!!token);
-    setLoading(false);
-  }, []);
-
-  const handleAuthSuccess = useCallback(() => {
-    setIsAuthenticated(true);
-    setCurrentView('dashboard');
-  }, []);
-
-  const handleLogout = useCallback(() => {
-    activeVideoFetchId.current++;
-    localStorage.removeItem('token');
-    setIsAuthenticated(false);
-    setSelectedVideo(null);
-    setTrajectoryData(null);
-    setTrajectoryLoading(false);
-    setTrajectoryError(null);
-    setCurrentView('dashboard');
+    const ensureAuth = async () => {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        try {
+          const res = await api.post('/auth/guest');
+          if (res.data?.access_token) {
+            localStorage.setItem('token', res.data.access_token);
+          }
+        } catch (err) {
+          console.warn('Could not provision guest session:', err);
+        }
+      }
+      setLoading(false);
+    };
+    ensureAuth();
   }, []);
 
   // Ref to cancel/ignore stale async trajectory fetches when user rapidly switches videos
@@ -163,16 +157,6 @@ function App() {
     );
   }
 
-  if (!isAuthenticated && currentView !== 'review') {
-    return (
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        <a className="skip-link" href="#main-content">Skip to account access</a>
-        <AuthPage onAuthSuccess={handleAuthSuccess} onExploreDemo={handleLaunchDemo} />
-      </ThemeProvider>
-    );
-  }
-
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -181,7 +165,6 @@ function App() {
         <Dashboard
           onVideoSelect={handleVideoSelect}
           onLaunchDemo={handleLaunchDemo}
-          onLogout={handleLogout}
         />
       ) : (
         <Suspense fallback={<div role="status" style={{ padding: 32 }}>Opening review workspace…</div>}>
