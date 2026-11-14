@@ -28,6 +28,8 @@ from services.ball_tracking_service import BallTrackingService
 def _find_test_dataset_dir() -> Path:
     """Helper to locate the real cricket dataset test images directory."""
     candidates = [
+        Path("project-dataset/Cricket Dataset.v5i.yolov8/test/images"),
+        Path("../project-dataset/Cricket Dataset.v5i.yolov8/test/images"),
         Path("Cricket Dataset.v5i.yolov8/test/images"),
         Path("../Cricket Dataset.v5i.yolov8/test/images"),
         Path("../../Cricket Dataset.v5i.yolov8/test/images"),

@@ -227,6 +227,18 @@ drs.db
 # Uploads
 uploads/
 
+# Video files and test video datasets
+sample_videos/
+project-dataset/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+!docs/ui-audit/timing.webm
+
 # Docker
 .dockerignore
 
