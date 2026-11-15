@@ -96,25 +96,38 @@ class BallTrackingService:
                     # Bowler end stumps detected near top of frame (upper half: y < h * 0.5)
                     far_y = max(h * 0.08, min(h * 0.30, sy))
 
-            # Near wicket/crease region (batsman end near bottom of frame)
-            near_y = min(h * 0.92, max(h * 0.75, stump_cy))
+            # Near wicket/crease region (batsman end near bottom of frame: Y = +10.06m)
+            near_y = min(h * 0.95, max(h * 0.75, stump_cy))
+            # Far bowler end (bowler end near top of frame: Y = -10.06m)
+            far_y = max(h * 0.10, min(h * 0.35, h * 0.20))
+
             if crease_lines and isinstance(crease_lines, dict):
-                bowling_c = crease_lines.get('bowling_crease')
-                if bowling_c and isinstance(bowling_c, dict) and ('center_y' in bowling_c or 'y_mid' in bowling_c):
-                    detected_near = bowling_c.get('center_y', bowling_c.get('y_mid'))
-                    near_y = min(h * 0.95, max(h * 0.65, float(detected_near)))
+                lines = crease_lines.get('lines', []) or crease_lines.get('merged_creases', [])
+                # Lines in lower half are batsman-end creases
+                lower_lines = [l for l in lines if (l.get('center_y', 0) or l.get('y_mid', 0)) >= h * 0.50]
+                # Lines in upper half are bowler-end creases
+                upper_lines = [l for l in lines if 0 < (l.get('center_y', 0) or l.get('y_mid', 0)) < h * 0.50]
+                if lower_lines:
+                    best_lower = max(lower_lines, key=lambda l: l.get('length', 0))
+                    near_y = float(best_lower.get('center_y', best_lower.get('y_mid', near_y)))
+                    stump_cx = float(best_lower.get('center_x', stump_cx))
+                elif crease_lines.get('popping_crease'):
+                    pc = crease_lines['popping_crease']
+                    pc_y = float(pc.get('center_y', pc.get('y_mid', 0)))
+                    if pc_y >= h * 0.50:
+                        near_y = pc_y
+                        stump_cx = float(pc.get('center_x', stump_cx))
+                if upper_lines:
+                    best_upper = max(upper_lines, key=lambda l: l.get('length', 0))
+                    far_y = float(best_upper.get('center_y', best_upper.get('y_mid', far_y)))
+                elif crease_lines.get('bowling_crease'):
+                    bc = crease_lines['bowling_crease']
+                    bc_y = float(bc.get('center_y', bc.get('y_mid', 0)))
+                    if 0 < bc_y < h * 0.50:
+                        far_y = bc_y
 
-            near_half_w = max(w * 0.10, min(w * 0.22, w * 0.13))
-
-            # Far bowler end (bowler end near top of frame)
-            far_y = max(h * 0.10, min(h * 0.25, h * 0.16))
-            if crease_lines and isinstance(crease_lines, dict):
-                far_c = crease_lines.get('popping_crease') or crease_lines.get('bowler_crease')
-                if far_c and isinstance(far_c, dict) and ('center_y' in far_c or 'y_mid' in far_c):
-                    detected_far = far_c.get('center_y', far_c.get('y_mid'))
-                    far_y = min(h * 0.30, max(h * 0.08, float(detected_far)))
-
-            far_half_w = near_half_w * 0.62
+            near_half_w = max(w * 0.10, min(w * 0.28, w * 0.15))
+            far_half_w = near_half_w * 0.45
 
             src_pts = np.array([
                 [stump_cx - far_half_w,  far_y],   # Bowler left
@@ -2769,12 +2782,21 @@ class BallTrackingService:
                 post_bounce = drs_data["post_bounce_points"]
                 STUMP_Y = self.pitch_length / 2.0  # 10.06m
 
+                # Filter post_bounce to retain only forward delivery flight before rebounds/ricochets
+                forward_post_bounce = []
+                for p in post_bounce:
+                    if forward_post_bounce and forward_post_bounce[-1]['y'] >= 7.5 and p['y'] < forward_post_bounce[-1]['y'] - 1.2:
+                        break
+                    forward_post_bounce.append(p)
+                if not forward_post_bounce:
+                    forward_post_bounce = post_bounce
+
                 # Choose impact / interception point near popping crease (y ~ 8.84m) before stumps
-                pts_before_stumps = [p for p in post_bounce if p['y'] <= STUMP_Y]
+                pts_before_stumps = [p for p in forward_post_bounce if p['y'] <= STUMP_Y]
                 if pts_before_stumps:
                     impact_point = dict(pts_before_stumps[-1], phase="impact")
-                elif post_bounce:
-                    impact_point = dict(post_bounce[0], phase="impact")
+                elif forward_post_bounce:
+                    impact_point = dict(forward_post_bounce[0], phase="impact")
                 else:
                     impact_point = dict(drs_data["bounce_point"], phase="impact")
                 drs_data["impact_point"] = impact_point
@@ -2786,20 +2808,20 @@ class BallTrackingService:
                 elif start_pt['y'] >= STUMP_Y - 0.2:
                     start_pt = drs_data["bounce_point"]
 
-                if len(post_bounce) >= 2:
-                    dt = max(0.01, post_bounce[-1]['t'] - post_bounce[0]['t'])
-                    vx = (post_bounce[-1]['x'] - post_bounce[0]['x']) / dt
-                    vy = max(5.0, (post_bounce[-1]['y'] - post_bounce[0]['y']) / dt)
-                    if post_bounce[0].get('parabolic_fit'):
-                        vz0 = float(post_bounce[0]['parabolic_fit']['vz0'])
-                        tau_start = max(0.0, start_pt['t'] - post_bounce[0]['t'])
+                if len(forward_post_bounce) >= 2:
+                    dt = max(0.01, forward_post_bounce[-1]['t'] - forward_post_bounce[0]['t'])
+                    vx = (forward_post_bounce[-1]['x'] - forward_post_bounce[0]['x']) / dt
+                    vy = max(5.0, (forward_post_bounce[-1]['y'] - forward_post_bounce[0]['y']) / dt)
+                    if forward_post_bounce[0].get('parabolic_fit'):
+                        vz0 = float(forward_post_bounce[0]['parabolic_fit']['vz0'])
+                        tau_start = max(0.0, start_pt['t'] - forward_post_bounce[0]['t'])
                         vz = vz0 - 9.81 * tau_start
-                    elif post_bounce[-1].get('parabolic_fit'):
-                        vz0 = float(post_bounce[-1]['parabolic_fit']['vz0'])
-                        tau_impact = max(0.0, post_bounce[-1]['t'] - post_bounce[0]['t'])
+                    elif forward_post_bounce[-1].get('parabolic_fit'):
+                        vz0 = float(forward_post_bounce[-1]['parabolic_fit']['vz0'])
+                        tau_impact = max(0.0, forward_post_bounce[-1]['t'] - forward_post_bounce[0]['t'])
                         vz = vz0 - 9.81 * tau_impact
                     else:
-                        vz = (post_bounce[-1]['z'] - post_bounce[0]['z']) / dt
+                        vz = (forward_post_bounce[-1]['z'] - forward_post_bounce[0]['z']) / dt
                 else:
                     vx, vy, vz = 0.0, 30.0, 3.2
 
