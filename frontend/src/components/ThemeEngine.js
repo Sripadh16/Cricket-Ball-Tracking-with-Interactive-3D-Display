@@ -45,10 +45,10 @@ export const THEME_CONFIGS = {
       impactIntensity: 0.85
     },
     ball: {
-      color: '#c1121f',
+      color: '#ff1744',
       seamColor: '#ffffff',
-      glowColor: '#ff4d6d',
-      glowIntensity: 0.25
+      glowColor: '#ff2a55',
+      glowIntensity: 1.2
     },
     trajectory: {
       preBounce: '#00e5ff',

@@ -86,8 +86,15 @@ class BallTrackingService:
             stump_cx = w * 0.5
             stump_cy = h * 0.84
             if stumps and isinstance(stumps, dict):
-                stump_cx = float(stumps.get('x', stump_cx))
-                stump_cy = float(stumps.get('y', stump_cy))
+                sx = float(stumps.get('x', stump_cx))
+                sy = float(stumps.get('y', stump_cy))
+                # Target batsman stumps are at batsman end (lower half: y >= h * 0.5)
+                if sy >= h * 0.5:
+                    stump_cx = sx
+                    stump_cy = sy
+                else:
+                    # Bowler end stumps detected near top of frame (upper half: y < h * 0.5)
+                    far_y = max(h * 0.08, min(h * 0.30, sy))
 
             # Near wicket/crease region (batsman end near bottom of frame)
             near_y = min(h * 0.92, max(h * 0.75, stump_cy))
@@ -333,29 +340,27 @@ class BallTrackingService:
             logger.warning(f"Could not load YOLO detector: {e}. Falling back to classical CV.")
             self.yolo_detector = None
 
-    def _detect_ball_yolo(self, frame):
-        """Detect cricket ball using YOLO neural detector"""
+    def _detect_ball_yolo(self, frame, last_pos=None):
+        """Detect cricket ball using YOLO neural detector, ranking candidates with temporal motion consistency"""
         if self.yolo_detector is None:
             return None
         try:
             results = self.yolo_detector(frame, verbose=False, conf=0.15)[0]
             if len(results.boxes) == 0:
                 return None
-            best_ball = None
-            max_conf = 0.0
+            ball_candidates = []
             for box in results.boxes:
                 cls_id = int(box.cls[0])
                 cls_name = self.yolo_detector.names.get(cls_id, str(cls_id)).lower()
                 conf = float(box.conf[0])
                 is_ball = (cls_name in ['ball', 'sports ball', '0']) or (cls_id == 0 and len(self.yolo_detector.names) <= 2)
-                if is_ball and conf > max_conf:
-                    max_conf = conf
+                if is_ball and conf >= 0.15:
                     xyxy = box.xyxy[0].tolist()
                     w = float(xyxy[2] - xyxy[0])
                     h = float(xyxy[3] - xyxy[1])
                     cx = float(xyxy[0] + w / 2.0)
                     cy = float(xyxy[1] + h / 2.0)
-                    best_ball = {
+                    cand = {
                         'x': cx,
                         'y': cy,
                         'width': w,
@@ -365,7 +370,30 @@ class BallTrackingService:
                         'method': 'yolo',
                         'color': 'detected'
                     }
-            return best_ball
+                    if self._is_valid_ball_position(cand, frame.shape):
+                        ball_candidates.append(cand)
+            if not ball_candidates:
+                return None
+
+            if last_pos is not None:
+                last_px = float(last_pos.get('pixel_x', last_pos['x']))
+                last_py = float(last_pos.get('pixel_y', last_pos['y']))
+                scored = []
+                for c in ball_candidates:
+                    dx = c['x'] - last_px
+                    dy = c['y'] - last_py
+                    dist = float(np.hypot(dx, dy))
+                    # Reject backward jumps greater than 4px when ball was moving forward down the pitch
+                    if dy < -4.0:
+                        continue
+                    # Distance penalty: prefer candidates within reasonable inter-frame step
+                    score = c['confidence'] - (dist / 150.0)
+                    scored.append((score, c))
+                if scored:
+                    scored.sort(key=lambda s: s[0], reverse=True)
+                    return scored[0][1]
+
+            return max(ball_candidates, key=lambda c: c['confidence'])
         except Exception as e:
             logger.debug(f"Error in YOLO ball detection: {e}")
             return None
@@ -528,9 +556,20 @@ class BallTrackingService:
                         velocity_consistent = prediction_error < max(self.prediction_tolerance * 2.0,
                                                                      time_diff * self.max_velocity)
 
-                    # If ball moved too far in pixel space or velocity is inconsistent, skip as false positive
-                    if pixel_distance > max_expected_distance or not velocity_consistent:
-                        logger.debug(f"Ball position inconsistent at frame {frame_idx} (dist={pixel_distance:.1f}px, max={max_expected_distance:.1f}px), skipping")
+                    # If ball moved too far in pixel space, velocity is inconsistent, or ball jumps backwards up-pitch
+                    py_diff = curr_py - last_py
+                    if pixel_distance > max_expected_distance or not velocity_consistent or py_diff < -4.0:
+                        logger.debug(f"Ball position inconsistent at frame {frame_idx} (dist={pixel_distance:.1f}px, dy={py_diff:.1f}px), predicting forward")
+                        last_real = tracking_data.get('last_real_detection_time')
+                        time_since_real = current_time - (last_real if last_real is not None else current_time)
+                        if time_since_real <= MAX_PREDICTION_GAP_S and tracking_data.get('consecutive_predictions', 0) < 5:
+                            predicted_pos = self._predict_ball_position(tracking_data, current_time)
+                            if (predicted_pos and 0 <= predicted_pos.get('pixel_x', -1) < width
+                                    and 0 <= predicted_pos.get('pixel_y', -1) < height):
+                                predicted_pos['frame_idx'] = frame_idx
+                                tracking_data['ball_trajectory'].append(predicted_pos)
+                                tracking_data['last_ball_position'] = predicted_pos
+                                tracking_data['consecutive_predictions'] = tracking_data.get('consecutive_predictions', 0) + 1
                     else:
                         # Update velocity estimates
                         if time_diff > 0:
@@ -1439,7 +1478,7 @@ class BallTrackingService:
         }
 
         # Detect ball
-        ball_pos = self._detect_ball_comprehensive(frame, prev_frame)
+        ball_pos = self._detect_ball_comprehensive(frame, prev_frame, tracking_data=tracking_data)
         if ball_pos:
             # Convert to 3D coordinates
             ball_3d = self._pixel_to_3d(ball_pos['x'], ball_pos['y'], frame.shape[1], frame.shape[0])
@@ -1479,55 +1518,64 @@ class BallTrackingService:
 
         return frame_data
 
-    def _detect_ball_comprehensive(self, frame, prev_frame=None):
-        """Comprehensive ball detection using multiple methods"""
-        detections = []
-        logger.debug("Starting comprehensive ball detection")
+    def _detect_ball_comprehensive(self, frame, prev_frame=None, tracking_data=None):
+        """Comprehensive ball detection using multiple methods with motion-aware fallback"""
+        last_pos = tracking_data.get('last_ball_position') if tracking_data else None
 
         # Method 0: YOLO Deep Learning detection
-        yolo_ball = self._detect_ball_yolo(frame)
-        # A configured model's miss must not become an unrelated shirt/limb detection.
-        if self.yolo_detector is not None:
-            return yolo_ball if (yolo_ball and yolo_ball['confidence'] > self.min_confidence
-                                 and self._is_valid_ball_position(yolo_ball, frame.shape)) else None
-        if yolo_ball:
-            detections.append(yolo_ball)
-            logger.debug(f"YOLO ball found at ({yolo_ball['x']:.1f}, {yolo_ball['y']:.1f}) conf={yolo_ball['confidence']:.2f}")
+        yolo_ball = self._detect_ball_yolo(frame, last_pos=last_pos)
 
-        # Method 1: Color-based detection
+        # Check if YOLO detection is temporally consistent with the delivery
+        yolo_valid_and_consistent = False
+        if yolo_ball and yolo_ball['confidence'] > self.min_confidence and self._is_valid_ball_position(yolo_ball, frame.shape):
+            if last_pos is not None:
+                last_py = float(last_pos.get('pixel_y', last_pos['y']))
+                dy = yolo_ball['y'] - last_py
+                dx = abs(yolo_ball['x'] - float(last_pos.get('pixel_x', last_pos['x'])))
+                # A valid ball detection must not jump backwards or jump excessively off-pitch
+                if dy >= -4.0 and dx < 80.0:
+                    yolo_valid_and_consistent = True
+            else:
+                yolo_valid_and_consistent = True
+
+        if yolo_valid_and_consistent:
+            return yolo_ball
+
+        # Fallback Method 1: Advanced Color-based detection
         color_detection = self._detect_ball_by_color_advanced(frame)
-        if color_detection:
-            detections.append(color_detection)
-            logger.debug(f"Color detection found ball at ({color_detection['x']}, {color_detection['y']}) with confidence {color_detection['confidence']:.2f}")
+        if color_detection and color_detection['confidence'] > self.min_confidence and self._is_valid_ball_position(color_detection, frame.shape):
+            if last_pos is not None:
+                last_py = float(last_pos.get('pixel_y', last_pos['y']))
+                dy = color_detection['y'] - last_py
+                dx = abs(color_detection['x'] - float(last_pos.get('pixel_x', last_pos['x'])))
+                if dy >= -4.0 and dx < 80.0:
+                    return color_detection
+            elif tracking_data is not None:
+                return color_detection
 
-        # Method 2: Motion detection
-        if prev_frame is not None:
+        # Fallback Method 2: Motion detection
+        if prev_frame is not None and tracking_data is not None:
             motion_detection = self._detect_ball_by_motion_advanced(frame, prev_frame)
-            if motion_detection:
-                detections.append(motion_detection)
-                logger.debug(f"Motion detection found ball at ({motion_detection['x']}, {motion_detection['y']}) with confidence {motion_detection['confidence']:.2f}")
+            if motion_detection and motion_detection['confidence'] > self.min_confidence and self._is_valid_ball_position(motion_detection, frame.shape):
+                if last_pos is not None:
+                    last_py = float(last_pos.get('pixel_y', last_pos['y']))
+                    dy = motion_detection['y'] - last_py
+                    dx = abs(motion_detection['x'] - float(last_pos.get('pixel_x', last_pos['x'])))
+                    if dy >= -4.0 and dx < 80.0:
+                        return motion_detection
 
-        # Method 3: Shape-based detection (Hough circles as fallback)
-        shape_detection = self._detect_ball_by_shape(frame)
-        if shape_detection:
-            detections.append(shape_detection)
-            logger.debug(f"Shape detection found ball at ({shape_detection['x']}, {shape_detection['y']}) with confidence {shape_detection['confidence']:.2f}")
+        # If tracking_data is None (standalone test/API call), preserve strict YOLO-first model miss semantics
+        if self.yolo_detector is not None and tracking_data is None:
+            return yolo_ball if yolo_valid_and_consistent else None
 
-        # Choose best detection with higher confidence threshold
-        if detections:
-            # Filter out low confidence detections
-            valid_detections = [d for d in detections if d['confidence'] > 0.2]
-
-            if valid_detections:
-                # Sort by confidence and return the best
-                best_detection = max(valid_detections, key=lambda x: x['confidence'])
-
-                # Additional validation: check if detection is in reasonable area
-                if self._is_valid_ball_position(best_detection, frame.shape):
-                    logger.debug(f"Selected best detection: {best_detection['method']} method with confidence {best_detection['confidence']:.2f}")
-                    return best_detection
-                else:
-                    logger.debug(f"Rejected detection at ({best_detection['x']}, {best_detection['y']}) - invalid position")
+        # Choose best detection among available methods
+        detections = []
+        if yolo_ball and self._is_valid_ball_position(yolo_ball, frame.shape):
+            detections.append(yolo_ball)
+        if color_detection and self._is_valid_ball_position(color_detection, frame.shape):
+            detections.append(color_detection)
+        valid_detections = [d for d in detections if d['confidence'] > 0.2]
+        return max(valid_detections, key=lambda x: x['confidence']) if valid_detections else None
 
         logger.debug("No valid ball detections found")
         return None
@@ -2275,10 +2323,10 @@ class BallTrackingService:
             # Pitch prior: distance to batsman stumps (y = 10.06m)
             yi = y_vals[i]
             dist_from_stumps = 10.06 - yi
-            if 1.0 <= dist_from_stumps <= 10.0:
-                pitch_prior = 1.5
-            elif -2.0 <= dist_from_stumps <= 15.0:
-                pitch_prior = 1.0
+            if 2.0 <= dist_from_stumps <= 8.5:
+                pitch_prior = 1.8
+            elif 1.0 <= dist_from_stumps <= 10.0:
+                pitch_prior = 1.2
             else:
                 pitch_prior = 0.3
 
@@ -2291,6 +2339,12 @@ class BallTrackingService:
         best = max(candidates, key=lambda c: c[1])
         if best[1] < 1.0:
             return None
+
+        # If multiple strong candidates occur around the bounce event, pick the earliest
+        # primary inflection to capture initial pitch contact
+        strong = [c for c in candidates if c[1] >= max(10.0, best[1] * 0.65) and abs(c[0] - best[0]) <= 8]
+        if strong:
+            return strong[0][0]
         return best[0]
 
     def _fit_parabolic_height_regression(

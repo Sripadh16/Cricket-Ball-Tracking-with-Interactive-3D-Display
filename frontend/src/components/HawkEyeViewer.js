@@ -1,6 +1,5 @@
 import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { Html } from '@react-three/drei';
 import {
   Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
   FormControlLabel, Switch, Paper, Tooltip, IconButton, Button,
@@ -367,7 +366,9 @@ function BallCometTail({ currentBallPos, allPoints, currentTime, theme }) {
           <meshBasicMaterial
             color={idx % 2 === 0 ? tailColor : glowColor}
             transparent
-            opacity={seg.opacity}
+            opacity={seg.opacity * 1.5}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
           />
         </mesh>
       ))}
@@ -398,28 +399,22 @@ function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme }) {
   // Distance from batsman stumps (Z = 10.06m in Three.js coordinates)
   const distFromStumps = Math.max(0, 10.06 - bouncePoint.z);
 
-  // Determine length zone
-  let zoneName = lengthZone;
+  // Determine length zone color
   let zoneColor = '#22c55e';
-  if (!zoneName) {
+  if (!lengthZone) {
     if (distFromStumps < 2.0) {
-      zoneName = 'Yorker';
       zoneColor = '#ef4444';
     } else if (distFromStumps < 4.0) {
-      zoneName = 'Full';
       zoneColor = '#f97316';
     } else if (distFromStumps < 7.0) {
-      zoneName = 'Good Length';
       zoneColor = '#22c55e';
     } else if (distFromStumps < 9.5) {
-      zoneName = 'Short of Length';
       zoneColor = '#eab308';
     } else {
-      zoneName = 'Bouncer';
       zoneColor = '#3b82f6';
     }
   } else {
-    const zl = zoneName.toLowerCase();
+    const zl = lengthZone.toLowerCase();
     if (zl.includes('yorker')) zoneColor = '#ef4444';
     else if (zl.includes('full')) zoneColor = '#f97316';
     else if (zl.includes('good')) zoneColor = '#22c55e';
@@ -485,67 +480,6 @@ function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme }) {
         <lineDashedMaterial attach="material" color={zoneColor} dashSize={0.04} gapSize={0.02} />
       </line>
 
-      {/* Length Zone Pill and Bounce Impact Coordinates */}
-      <Html
-        position={[0, 0.65, 0]}
-        center
-        distanceFactor={12}
-        style={{
-          pointerEvents: 'none',
-          userSelect: 'none',
-          whiteSpace: 'nowrap'
-        }}
-      >
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '3px',
-          filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.85))'
-        }}>
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '5px',
-            background: 'rgba(15, 23, 42, 0.94)',
-            border: `1.5px solid ${zoneColor}`,
-            borderRadius: '12px',
-            padding: '2px 8px',
-            boxShadow: `0 0 12px ${zoneColor}66`
-          }}>
-            <span style={{
-              display: 'inline-block',
-              width: '6px',
-              height: '6px',
-              borderRadius: '50%',
-              backgroundColor: zoneColor
-            }} />
-            <span style={{
-              color: '#ffffff',
-              fontWeight: 800,
-              fontSize: '11px',
-              letterSpacing: '0.6px',
-              textTransform: 'uppercase',
-              fontFamily: 'system-ui, -apple-system, sans-serif'
-            }}>
-              {zoneName}
-            </span>
-          </div>
-          <div style={{
-            background: 'rgba(10, 15, 26, 0.90)',
-            border: '1px solid rgba(255, 255, 255, 0.2)',
-            borderRadius: '6px',
-            padding: '2px 6px',
-            color: '#cbd5e1',
-            fontSize: '9.5px',
-            fontWeight: 600,
-            fontFamily: 'monospace'
-          }}>
-            {distFromStumps.toFixed(2)}m from stumps • {bouncePoint.x >= 0 ? `+${bouncePoint.x.toFixed(2)}m off` : `${bouncePoint.x.toFixed(2)}m leg`}
-          </div>
-        </div>
-      </Html>
-
       {/* Clickable interactive sensor */}
       <mesh
         position={[0, 0.05, 0]}
@@ -606,7 +540,6 @@ function StumpsTargetPlane({ target, drsVerdict }) {
   const isHitting = drsVerdict?.wickets === 'HITTING';
   const isUmpiresCall = drsVerdict?.wickets === "UMPIRE'S CALL";
   const glowColor = isHitting ? '#e63946' : isUmpiresCall ? '#ffb703' : '#2a9d8f';
-  const targetStump = target.hit_stump || (isHitting ? 'Wickets' : 'Missing');
 
   const crosshairH = [
     new THREE.Vector3(target.x - 0.08, target.z, 0.002),
@@ -678,52 +611,6 @@ function StumpsTargetPlane({ target, drsVerdict }) {
           opacity={0.85}
         />
       </mesh>
-
-      {/* Target Impact HUD Pill */}
-      <Html
-        position={[target.x, target.z + BALL_RADIUS + 0.12, 0]}
-        center
-        distanceFactor={10}
-        style={{
-          pointerEvents: 'none',
-          userSelect: 'none',
-          whiteSpace: 'nowrap'
-        }}
-      >
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          gap: '2px',
-          filter: 'drop-shadow(0 2px 8px rgba(0,0,0,0.85))'
-        }}>
-          <div style={{
-            background: isHitting ? 'rgba(239, 68, 68, 0.92)' : isUmpiresCall ? 'rgba(245, 158, 11, 0.92)' : 'rgba(34, 197, 94, 0.92)',
-            borderRadius: '10px',
-            padding: '2px 8px',
-            color: '#ffffff',
-            fontWeight: 800,
-            fontSize: '10px',
-            letterSpacing: '0.5px',
-            textTransform: 'uppercase',
-            fontFamily: 'system-ui, -apple-system, sans-serif',
-            boxShadow: `0 0 10px ${glowColor}66`
-          }}>
-            {drsVerdict?.wickets || (isHitting ? 'HITTING' : 'MISSING')} • {targetStump}
-          </div>
-          <div style={{
-            background: 'rgba(15, 23, 42, 0.88)',
-            border: '1px solid rgba(255, 255, 255, 0.2)',
-            borderRadius: '5px',
-            padding: '1px 5px',
-            color: '#cbd5e1',
-            fontSize: '9px',
-            fontFamily: 'monospace'
-          }}>
-            X: {(target.x * 100).toFixed(1)}cm • H: {(target.z * 100).toFixed(1)}cm
-          </div>
-        </div>
-      </Html>
     </group>
   );
 }
@@ -849,42 +736,84 @@ function CricketBall({ position, currentTime = 0, showGlow = true, theme }) {
   if (!position) return null;
 
   const ballCfg = theme?.ball || THEME_CONFIGS.broadcast.ball;
+  const glowColor = ballCfg.glowColor || '#ff2a55';
+  const ballColor = ballCfg.color || '#ff1744';
 
   return (
     <group position={[position.x, position.y, position.z]}>
+      {/* Real-time omnidirectional point light radiating from the ball */}
+      <pointLight
+        color={glowColor}
+        intensity={3.5}
+        distance={2.5}
+        decay={2}
+      />
+
       <group ref={meshRef}>
         <mesh castShadow>
-          <sphereGeometry args={[BALL_RADIUS, 24, 24]} />
+          <sphereGeometry args={[BALL_RADIUS, 28, 28]} />
           <meshStandardMaterial
-            color={ballCfg.color}
-            roughness={0.25}
+            color={ballColor}
+            roughness={0.2}
             metalness={0.15}
-            emissive={theme?.id === 'thermal' ? '#ffffff' : ballCfg.color}
-            emissiveIntensity={theme?.id === 'thermal' ? 0.9 : 0.1}
+            emissive={glowColor}
+            emissiveIntensity={theme?.id === 'thermal' ? 2.5 : 1.6}
           />
         </mesh>
         {/* Prominent White/Colored Raised Seam Line */}
         <mesh rotation={[0, Math.PI / 4, 0]} castShadow>
-          <torusGeometry args={[BALL_RADIUS + 0.0012, 0.0028, 8, 36]} />
-          <meshStandardMaterial color={ballCfg.seamColor} roughness={0.6} />
+          <torusGeometry args={[BALL_RADIUS + 0.0012, 0.003, 8, 36]} />
+          <meshStandardMaterial
+            color={ballCfg.seamColor || '#ffffff'}
+            roughness={0.3}
+            emissive={ballCfg.seamColor || '#ffffff'}
+            emissiveIntensity={0.6}
+          />
         </mesh>
         {/* Seam Stitches Texture Ring */}
         <mesh rotation={[Math.PI / 2, 0, 0]}>
           <ringGeometry args={[BALL_RADIUS * 0.98, BALL_RADIUS + 0.001, 16]} />
-          <meshBasicMaterial color={ballCfg.seamColor} transparent opacity={0.35} side={THREE.DoubleSide} />
+          <meshBasicMaterial color={ballCfg.seamColor || '#ffffff'} transparent opacity={0.5} side={THREE.DoubleSide} />
         </mesh>
       </group>
 
-      {/* Dynamic Aura Glow */}
+      {/* Dynamic Multi-layered Aura Glow */}
       {showGlow && (
-        <mesh>
-          <sphereGeometry args={[BALL_RADIUS * 1.45, 16, 16]} />
-          <meshBasicMaterial
-            color={ballCfg.glowColor}
-            transparent
-            opacity={ballCfg.glowIntensity * 0.3}
-          />
-        </mesh>
+        <>
+          {/* Intense Inner Core Glow */}
+          <mesh>
+            <sphereGeometry args={[BALL_RADIUS * 1.35, 24, 24]} />
+            <meshBasicMaterial
+              color={glowColor}
+              transparent
+              opacity={0.65}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+          {/* Mid Radiant Bloom Aura */}
+          <mesh>
+            <sphereGeometry args={[BALL_RADIUS * 2.1, 20, 20]} />
+            <meshBasicMaterial
+              color={glowColor}
+              transparent
+              opacity={0.32}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+          {/* Outer Ambient Atmosphere Halo */}
+          <mesh>
+            <sphereGeometry args={[BALL_RADIUS * 3.2, 16, 16]} />
+            <meshBasicMaterial
+              color={glowColor}
+              transparent
+              opacity={0.12}
+              blending={THREE.AdditiveBlending}
+              depthWrite={false}
+            />
+          </mesh>
+        </>
       )}
     </group>
   );
