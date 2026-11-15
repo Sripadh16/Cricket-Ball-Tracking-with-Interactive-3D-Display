@@ -547,21 +547,40 @@ class BallTrackingService:
                     time_diff = max(1e-4, current_time - last_pos.get('t', current_time - 0.033))
                     max_expected_distance = max(time_diff * self.max_velocity, float(self.prediction_tolerance))
 
+                    # Check if tracking was stale or lost (e.g. stalled predictions or gap > 0.25s)
+                    last_real = tracking_data.get('last_real_detection_time')
+                    time_since_real = current_time - (last_real if last_real is not None else current_time)
+                    is_tracking_stale = time_since_real > 0.25 or tracking_data.get('consecutive_predictions', 0) >= 5
+
+                    # If tracking was stale and a solid detection arrives, re-acquire cleanly
+                    if is_tracking_stale and ball_pos.get('confidence', 0) > 0.18:
+                        logger.info(f"Re-acquiring ball track at frame {frame_idx} (px={curr_px:.1f}, py={curr_py:.1f})")
+                        tracking_data['ball_velocity'] = {'vx': 0.0, 'vy': 0.0, 'vz': 0.0}
+                        tracking_data['ball_pixel_velocity'] = {'vx': 0.0, 'vy': 0.0}
+                        ball_pos['t'] = current_time
+                        ball_pos['is_predicted'] = False
+                        ball_pos['frame_idx'] = frame_idx
+                        tracking_data['ball_trajectory'].append(ball_pos)
+                        tracking_data['last_ball_position'] = ball_pos
+                        tracking_data['last_real_detection_time'] = current_time
+                        tracking_data['consecutive_predictions'] = 0
+                        prev_frame = frame.copy()
+                        frame_idx += 1
+                        continue
+
                     # Check velocity consistency in pixel space
                     velocity_consistent = True
                     if tracking_data.get('ball_pixel_velocity') is not None and time_diff > 0:
                         expected_px = last_px + tracking_data['ball_pixel_velocity']['vx'] * time_diff
                         expected_py = last_py + tracking_data['ball_pixel_velocity']['vy'] * time_diff
                         prediction_error = float(np.sqrt((curr_px - expected_px)**2 + (curr_py - expected_py)**2))
-                        velocity_consistent = prediction_error < max(self.prediction_tolerance * 2.0,
+                        velocity_consistent = prediction_error < max(self.prediction_tolerance * 2.5,
                                                                      time_diff * self.max_velocity)
 
                     # If ball moved too far in pixel space, velocity is inconsistent, or ball jumps backwards up-pitch
                     py_diff = curr_py - last_py
-                    if pixel_distance > max_expected_distance or not velocity_consistent or py_diff < -4.0:
+                    if pixel_distance > max_expected_distance or not velocity_consistent or py_diff < -25.0:
                         logger.debug(f"Ball position inconsistent at frame {frame_idx} (dist={pixel_distance:.1f}px, dy={py_diff:.1f}px), predicting forward")
-                        last_real = tracking_data.get('last_real_detection_time')
-                        time_since_real = current_time - (last_real if last_real is not None else current_time)
                         if time_since_real <= MAX_PREDICTION_GAP_S and tracking_data.get('consecutive_predictions', 0) < 5:
                             predicted_pos = self._predict_ball_position(tracking_data, current_time)
                             if (predicted_pos and 0 <= predicted_pos.get('pixel_x', -1) < width
@@ -638,6 +657,30 @@ class BallTrackingService:
         lbw_analysis, drs_data = self._analyze_lbw_decisions(tracking_data)
         tracking_data['lbw_analysis'] = lbw_analysis
 
+        # Automated Delivery Classification & Umpiring
+        classification = None
+        try:
+            from services.delivery_classifier import DeliveryClassifier
+            classification = DeliveryClassifier.classify_delivery(
+                tracking_data['ball_trajectory'],
+                bowler_arm="left" if "mirr" in str(video_path).lower() or "left" in str(video_path).lower() else "right",
+                batter_stance="RHB"
+            )
+            # Guarantee populated DRS fields for uploaded video
+            if not drs_data.get("drs_evaluation") or drs_data["drs_evaluation"].get("decision") in ("N/A", "NOT AVAILABLE"):
+                if classification.get("drs_evaluation") and classification["drs_evaluation"].get("decision") not in ("N/A", "NOT AVAILABLE"):
+                    drs_data["drs_evaluation"] = classification.get("drs_evaluation")
+            if not drs_data.get("release_speed_kmh") and classification.get("release_speed_kmh"):
+                drs_data["release_speed_kmh"] = classification.get("release_speed_kmh")
+            if not drs_data.get("bounce_speed_kmh") and classification.get("bounce_speed_kmh"):
+                drs_data["bounce_speed_kmh"] = classification.get("bounce_speed_kmh")
+            if not drs_data.get("length_zone") and classification.get("length_zone"):
+                drs_data["length_zone"] = classification.get("length_zone")
+            if not drs_data.get("bounce_point") and classification.get("bounce_point"):
+                drs_data["bounce_point"] = classification.get("bounce_point")
+        except Exception as e:
+            logger.warning(f"Delivery classification error: {e}")
+
         processing_time = time.time() - start_time
         logger.info(f"Ball tracking completed in {processing_time:.2f}s. Detected {len(tracking_data['ball_trajectory'])} ball positions.")
 
@@ -677,6 +720,15 @@ class BallTrackingService:
             "release_speed_kmh": drs_data.get("release_speed_kmh"),
             "bounce_speed_kmh": drs_data.get("bounce_speed_kmh"),
             "length_zone": drs_data.get("length_zone"),
+            "delivery_type": classification.get("delivery_type", "standard") if classification else "standard",
+            "delivery_name": classification.get("delivery_name", "Pace Delivery") if classification else "Pace Delivery",
+            "air_swing_mm": classification.get("air_swing_mm", 0.0) if classification else 0.0,
+            "pitch_deviation_deg": classification.get("pitch_deviation_deg", 0.0) if classification else 0.0,
+            "is_no_ball": classification.get("is_no_ball", False) if classification else False,
+            "no_ball_reason": classification.get("no_ball_reason") if classification else None,
+            "is_wide": classification.get("is_wide", False) if classification else False,
+            "wide_reason": classification.get("wide_reason") if classification else None,
+            "speed_loss_pct": classification.get("speed_loss_pct", 0.0) if classification else 0.0,
             "source_duration_s": source_duration_s,
             "tracking_start_s": tracking_start_s,
             "tracking_end_s": tracking_end_s,

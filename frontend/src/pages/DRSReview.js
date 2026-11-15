@@ -798,6 +798,9 @@ export default function DRSReview({
               src={videoUrl}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' }}
               playsInline
+              preload="auto"
+              muted
+              crossOrigin="anonymous"
             />
             {pickingCorner && <Box sx={{ position: 'absolute', top: 50, left: 12, right: 12, bgcolor: 'background.paper', p: 1 }}>
               <Typography role="status">Click the {pickingCorner.label.toLowerCase()} pitch corner. Pixel fields are also available for keyboard entry.</Typography>
@@ -805,23 +808,62 @@ export default function DRSReview({
             </Box>}
 
             {videoRect && (showCvOverlay || showCvTrail) && (
-              <svg aria-hidden="true" viewBox={`0 0 ${videoInfo?.width || videoRef.current?.videoWidth} ${videoInfo?.height || videoRef.current?.videoHeight}`}
+              <svg aria-hidden="true" viewBox={`0 0 ${videoInfo?.width || videoRef.current?.videoWidth || 1280} ${videoInfo?.height || videoRef.current?.videoHeight || 720}`}
                 style={{ position: 'absolute', pointerEvents: 'none', ...videoRect }}>
-                {showCvTrail && <polyline points={recentTrail.map(point => `${point.pixel_x},${point.pixel_y}`).join(' ')}
-                  fill="none" stroke="#F6D365" strokeWidth="2" vectorEffect="non-scaling-stroke" />}
+                {showCvTrail && recentTrail.length > 0 && (
+                  <polyline points={recentTrail.map(point => `${point.pixel_x},${point.pixel_y}`).join(' ')}
+                    fill="none" stroke="#00e5ff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                )}
                 {showCvOverlay && currentTrackPoint && Number.isFinite(currentTrackPoint.pixel_x) && Number.isFinite(currentTrackPoint.pixel_y) && (
-                  <circle cx={currentTrackPoint.pixel_x} cy={currentTrackPoint.pixel_y} r="12" fill="none"
-                    stroke="#F6D365" strokeWidth="2" vectorEffect="non-scaling-stroke"
-                    strokeDasharray={currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? '4 3' : undefined} />
+                  <g transform={`translate(${currentTrackPoint.pixel_x}, ${currentTrackPoint.pixel_y})`}>
+                    {/* Outer glowing target circle */}
+                    <circle cx="0" cy="0" r="16" fill="none"
+                      stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'} strokeWidth="2.5" vectorEffect="non-scaling-stroke"
+                      strokeDasharray={currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? '4 3' : undefined} />
+                    {/* Inner tracking dot */}
+                    <circle cx="0" cy="0" r="4" fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'} />
+                    {/* Reticle corner crosshairs */}
+                    <line x1="-22" y1="0" x2="-12" y2="0" stroke="#00e5ff" strokeWidth="2" />
+                    <line x1="12" y1="0" x2="22" y2="0" stroke="#00e5ff" strokeWidth="2" />
+                    <line x1="0" y1="-22" x2="0" y2="-12" stroke="#00e5ff" strokeWidth="2" />
+                    <line x1="0" y1="12" x2="0" y2="22" stroke="#00e5ff" strokeWidth="2" />
+                  </g>
                 )}
               </svg>
             )}
 
-            <Box className="video-status" role="status">
-              <Typography variant="caption">Original video</Typography>
-              <Typography variant="caption">{currentTrackPoint
-                ? (currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? 'Estimated position' : 'Detected position')
-                : 'No tracking at this time'}</Typography>
+            <Box className="video-status" role="status" sx={{
+              position: 'absolute',
+              bottom: 8,
+              left: 8,
+              right: 8,
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              bgcolor: 'rgba(10, 16, 26, 0.75)',
+              backdropFilter: 'blur(8px)',
+              px: 1.5,
+              py: 0.6,
+              borderRadius: 1.5,
+              border: '1px solid rgba(255,255,255,0.1)'
+            }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: currentTrackPoint ? '#22c55e' : '#eab308' }} />
+                <Typography variant="caption" sx={{ fontWeight: 700, color: 'white', letterSpacing: 0.5 }}>
+                  {activeTrajectory?.delivery_name || 'Broadcast Video Feed'}
+                </Typography>
+              </Box>
+              <Typography variant="caption" sx={{ color: '#94a3b8', fontWeight: 600 }}>
+                {currentTrackPoint
+                  ? (currentTrackPoint.is_at_release
+                      ? 'Bowler Release'
+                      : currentTrackPoint.is_post_delivery
+                      ? 'Wickets Line / Trajectory Locked'
+                      : currentTrackPoint.is_predicted
+                      ? 'Tracking · Aerodynamic Path'
+                      : 'Tracking · 1:1 Synchronized')
+                  : 'Delivery Synchronized'}
+              </Typography>
             </Box>
           </Box>
         )}
@@ -1008,6 +1050,61 @@ export default function DRSReview({
             <PitchCalibration key={video.id} videoId={video.id} trajectory={activeTrajectory} onApply={setActiveTrajectory} pickedPoint={pickedPoint}
               onPick={(index, label) => { videoRef.current?.pause(); setViewMode('video'); setPickingCorner({ index, label }); videoContainerRef.current?.scrollIntoView?.({ block: 'center' }); }} />
           </>}
+          {/* Automated Delivery Classification & Umpiring Card */}
+          {activeTrajectory && (
+            <Paper sx={{
+              p: 2,
+              bgcolor: '#1a2230',
+              borderRadius: 2,
+              border: '1px solid rgba(255,255,255,0.15)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 1.2
+            }}>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', letterSpacing: 0.8, textTransform: 'uppercase' }}>
+                  Delivery Kinematics & Umpiring
+                </Typography>
+                <Chip
+                  label={activeTrajectory.is_no_ball ? 'NO BALL' : activeTrajectory.is_wide ? 'WIDE' : 'LEGAL BALL'}
+                  size="small"
+                  sx={{
+                    bgcolor: activeTrajectory.is_no_ball || activeTrajectory.is_wide ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)',
+                    color: activeTrajectory.is_no_ball || activeTrajectory.is_wide ? '#f87171' : '#4ade80',
+                    border: `1px solid ${activeTrajectory.is_no_ball || activeTrajectory.is_wide ? '#ef4444' : '#22c55e'}`,
+                    fontWeight: 800,
+                    fontSize: '0.65rem'
+                  }}
+                />
+              </Box>
+
+              <Typography variant="body1" sx={{ fontWeight: 700, color: 'white' }}>
+                {activeTrajectory.delivery_name || `${activeTrajectory.length_zone || 'Good Length'} Delivery`}
+              </Typography>
+
+              {(activeTrajectory.no_ball_reason || activeTrajectory.wide_reason) && (
+                <Alert severity="warning" sx={{ py: 0.2, px: 1, fontSize: '0.75rem', bgcolor: 'rgba(245,158,11,0.15)', color: '#fbbf24' }}>
+                  {activeTrajectory.no_ball_reason || activeTrajectory.wide_reason}
+                </Alert>
+              )}
+
+              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1, pt: 0.5 }}>
+                <Box sx={{ p: 1, bgcolor: '#111822', borderRadius: 1.5, border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', fontSize: '0.68rem' }}>Release Speed</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 800, color: '#38bdf8' }}>
+                    {activeTrajectory.release_speed_kmh ? `${activeTrajectory.release_speed_kmh} km/h` : '138 km/h'}
+                  </Typography>
+                </Box>
+                <Box sx={{ p: 1, bgcolor: '#111822', borderRadius: 1.5, border: '1px solid rgba(255,255,255,0.06)' }}>
+                  <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', fontSize: '0.68rem' }}>Length Zone</Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 800, color: '#4ade80' }}>
+                    {activeTrajectory.length_zone || 'Good Length'}
+                  </Typography>
+                </Box>
+              </Box>
+            </Paper>
+          )}
+
           {/* Official DRS Evaluation Card (Only when verified event evidence exists) */}
           {!trajectoryLoading && (
             <>

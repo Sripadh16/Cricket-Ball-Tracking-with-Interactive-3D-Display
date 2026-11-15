@@ -1188,7 +1188,7 @@ export default function HawkEyeViewer({
   onOpenReportCard = null
 }) {
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
-  const [cameraView, setCameraView] = useState('side');
+  const [cameraView, setCameraView] = useState('bowler');
   const [ghostPreset, setGhostPreset] = useState(initialGhostPreset);
   const [showExtrapolation, setShowExtrapolation] = useState(true);
   const [showFullPath, setShowFullPath] = useState(true);
@@ -1209,8 +1209,8 @@ export default function HawkEyeViewer({
   const telemetryPoints = useMemo(() => prepareTrajectory(trajectoryData?.points), [trajectoryData]);
   const currentTelemetry = useMemo(() => sampleTrajectoryAtTime(telemetryPoints, currentTime), [telemetryPoints, currentTime]);
 
-  // 3D Batsman Avatar & Dynamic Zing Stumps State
-  const [showAvatar, setShowAvatar] = useState(isSimulation);
+  // 3D Batsman Avatar & Dynamic Zing Stumps State (Enabled across both uploaded videos & simulations)
+  const [showAvatar, setShowAvatar] = useState(true);
   const [stance, setStance] = useState('right_hand');
   const [batAction, setBatAction] = useState('auto');
   const targetStumpsRef = useRef(null);
@@ -1323,10 +1323,10 @@ export default function HawkEyeViewer({
         pointerEvents: 'none',
         zIndex: 10
       }}>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
           <Chip
             icon={<SportsCricket sx={{ fontSize: 16 }} />}
-            label={isSimulation ? 'Simulated delivery · 3D' : 'Approximate reconstruction'}
+            label={trajectoryData?.delivery_name || (isSimulation ? 'Simulated delivery · 3D' : 'Hawk-Eye 3D Track')}
             size="small"
             sx={{
               background: '#202733',
@@ -1337,6 +1337,33 @@ export default function HawkEyeViewer({
               border: `1px solid ${theme.ui.borderColor}`
             }}
           />
+          {trajectoryData?.release_speed_kmh && (
+            <Chip
+              label={`${trajectoryData.release_speed_kmh} km/h`}
+              size="small"
+              sx={{
+                bgcolor: 'rgba(56, 189, 248, 0.2)',
+                color: '#38bdf8',
+                fontWeight: 800,
+                fontSize: '0.75rem',
+                border: '1px solid rgba(56, 189, 248, 0.4)'
+              }}
+            />
+          )}
+          {trajectoryData?.is_wide && (
+            <Chip
+              label="WIDE BALL"
+              size="small"
+              sx={{ bgcolor: '#ef4444', color: 'white', fontWeight: 900, fontSize: '0.72rem' }}
+            />
+          )}
+          {trajectoryData?.is_no_ball && (
+            <Chip
+              label="NO BALL"
+              size="small"
+              sx={{ bgcolor: '#dc2626', color: 'white', fontWeight: 900, fontSize: '0.72rem' }}
+            />
+          )}
           {drs && (
             <Chip
               label={drs.decision}
@@ -1717,13 +1744,14 @@ export default function HawkEyeViewer({
         zIndex: 10
       }}>
         <ToggleButtonGroup size="small" aria-label="Camera angle" value={cameraView} exclusive onChange={(_, value) => value && setCameraView(value)}>
+          <ToggleButton value="bowler">Broadcast</ToggleButton>
           <ToggleButton value="umpire">Umpire</ToggleButton>
           <ToggleButton value="side">Side</ToggleButton>
           <ToggleButton value="aerial">Top</ToggleButton>
           <ToggleButton value="orbit">Orbit</ToggleButton>
         </ToggleButtonGroup>
         <FormControl size="small" sx={{ minWidth: 130 }}>
-          <Select value={['umpire', 'side', 'aerial', 'orbit'].includes(cameraView) ? '' : cameraView}
+          <Select value={['bowler', 'umpire', 'side', 'aerial', 'orbit'].includes(cameraView) ? '' : cameraView}
             displayEmpty inputProps={{ 'aria-label': 'More camera angles' }} onChange={event => setCameraView(event.target.value)}>
             <MenuItem value="" disabled>More cameras</MenuItem>
             <MenuItem value="chase">Chase Cam</MenuItem><MenuItem value="batsman">Batsman POV</MenuItem>

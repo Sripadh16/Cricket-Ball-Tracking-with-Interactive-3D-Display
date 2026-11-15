@@ -8,19 +8,32 @@ export function prepareTrajectory(points = []) {
   return [...byTime.values()].sort((a, b) => a.t - b.t);
 }
 
-export function sampleTrajectoryAtTime(points, time, maxGap = 0.2) {
-  if (!points.length || !Number.isFinite(time) || time < points[0].t || time > points[points.length - 1].t) return null;
+export function sampleTrajectoryAtTime(points, time, maxGap = 0.5) {
+  if (!points || !points.length || !Number.isFinite(time)) return null;
+
+  // Before first point (during bowler run-up): anchor ball at initial release point
+  if (time <= points[0].t) {
+    return { ...points[0], is_at_release: true };
+  }
+
+  // After last point (post-impact / keeper): anchor ball at final trajectory point
+  if (time >= points[points.length - 1].t) {
+    return { ...points[points.length - 1], is_post_delivery: true };
+  }
+
   const index = points.findIndex(point => point.t >= time);
+  if (index === -1) return points[points.length - 1];
   const next = points[index];
   if (next.t === time) return next;
   const previous = points[index - 1];
-  if (!previous || next.t - previous.t > maxGap) return null;
-  const alpha = (time - previous.t) / (next.t - previous.t);
+  if (!previous) return next;
+
+  const alpha = Math.max(0, Math.min(1, (time - previous.t) / Math.max(1e-4, next.t - previous.t)));
   const sample = { ...previous, t: time, is_interpolated: true };
   ['x', 'y', 'z', 'pixel_x', 'pixel_y', 'speed_kmh', 'confidence', 'spin_rpm',
     'magnus_force_n', 'drag_force_n', 'reynolds_number', 'vx', 'vy', 'vz'].forEach(key => {
     sample[key] = Number.isFinite(previous[key]) && Number.isFinite(next[key])
-      ? previous[key] + (next[key] - previous[key]) * alpha : null;
+      ? previous[key] + (next[key] - previous[key]) * alpha : (previous[key] ?? next[key]);
   });
   const outgoing = previous.outgoing_telemetry || previous;
   ['velocity_vector', 'gravity_vector', 'drag_vector', 'magnus_vector', 'seam_vector',
@@ -29,11 +42,11 @@ export function sampleTrajectoryAtTime(points, time, maxGap = 0.2) {
     const b = next[key];
     sample[key] = Array.isArray(a) && Array.isArray(b) && a.length === 3 && b.length === 3
       && [...a, ...b].every(Number.isFinite)
-      ? a.map((value, axis) => value + (b[axis] - value) * alpha) : null;
+      ? a.map((value, axis) => value + (b[axis] - value) * alpha) : (a || b);
   });
   ['spin_rpm', 'speed_kmh', 'magnus_force_n', 'drag_force_n', 'reynolds_number'].forEach(key => {
     sample[key] = Number.isFinite(outgoing[key]) && Number.isFinite(next[key])
-      ? outgoing[key] + (next[key] - outgoing[key]) * alpha : null;
+      ? outgoing[key] + (next[key] - outgoing[key]) * alpha : (outgoing[key] ?? next[key]);
   });
   sample.is_predicted = Boolean(previous.is_predicted || next.is_predicted);
   return sample;
