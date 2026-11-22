@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Button, TextField, Typography, Alert } from '@mui/material';
 import api from '../api/client';
 
-export default function PitchCalibration({ videoId, trajectory, onApply, onPick, pickedPoint }) {
+export default function PitchCalibration({ videoId, trajectory, onApply, onPick, pickedPoint, defaultOpen = false }) {
   const [corners, setCorners] = useState(trajectory.calibration?.corners || Array.from({ length: 4 }, () => ['', '']));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -24,11 +24,11 @@ export default function PitchCalibration({ videoId, trajectory, onApply, onPick,
       if (alive.current) setError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not save pitch landmarks. Try again.');
     } finally { if (alive.current) setSaving(false); }
   };
-  return <Box component="details" sx={{ mt: 1 }}>
+  return <Box component="details" open={defaultOpen || undefined} sx={{ mt: 1 }}>
     <summary>Correct pitch landmarks</summary>
     <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
       Enter the four pitch corners at the wicket lines in source pixels ({width || '—'} × {height || '—'}), looking from bowler to batter.
-      Use a fixed-camera clip. This corrects the ground plane; ball height and camera pose remain unverified.
+      The camera is then solved from these corners (plus any detected stumps) and the ball flight is refitted in 3D.
     </Typography>
     {labels.map((label, i) => <Box key={label} sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, my: 1 }}>
       <Button onClick={() => onPick(i, label)} disabled={saving || !width || !height}>Pick {label} in video</Button>

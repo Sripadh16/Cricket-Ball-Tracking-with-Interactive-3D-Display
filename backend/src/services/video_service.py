@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 from models.video import Video
-from models.user import User
 import uuid
 from typing import Optional
 import logging

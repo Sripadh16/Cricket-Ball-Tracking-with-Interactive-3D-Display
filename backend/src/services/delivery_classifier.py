@@ -21,6 +21,7 @@ class DeliveryClassifier:
     BALL_RADIUS_M = 0.036     # Standard cricket ball radius (~7.2 cm diameter)
     WIDE_OFF_LINE_M = 0.89    # Return crease / wide tramline distance from middle stump
     WIDE_LEG_MARGIN_M = 0.15  # Leg side wide margin beyond leg stump (RHB: X < -0.15m)
+    SEAM_MIN_DEG = 1.2        # smallest seam / turn deviation that is named (gate and type names share it)
 
     @classmethod
     def classify_delivery(
@@ -29,11 +30,21 @@ class DeliveryClassifier:
         bowler_arm: str = "right",        # "right" or "left" (e.g. Arshdeep Singh = "left")
         bowler_mode: str = "over",        # "over" or "round"
         batter_stance: str = "RHB",       # "RHB" (Right-hand) or "LHB" (Left-hand)
-        shot_offered: bool = True
+        shot_offered: bool = True,
+        swing_measurement: Optional[Dict[str, Any]] = None,  # camera-ray swing from the tracker (metres)
+        lateral_observable: bool = True,  # False when the camera cannot see the line (side-on stump-plane method)
+        line_sigma_m: Optional[float] = None,
+        release_speed_kmh: Optional[float] = None,  # authoritative values from the flight fit, when available
+        length_zone: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Comprehensive delivery classification & umpire analysis.
         Returns full telemetry, delivery type name, wide/no-ball verdict, and DRS decision.
+
+        World frame: x across the pitch (+x = OFF side for a right-handed batter), y along the pitch towards the
+        striker, z up (metres). Air swing and seam deviation therefore share one sign convention:
+        positive = moving towards +x (towards OFF for a RHB = away / outswing / leg-cutter / leg-break),
+        negative = moving towards -x (towards LEG for a RHB = in / inswing / off-cutter / off-break).
         """
         if not points or len(points) < 2:
             return cls._empty_classification()
@@ -60,6 +71,11 @@ class DeliveryClassifier:
             calibrated_speed_kmh = min(156.0, max(78.0, (flight_dist_m / total_dt) * 3.6))
             rel_speed_kmh = round(float(calibrated_speed_kmh), 1)
             rel_speed_mph = round(float(rel_speed_kmh * 0.621371), 1)
+
+        if release_speed_kmh:
+            rel_speed_kmh = round(float(release_speed_kmh), 1)
+            rel_speed_mph = round(float(rel_speed_kmh * 0.621371), 1)
+        length_zone_hint = length_zone
 
         # 2. Bounce Point Detection (min Z or phase == 'bounce')
         bounce_point = None
@@ -130,21 +146,34 @@ class DeliveryClassifier:
             elif max_z < 0.6:
                 length_zone = "Yorker"
 
-        # 5. Lateral Air Curvature (Swing) & Pitch Deviation (Cut/Spin)
-        # Pre-bounce lateral curvature: difference between initial X velocity and arrival X
-        air_swing_mm = 0.0
-        if len(pre_bounce) >= 3:
-            x_start = pre_bounce[0]["x"]
-            x_end = pre_bounce[-1]["x"]
-            # Curvature relative to straight secant line
-            mid_idx = len(pre_bounce) // 2
-            x_expected_mid = (x_start + x_end) / 2.0
-            x_actual_mid = pre_bounce[mid_idx]["x"]
-            air_swing_mm = round(float((x_actual_mid - x_expected_mid) * 1000.0), 1)
+        if length_zone_hint:
+            length_zone = length_zone_hint
 
-        # Post-bounce seam/spin angle
+        # 5. Lateral Air Curvature (Swing) & Pitch Deviation (Cut/Spin)
+        # Air swing = sideways distance, at the end of the air phase, between the actual path and the straight
+        # line the ball was launched on. Quadratic fit x(t) = a0 + a1*t + a2*t^2 over the pre-bounce points:
+        # swing = a2 * T^2 (T = air time). + = towards +x (off for a RHB), - = towards leg (inswing into a RHB).
+        air_swing_mm = 0.0
+        air_swing_sigma_mm = None
+        swing_method = "fitted_path"
+        if swing_measurement and swing_measurement.get("swing_m") is not None:
+            air_swing_mm = round(float(swing_measurement["swing_m"]) * 1000.0, 1)
+            air_swing_sigma_mm = round(float(swing_measurement.get("sigma_m") or 0.0) * 1000.0, 1)
+            swing_method = "camera_ray_curvature"
+        elif len(pre_bounce) >= 4:
+            tt = np.array([p["t"] for p in pre_bounce], dtype=float)
+            xx = np.array([p["x"] for p in pre_bounce], dtype=float)
+            if tt[-1] - tt[0] > 1e-3:
+                tm = tt - tt[0]
+                a2 = float(np.polyfit(tm, xx, 2)[0])
+                air_swing_mm = round(float(a2 * tm[-1] ** 2 * 1000.0), 1)
+        if not lateral_observable:
+            air_swing_mm, air_swing_sigma_mm, swing_method = 0.0, None, "not_observable"
+
+        # Post-bounce seam/spin angle: change of the ground-track heading at the bounce.
+        # + = the ball deviates towards +x (away from a RHB: leg-cutter / leg-break), - = back in towards leg.
         pitch_deviation_deg = 0.0
-        if bounce_point and post_bounce and len(pre_bounce) >= 2 and len(post_bounce) >= 2:
+        if lateral_observable and bounce_point and post_bounce and len(pre_bounce) >= 2 and len(post_bounce) >= 2:
             dx_pre = pre_bounce[-1]["x"] - pre_bounce[0]["x"]
             dy_pre = max(0.1, pre_bounce[-1]["y"] - pre_bounce[0]["y"])
             ang_pre = np.arctan2(dx_pre, dy_pre)
@@ -154,18 +183,42 @@ class DeliveryClassifier:
             ang_post = np.arctan2(dx_post, dy_post)
             pitch_deviation_deg = round(float(np.degrees(ang_post - ang_pre)), 2)
 
+        # Significance: the classifier only names swing / seam movement that the measurement can resolve.
+        swing_noise_mm = max(25.0, 2.0 * (air_swing_sigma_mm or 0.0))
+        swing_significant = lateral_observable and abs(air_swing_mm) >= swing_noise_mm
+        post_len = 0.0
+        if post_bounce and len(post_bounce) >= 2:
+            post_len = float(np.hypot(post_bounce[-1]["x"] - post_bounce[0]["x"],
+                                      post_bounce[-1]["y"] - post_bounce[0]["y"]))
+        seam_noise_deg = cls.SEAM_MIN_DEG
+        if line_sigma_m:
+            seam_noise_deg = max(cls.SEAM_MIN_DEG, float(np.degrees(2.0 * line_sigma_m / max(1.0, post_len))))
+        seam_significant = lateral_observable and abs(pitch_deviation_deg) >= seam_noise_deg
+
         # 6. Delivery Type Classifier
         is_left_arm = bowler_arm.lower() == "left"
         is_rhb = batter_stance.upper() == "RHB"
 
-        delivery_type, delivery_name = cls._determine_delivery_type(
-            rel_speed_kmh=rel_speed_kmh,
-            length_zone=length_zone,
-            air_swing_mm=air_swing_mm,
-            pitch_deviation_deg=pitch_deviation_deg,
-            is_left_arm=is_left_arm,
-            is_rhb=is_rhb
-        )
+        if lateral_observable:
+            delivery_type, delivery_name = cls._determine_delivery_type(
+                rel_speed_kmh=rel_speed_kmh,
+                length_zone=length_zone,
+                air_swing_mm=air_swing_mm if swing_significant else 0.0,
+                pitch_deviation_deg=pitch_deviation_deg if seam_significant else 0.0,
+                is_left_arm=is_left_arm,
+                is_rhb=is_rhb
+            )
+        else:
+            pace = cls.pace_category(rel_speed_kmh)
+            delivery_type = "length_only"
+            delivery_name = f"{'Left' if is_left_arm else 'Right'}-Arm {pace['label']} · {length_zone}"
+        swing_analysis = cls.build_swing_analysis(
+            rel_speed_kmh=rel_speed_kmh, length_zone=length_zone, bounce_point=bounce_point,
+            air_swing_mm=air_swing_mm, air_swing_sigma_mm=air_swing_sigma_mm, swing_method=swing_method,
+            swing_significant=swing_significant, swing_measurement=swing_measurement,
+            pitch_deviation_deg=pitch_deviation_deg, seam_significant=seam_significant,
+            seam_noise_deg=seam_noise_deg, lateral_observable=lateral_observable,
+            delivery_type=delivery_type, delivery_name=delivery_name, is_left_arm=is_left_arm, is_rhb=is_rhb)
 
         # 7. Automated Umpiring: Wide & No-Ball Detection
         is_no_ball = False
@@ -230,7 +283,110 @@ class DeliveryClassifier:
             "wide_reason": wide_reason,
             "drs_evaluation": drs_evaluation,
             "bounce_point": bounce_point,
+            "swing_analysis": swing_analysis,
             "summary": f"{delivery_name} · {rel_speed_kmh} km/h · {length_zone}"
+        }
+
+    @staticmethod
+    def pace_category(kmh: float) -> Dict[str, str]:
+        """Bowler pace band from release speed (broadcast-style bands)."""
+        if kmh < 88.0:
+            return {"key": "spin", "label": "Spin / Slow", "bowler_type": "spin"}
+        if kmh < 115.0:
+            return {"key": "medium", "label": "Medium Pace", "bowler_type": "pace"}
+        if kmh < 130.0:
+            return {"key": "medium_fast", "label": "Medium-Fast", "bowler_type": "pace"}
+        if kmh < 140.0:
+            return {"key": "fast_medium", "label": "Fast-Medium", "bowler_type": "pace"}
+        return {"key": "fast", "label": "Fast", "bowler_type": "pace"}
+
+    @classmethod
+    def build_swing_analysis(cls, *, rel_speed_kmh, length_zone, bounce_point, air_swing_mm, air_swing_sigma_mm,
+                             swing_method, swing_significant, swing_measurement, pitch_deviation_deg,
+                             seam_significant, seam_noise_deg, lateral_observable, delivery_type, delivery_name,
+                             is_left_arm, is_rhb) -> Dict[str, Any]:
+        """Self-describing swing / seam / delivery-type summary for the UI ("Swing & delivery classifier")."""
+        pace = cls.pace_category(rel_speed_kmh)
+        spin = pace["bowler_type"] == "spin"
+        off_sign = 1.0 if is_rhb else -1.0  # +x is the off side for a RHB, the leg side for a LHB
+        batter = "right-hander" if is_rhb else "left-hander"
+
+        def towards(v):
+            return "away" if v * off_sign > 0 else "in"
+
+        swing_dir = "none"
+        if swing_significant:
+            swing_dir = "outswing" if towards(air_swing_mm) == "away" else "inswing"
+        seam_dir = "none"
+        if seam_significant:
+            seam_dir = towards(pitch_deviation_deg)
+        dist = None
+        if bounce_point is not None and bounce_point.get("y") is not None:
+            dist = round(float(cls.STUMP_Y - bounce_point["y"]), 2)
+
+        parts = [f"Released at {rel_speed_kmh:.0f} km/h, i.e. {pace['label'].lower()}"
+                 + (" (below 88 km/h is treated as spin / slow bowling)." if spin else ".")]
+        if dist is not None:
+            parts.append(f"Pitched {dist:.1f} m from the striker's stumps: {length_zone}.")
+        else:
+            parts.append("Did not bounce before reaching the batter: full toss.")
+        if not lateral_observable:
+            parts.append("The camera views the pitch side-on, so sideways movement (swing / seam) cannot be "
+                         "measured; the delivery is classified by pace and length only.")
+        else:
+            sig = f" ± {air_swing_sigma_mm:.0f}" if air_swing_sigma_mm else ""
+            if swing_significant:
+                parts.append(f"In the air it moved {abs(air_swing_mm):.0f}{sig} mm {('away from' if swing_dir == 'outswing' else 'into')} "
+                             f"the {batter} ({swing_dir}).")
+            else:
+                parts.append(f"No significant swing in the air ({air_swing_mm:+.0f}{sig} mm is within measurement noise).")
+            if bounce_point is None:
+                pass
+            elif seam_significant:
+                word = ("turned" if spin else "seamed")
+                parts.append(f"Off the pitch it {word} {abs(pitch_deviation_deg):.1f}° "
+                             f"{'away from' if seam_dir == 'away' else 'back into'} the {batter}.")
+            else:
+                parts.append(f"Off the pitch the line held ({pitch_deviation_deg:+.1f}° is below the "
+                             f"{seam_noise_deg:.1f}° resolution).")
+        parts.append(f"Classified as: {delivery_name}.")
+
+        return {
+            "available": True,
+            "lateral_measurable": bool(lateral_observable),
+            "swing_method": swing_method,
+            "air_swing_mm": float(air_swing_mm),
+            "air_swing_sigma_mm": air_swing_sigma_mm,
+            "air_swing_significant": bool(swing_significant),
+            "swing_direction": swing_dir,  # "inswing" | "outswing" | "none" (relative to the batter)
+            "lateral_accel_mps2": (round(float(swing_measurement["lateral_accel_mps2"]), 3)
+                                   if swing_measurement and swing_method == "camera_ray_curvature" else None),
+            "air_time_s": swing_measurement.get("air_time_s") if swing_measurement else None,
+            "seam_deviation_deg": float(pitch_deviation_deg),
+            "seam_resolution_deg": round(float(seam_noise_deg), 2),
+            "seam_significant": bool(seam_significant),
+            "seam_direction": seam_dir,  # "in" | "away" | "none" (relative to the batter)
+            "movement_kind": "spin" if spin else "seam",
+            "release_speed_kmh": rel_speed_kmh,
+            "pace_category": pace["label"],
+            "pace_key": pace["key"],
+            "bowler_type": pace["bowler_type"],
+            "length_zone": length_zone,
+            "bounce_distance_from_stumps_m": dist,
+            "delivery_type": delivery_type,
+            "delivery_name": delivery_name,
+            "bowler_arm": "Left-Arm" if is_left_arm else "Right-Arm",
+            "batter_stance": "RHB" if is_rhb else "LHB",
+            "explanation": " ".join(parts),
+            "conventions": {
+                "frame": "x across the pitch (+x = off side for a right-handed batter), y bowler -> striker, z up, metres",
+                "air_swing_mm": "sideways distance at the bounce (or at the batter for a full toss) between the actual "
+                                "path and the straight line the ball was launched on; + = towards +x (off side for a RHB, "
+                                "outswing), - = towards leg (inswing into a RHB)",
+                "seam_deviation_deg": "change of the ground-track heading at the bounce; + = towards +x (away from a RHB: "
+                                      "leg-cutter / leg-break), - = back in towards leg (off-cutter / off-break for a RHB)",
+                "pace_bands_kmh": "spin/slow < 88 <= medium < 115 <= medium-fast < 130 <= fast-medium < 140 <= fast",
+            },
         }
 
     @classmethod
@@ -253,24 +409,25 @@ class DeliveryClassifier:
         if length_zone == "Yorker":
             return "yorker", f"{arm_str} Toe-Crushing Yorker"
 
-        # Spinners (< 105 km/h)
-        if rel_speed_kmh < 105.0:
-            if pitch_deviation_deg > 1.5:
+        # Spinners (< 88 km/h; club medium pace is ~90-115 km/h, international spin rarely exceeds ~95)
+        if rel_speed_kmh < 88.0:
+            # +x is the off side for a right-hander: positive deviation turns the ball towards off (away from a RHB)
+            if pitch_deviation_deg <= -cls.SEAM_MIN_DEG:
                 return "off_spin", "Off-Break (Turning into RHB)" if is_rhb else "Off-Break (Turning away)"
-            elif pitch_deviation_deg < -1.5:
+            elif pitch_deviation_deg >= cls.SEAM_MIN_DEG:
                 return "leg_spin", "Leg-Break (Turning away from RHB)" if is_rhb else "Leg-Break (Turning into LHB)"
             else:
                 return "arm_ball", "Arm Ball (Straight through)"
 
-        # Fast Bowling: Swing & Cutters
-        # For Right-Arm to RHB:
-        # Negative swing (curves left) moves into batsman -> Inswinger
-        # Positive swing (curves right) moves away from batsman -> Outswinger
+        # Pace bowling: swing & cutters. Signs are made batter-relative first (+x is the off side for a RHB,
+        # the leg side for a LHB): negative = moving in towards the batter's legs, positive = moving away.
+        if not is_rhb:
+            air_swing_mm, pitch_deviation_deg = -air_swing_mm, -pitch_deviation_deg
         if is_left_arm:
             # Left-Arm Over (e.g. Arshdeep, Starc, Shaheen)
-            if air_swing_mm < -15.0 or pitch_deviation_deg > 1.0:
-                return "left_arm_inswing", "Left-Arm Inswinger (Curving into RHB)"
-            elif air_swing_mm > 15.0 or pitch_deviation_deg < -1.0:
+            if air_swing_mm < -15.0 or pitch_deviation_deg <= -cls.SEAM_MIN_DEG:
+                return "left_arm_inswing", "Left-Arm Inswinger (Curving into the batter)"
+            elif air_swing_mm > 15.0 or pitch_deviation_deg >= cls.SEAM_MIN_DEG:
                 return "left_arm_away", "Left-Arm Angled Away (Beating outside edge)"
             else:
                 return "left_arm_seam", "Left-Arm Fast Seam Delivery"
@@ -280,9 +437,9 @@ class DeliveryClassifier:
                 return "inswinger", "Conventional Inswinger (Curving in)"
             elif air_swing_mm > 20.0:
                 return "outswinger", "Late Outswinger (Shaping away)"
-            elif pitch_deviation_deg > 1.2:
+            elif pitch_deviation_deg <= -cls.SEAM_MIN_DEG:
                 return "off_cutter", "Off-Cutter (Gripping & nipping in)"
-            elif pitch_deviation_deg < -1.2:
+            elif pitch_deviation_deg >= cls.SEAM_MIN_DEG:
                 return "leg_cutter", "Leg-Cutter (Holding line / seaming away)"
             else:
                 return "straight_seam", "Upright Seam Delivery"

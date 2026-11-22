@@ -187,72 +187,63 @@ function CricketPitch({ showZones = false, theme, pitchType }) {
 }
 
 // Glowing CatmullRom Trajectory Ribbon
-function TrajectoryTube({ points, color, emissiveColor, radius = 0.022, isDashed = false }) {
-  const { solidGeoms, dashedGeoms } = useMemo(() => {
-    if (!points || points.length < 2) return { solidGeoms: [], dashedGeoms: [] };
+// Arc-length fraction of a time-stamped polyline reached at time t (used to reveal prebuilt geometry).
+function revealFraction(points, t) {
+  if (!points || points.length < 2 || !Number.isFinite(t)) return 1;
+  if (t <= points[0].t) return 0;
+  if (t >= points[points.length - 1].t) return 1;
+  let total = 0;
+  const cum = [0];
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y, points[i].z - points[i - 1].z);
+    cum.push(total);
+  }
+  const i = points.findIndex(p => p.t >= t);
+  const a = points[i - 1];
+  const b = points[i];
+  const k = (t - a.t) / Math.max(1e-6, b.t - a.t);
+  return total > 0 ? (cum[i - 1] + k * (cum[i] - cum[i - 1])) / total : 1;
+}
 
-    const vectors = points.map(p => new THREE.Vector3(p.x, p.y, p.z));
-    const curve = new THREE.CatmullRomCurve3(vectors);
-    const totalLength = curve.getLength();
-
-    if (!isDashed) {
-      const geom = new THREE.TubeGeometry(
-        curve, Math.max(20, points.length * 3), radius, 8, false
-      );
-      return { solidGeoms: [geom], dashedGeoms: [] };
-    }
-
-    const DASH_LENGTH = 0.25;
-    const GAP_LENGTH  = 0.15;
-    const CYCLE = DASH_LENGTH + GAP_LENGTH;
-    const numCycles = Math.ceil(totalLength / CYCLE);
-    const geoms = [];
-
-    for (let i = 0; i < numCycles; i++) {
-      const tStart = (i * CYCLE) / totalLength;
-      const tEnd   = Math.min(1.0, (i * CYCLE + DASH_LENGTH) / totalLength);
-      if (tEnd <= tStart) break;
-
-      const steps = Math.max(4, Math.round((tEnd - tStart) * points.length * 3));
-      const subPoints = [];
-      for (let s = 0; s <= steps; s++) {
-        const t = tStart + (tEnd - tStart) * (s / steps);
-        subPoints.push(curve.getPoint(t));
-      }
-      if (subPoints.length < 2) continue;
-      const subCurve = new THREE.CatmullRomCurve3(subPoints);
-      geoms.push(new THREE.TubeGeometry(subCurve, steps, radius, 8, false));
-    }
-    return { solidGeoms: [], dashedGeoms: geoms };
-  }, [points, radius, isDashed]);
+// Hawk-Eye style ribbon: a ball-width bright core inside a soft additive halo.
+// Geometry is built once per trajectory and revealed with a draw range, so playback costs nothing extra.
+function TrajectoryTube({ points, color, emissiveColor, radius = 0.036, isDashed = false, revealT = Infinity }) {
+  const RADIAL = 10;
+  const geoms = useMemo(() => {
+    if (!points || points.length < 2) return null;
+    const curve = new THREE.CatmullRomCurve3(points.map(p => new THREE.Vector3(p.x, p.y, p.z)));
+    const segments = Math.min(400, Math.max(24, points.length * 6));
+    return {
+      segments,
+      core: new THREE.TubeGeometry(curve, segments, radius, RADIAL, false),
+      halo: new THREE.TubeGeometry(curve, segments, radius * 2.1, RADIAL, false),
+    };
+  }, [points, radius]);
 
   useEffect(() => () => {
-    [...solidGeoms, ...dashedGeoms].forEach(geometry => geometry.dispose());
-  }, [solidGeoms, dashedGeoms]);
-  if (!solidGeoms.length && !dashedGeoms.length) return null;
+    if (geoms) { geoms.core.dispose(); geoms.halo.dispose(); }
+  }, [geoms]);
 
-  const materialProps = {
-    color,
-    emissive: emissiveColor || color,
-    emissiveIntensity: isDashed ? 0.9 : 0.6,
-    roughness: 0.2,
-    metalness: 0.8,
-    transparent: isDashed,
-    opacity: isDashed ? 0.82 : 0.95,
-  };
+  const fraction = revealFraction(points, revealT);
+  useEffect(() => {
+    if (!geoms) return;
+    const perSegment = RADIAL * 6;
+    const count = Math.round(fraction * geoms.segments) * perSegment;
+    geoms.core.setDrawRange(0, count);
+    geoms.halo.setDrawRange(0, count);
+  }, [geoms, fraction]);
 
+  if (!geoms || fraction <= 0) return null;
   return (
     <group>
-      {solidGeoms.map((geom, i) => (
-        <mesh key={i} geometry={geom}>
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      ))}
-      {dashedGeoms.map((geom, i) => (
-        <mesh key={i} geometry={geom}>
-          <meshStandardMaterial {...materialProps} />
-        </mesh>
-      ))}
+      <mesh geometry={geoms.core} renderOrder={2}>
+        <meshBasicMaterial color={emissiveColor || color} toneMapped={false} transparent opacity={isDashed ? 0.55 : 0.95}
+          depthWrite={!isDashed} />
+      </mesh>
+      <mesh geometry={geoms.halo} renderOrder={1}>
+        <meshBasicMaterial color={color} toneMapped={false} transparent opacity={isDashed ? 0.12 : 0.22}
+          blending={THREE.AdditiveBlending} depthWrite={false} />
+      </mesh>
     </group>
   );
 }
@@ -945,6 +936,27 @@ function Scene({
   const lightCfg = theme?.lighting || THEME_CONFIGS.broadcast.lighting;
   const trajCfg = theme?.trajectory || THEME_CONFIGS.broadcast.trajectory;
 
+  // Hawk-Eye style progressive drawing: the ribbon grows behind the ball in sync with the video.
+  // "Full path" draws everything travelled so far; otherwise only a short trailing tail.
+  const growPath = (points) => {
+    if (!points || points.length === 0) return [];
+    const from = showFullPath ? -Infinity : currentTime - 0.3;
+    const drawn = points.filter(point => point.t <= currentTime && point.t >= from);
+    const last = points[points.length - 1];
+    if (drawn.length && currentBallPos && currentTime < last.t && currentTime > points[0].t
+        && Number.isFinite(currentBallPos.x)) {
+      drawn.push({ ...currentBallPos, t: currentTime });
+    }
+    return drawn;
+  };
+  const drawnPre = growPath(preBouncePoints);
+  const drawnPost = growPath(postBouncePoints);
+  const drawnExt = growPath(extrapolatedPoints);
+  const bounceReached = bouncePoint && currentTime >= (bouncePoint.t ?? 0) - 1e-3;
+  const impactReached = impactPoint && currentTime >= (impactPoint.t ?? 0) - 1e-3;
+  const lastExtT = extrapolatedPoints?.length ? extrapolatedPoints[extrapolatedPoints.length - 1].t : impactPoint?.t;
+  const stumpsReached = currentTime >= (lastExtT ?? 0) - 1e-3;
+
   // Bounce timestamp for particle puff synchronization
   const bounceTime = useMemo(() => {
     if (bouncePoint?.t) return bouncePoint.t;
@@ -997,28 +1009,31 @@ function Scene({
       {/* Multi-Phase Hawk-Eye Trajectory Ribbons */}
       {preBouncePoints && preBouncePoints.length > 1 && (
         <TrajectoryTube
-          points={showFullPath ? preBouncePoints : preBouncePoints.filter(point => point.t >= currentTime - 0.3 && point.t <= currentTime)}
+          points={showFullPath ? preBouncePoints : drawnPre}
+          revealT={showFullPath ? currentTime : Infinity}
           color={trajCfg.preBounce}
           emissiveColor={trajCfg.preBounceEmissive}
-          radius={0.024}
+          radius={0.036}
         />
       )}
 
       {postBouncePoints && postBouncePoints.length > 1 && (
         <TrajectoryTube
-          points={showFullPath ? postBouncePoints : postBouncePoints.filter(point => point.t >= currentTime - 0.3 && point.t <= currentTime)}
+          points={showFullPath ? postBouncePoints : drawnPost}
+          revealT={showFullPath ? currentTime : Infinity}
           color={trajCfg.postBounce}
           emissiveColor={trajCfg.postBounceEmissive}
-          radius={0.024}
+          radius={0.036}
         />
       )}
 
       {showExtrapolation && extrapolatedPoints && extrapolatedPoints.length > 1 && (
         <TrajectoryTube
-          points={extrapolatedPoints}
+          points={showFullPath ? extrapolatedPoints : drawnExt}
+          revealT={showFullPath ? currentTime : Infinity}
           color={trajCfg.extrapolated}
           emissiveColor={trajCfg.extrapolatedEmissive}
-          radius={0.02}
+          radius={0.03}
           isDashed={true}
         />
       )}
@@ -1094,14 +1109,14 @@ function Scene({
 
       {/* 3D Event Markers */}
       <PitchingSpotMarker
-        bouncePoint={bouncePoint}
+        bouncePoint={bounceReached ? bouncePoint : null}
         lengthZone={trajectoryData?.length_zone}
         onSelectPoint={onSelectPoint}
         theme={theme}
       />
-      <ImpactMarker impactPoint={impactPoint} onSelectPoint={onSelectPoint} theme={theme} />
+      <ImpactMarker impactPoint={impactReached ? impactPoint : null} onSelectPoint={onSelectPoint} theme={theme} />
 
-      {showExtrapolation && stumpTarget && (
+      {showExtrapolation && stumpTarget && stumpsReached && (
         <StumpsTargetPlane
           target={stumpTarget}
           drsVerdict={trajectoryData?.drs_evaluation}
@@ -1241,7 +1256,15 @@ export default function HawkEyeViewer({
   const [showFlowHUDOverlay, setShowFlowHUDOverlay] = useState(false);
 
   const theme = useMemo(() => getThemeColors(themeName), [themeName]);
-  const drs = typeof trajectoryData?.drs_evaluation?.decision === 'string' ? trajectoryData.drs_evaluation : null;
+  const drsRevealT = (() => {
+    const ext = trajectoryData?.extrapolated_points;
+    const pts = trajectoryData?.points;
+    const t = ext?.length ? ext[ext.length - 1].t : trajectoryData?.impact_point?.t ?? (pts?.length ? pts[pts.length - 1].t : null);
+    return Number.isFinite(t) ? t : -Infinity;
+  })();
+  // The verdict badge appears only once the (projected) ball reaches the stumps, like a live review.
+  const drs = typeof trajectoryData?.drs_evaluation?.decision === 'string' && currentTime + 1e-3 >= drsRevealT
+    ? trajectoryData.drs_evaluation : null;
 
   return (
     <Box sx={{
@@ -1495,8 +1518,8 @@ export default function HawkEyeViewer({
           </Tooltip>
 
           {/* Interactive Shatter / Re-erect Zing Stumps Button */}
-          <Tooltip title={isShattered ? "Re-erect Stumps (Reset)" : "Interactive Shatter Stumps & Bails (Physics)"}>
-            <Button
+          <Tooltip title={!isSimulation ? 'Stump shatter is available in simulation mode' : isShattered ? "Re-erect Stumps (Reset)" : "Interactive Shatter Stumps & Bails (Physics)"}>
+            <span style={{ display: 'inline-flex' }}><Button
               size="small"
               variant={isShattered ? 'contained' : 'outlined'}
               startIcon={isShattered ? <RestartAlt sx={{ fontSize: 15 }} /> : <FlashOn sx={{ fontSize: 15 }} />}
@@ -1521,7 +1544,7 @@ export default function HawkEyeViewer({
               }}
             >
               {isShattered ? 'Reset Wickets' : 'Shatter Stumps'}
-            </Button>
+            </Button></span>
           </Tooltip>
 
           <Button

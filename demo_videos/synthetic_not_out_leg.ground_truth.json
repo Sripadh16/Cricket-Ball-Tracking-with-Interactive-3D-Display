@@ -1,0 +1,38 @@
+{
+  "clip": "synthetic_not_out_leg.mp4",
+  "fps": 50,
+  "resolution": [
+    1280,
+    720
+  ],
+  "camera_position_m": [
+    0.9,
+    -36.06,
+    6.2
+  ],
+  "focal_px": 3824.5,
+  "release_video_time_s": 0.8,
+  "release_speed_kmh": 131.0,
+  "bounce": {
+    "x": -0.3,
+    "y": 6.318,
+    "video_time_s": 1.22
+  },
+  "length_from_stumps_m": 3.74,
+  "pad_impact": {
+    "x": -0.17,
+    "y": 8.763,
+    "z": 0.281,
+    "video_time_s": 1.295
+  },
+  "at_stump_plane": {
+    "x": -0.101,
+    "z": 0.388
+  },
+  "expected_drs": {
+    "pitching": "OUTSIDE LEG",
+    "impact": "OUTSIDE",
+    "wickets": "HITTING",
+    "decision": "NOT OUT (Pitched Outside Leg)"
+  }
+}

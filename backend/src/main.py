@@ -1,16 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from api.videos import router as videos_router
 from api.reviews import router as reviews_router
 from api.auth import router as auth_router
 from database import engine, Base
-from models.user import User
-from models.video import Video
-from models.trajectory import Trajectory
-from models.review_session import ReviewSession
+# Model imports register every table on Base.metadata before create_all().
+from models.user import User  # noqa: F401
+from models.video import Video  # noqa: F401
+from models.trajectory import Trajectory  # noqa: F401
+from models.review_session import ReviewSession  # noqa: F401
 from logging_config import setup_logging
-from config import CORS_ORIGINS, UPLOAD_DIR, HOST, PORT
+from config import CORS_ORIGINS, HOST, PORT
 
 # Setup logging
 logger = setup_logging()

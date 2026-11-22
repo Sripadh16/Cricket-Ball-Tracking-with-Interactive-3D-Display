@@ -21,7 +21,6 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -126,6 +125,7 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "delivery_name": trajectory_data.get("delivery_name"),
         "air_swing_mm": trajectory_data.get("air_swing_mm"),
         "pitch_deviation_deg": trajectory_data.get("pitch_deviation_deg"),
+        "swing_analysis": trajectory_data.get("swing_analysis"),
         "is_no_ball": trajectory_data.get("is_no_ball"),
         "no_ball_reason": trajectory_data.get("no_ball_reason"),
         "is_wide": trajectory_data.get("is_wide"),
@@ -139,6 +139,9 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "tracking_start_s": trajectory_data.get("tracking_start_s"),
         "tracking_end_s": trajectory_data.get("tracking_end_s"),
         "source_duration_s": trajectory_data.get("source_duration_s"),
+        "pixel_track": trajectory_data.get("pixel_track"),
+        "camera": trajectory_data.get("camera"),
+        "geometry_inputs": trajectory_data.get("geometry_inputs"),
     }
 
 
@@ -160,6 +163,9 @@ async def get_preset_delivery_trajectory(
     rpm: Optional[float] = Query(None, description="Custom spin RPM (e.g. 800 - 3000)")
 ):
     """Generate and return full 3D physics trajectory & DRS data with Magnus aerodynamics and pitch restitution (public)"""
+    known = {preset["id"] for preset in DeliveryPhysicsSimulator.get_all_preset_deliveries()}
+    if delivery_type not in known:
+        raise HTTPException(status_code=404, detail=f"Unknown preset delivery '{delivery_type}'")
     try:
         data = DeliveryPhysicsSimulator.generate_delivery(
             delivery_type=delivery_type,
@@ -183,6 +189,12 @@ async def list_videos(
     try:
         video_service = VideoService(db)
         videos = video_service.list_videos(user_id=current_user.id)
+        # One query for every row's detection flag (the dashboard labels "No ball detected").
+        detected = dict(
+            db.query(Trajectory.video_id, Trajectory.ball_detected)
+            .filter(Trajectory.video_id.in_([video.id for video in videos]))
+            .all()
+        ) if videos else {}
 
         return {
             "videos": [
@@ -195,7 +207,8 @@ async def list_videos(
                     "created_at": video.upload_date.isoformat() if video.upload_date else None,
                     "processed_at": video.processing_completed_at.isoformat() if video.processing_completed_at else None,
                     "duration": video.duration,
-                    "file_size": video.file_size
+                    "file_size": video.file_size,
+                    "ball_detected": detected.get(video.id),
                 }
                 for video in videos
             ]
@@ -505,6 +518,27 @@ async def correct_pitch_calibration(video_id: str, payload: PitchCalibrationRequ
         raise HTTPException(status_code=404, detail="Process this video before correcting landmarks.")
     data = dict(trajectory.additional_data or {})
     info = data.get("video_info") or {}
+    inputs = data.get("geometry_inputs")
+    if inputs:
+        # Full re-solve: the clicked pitch corners join the stumps/pitch edges in the camera solve,
+        # and the ball flight is refitted through the corrected camera.
+        from services.delivery_tracker import DeliveryTracker
+        corners = [[float(v) for v in pair] for pair in payload.corners]
+        rebuilt = DeliveryTracker.reconstruct(inputs, corners=corners)
+        if rebuilt is None:
+            raise HTTPException(status_code=422, detail="These landmarks do not give a consistent camera for the tracked ball. Check the corner order and positions.")
+        drs = rebuilt["drs"]
+        trajectory.points = rebuilt["points"]
+        trajectory.timestamps = [p["t"] for p in rebuilt["points"]]
+        for key in ("pre_bounce_points", "post_bounce_points", "extrapolated_points", "bounce_point", "impact_point",
+                    "stump_plane_target", "drs_evaluation", "release_speed_kmh", "bounce_speed_kmh", "length_zone"):
+            data[key] = drs.get(key)
+        calibration = {"corners": corners, "status": "manual_landmarks", "camera": rebuilt["camera"]}
+        data.update(calibration=calibration, calibration_status="manual_landmarks", camera=rebuilt["camera"],
+                    reconstruction_method="camera_ballistic_fit")
+        trajectory.additional_data = data
+        db.commit()
+        return calibration
     try:
         corrected, calibration = calibrate_pitch(trajectory.points or [], payload.corners, info.get("width"), info.get("height"))
     except ValueError as exc:
@@ -552,7 +586,6 @@ async def get_trajectory(
             logger.warning(f"Failed to parse additional_data: {e}")
             additional_data = {}
 
-    timestamps = trajectory.timestamps or []
     # Detection coverage must never masquerade as the source duration.
     source_duration_s = additional_data.get("source_duration_s")
     if source_duration_s and isinstance(source_duration_s, (int, float)) and source_duration_s > 0:
@@ -607,6 +640,18 @@ async def get_trajectory(
         "reconstruction_method": additional_data.get("reconstruction_method", "legacy_unknown"),
         "calibration_status": additional_data.get("calibration_status", "unverified"),
         "calibration": additional_data.get("calibration"),
+        "pixel_track": additional_data.get("pixel_track"),
+        "camera": additional_data.get("camera"),
+        "delivery_name": additional_data.get("delivery_name"),
+        "delivery_type": additional_data.get("delivery_type"),
+        "air_swing_mm": additional_data.get("air_swing_mm"),
+        "pitch_deviation_deg": additional_data.get("pitch_deviation_deg"),
+        "swing_analysis": additional_data.get("swing_analysis"),
+        "is_no_ball": additional_data.get("is_no_ball"),
+        "no_ball_reason": additional_data.get("no_ball_reason"),
+        "is_wide": additional_data.get("is_wide"),
+        "wide_reason": additional_data.get("wide_reason"),
+        "speed_loss_pct": additional_data.get("speed_loss_pct"),
     }
 
 

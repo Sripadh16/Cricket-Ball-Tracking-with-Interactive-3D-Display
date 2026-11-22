@@ -18,6 +18,7 @@ import DRSCommentary from '../components/DRSCommentary';
 import DecisionFlowHUD from '../components/DecisionFlowHUD';
 import MatchReportCard from '../components/MatchReportCard';
 import PitchCalibration from '../components/PitchCalibration';
+import SwingAnalysisCard from '../components/SwingAnalysisCard';
 import api, { API_BASE_URL } from '../api/client';
 import { prepareTrajectory, sampleTrajectoryAtTime, containRect } from '../utils/trajectory';
 import { subscribeMediaClock } from '../utils/mediaClock';
@@ -30,6 +31,23 @@ const PRESET_DELIVERIES = [
   { id: 'bouncer_missing', label: 'Sharp bouncer (148 km/h)', decision: 'NOT OUT' },
   { id: 'legspin_umpires_call', label: 'Leg break (88 km/h)', decision: "UMPIRE'S CALL" }
 ];
+
+// Broadcast convention: red supports OUT, green supports NOT OUT, amber is umpire's call.
+function verdictTone(kind, value) {
+  const text = String(value || '').toUpperCase();
+  if (text.includes('UMPIRE')) return 'umpire';
+  if (kind === 'pitching') return text.includes('OUTSIDE LEG') ? 'notout' : 'out';
+  if (kind === 'impact') return text.includes('OUTSIDE') ? 'notout' : 'out';
+  if (kind === 'wickets') return text.includes('HITTING') ? 'out' : 'notout';
+  return 'neutral';
+}
+
+function decisionTone(decision) {
+  const text = String(decision || '').toUpperCase();
+  if (text.includes('NOT OUT')) return 'notout';
+  if (text.includes('UMPIRE')) return 'umpire';
+  return text.includes('OUT') ? 'out' : 'neutral';
+}
 
 export default function DRSReview({
   video,
@@ -396,6 +414,25 @@ export default function DRSReview({
       isPredicted: Boolean(hasExt || raw?.is_predicted)
     };
   }, [activeTrajectory]);
+  // Real-time DRS reveal: each verdict appears only once playback reaches the event it depends on.
+  const drsReveal = useMemo(() => {
+    const at = (value) => (Number.isFinite(value) ? value : -Infinity);
+    const ext = activeTrajectory?.extrapolated_points;
+    const pts = activeTrajectory?.points;
+    const lastExt = Array.isArray(ext) && ext.length ? ext[ext.length - 1].t : null;
+    const lastPt = Array.isArray(pts) && pts.length ? pts[pts.length - 1].t : null;
+    const bounceT = at(activeTrajectory?.bounce_point?.t);
+    const impactT = at(activeTrajectory?.impact_point?.t ?? lastPt);
+    const wicketsT = at(lastExt ?? activeTrajectory?.impact_point?.t ?? lastPt);
+    const now = currentTime + 1e-3;
+    return {
+      pitching: now >= bounceT,
+      impact: now >= impactT,
+      wickets: now >= wicketsT,
+      decision: now >= wicketsT,
+    };
+  }, [activeTrajectory, currentTime]);
+
   const debugInfo = activeTrajectory?.debug_info;
   const videoInfo = activeTrajectory?.video_info;
   const isVideoMode = currentDeliveryType === 'video';
@@ -524,15 +561,24 @@ export default function DRSReview({
     ? Math.round(activeTrajectory.lbw_probability) : null;
 
   const lbwColor = useMemo(() => {
+    if (!Number.isFinite(lbwProbability)) return 'var(--muted)';
     if (lbwProbability >= 70) return '#ef4444';
     if (lbwProbability >= 35) return '#f59e0b';
     return '#10b981';
   }, [lbwProbability]);
 
-  const preparedPoints = useMemo(() => prepareTrajectory(activeTrajectory?.points), [activeTrajectory]);
+  const preparedPoints = useMemo(() => {
+    const pts = prepareTrajectory(activeTrajectory?.points);
+    if (pts.length || !Array.isArray(activeTrajectory?.pixel_track)) return pts;
+    // 2D-only track (no 3D geometry): keep the video overlay working from pixel samples.
+    return prepareTrajectory(activeTrajectory.pixel_track.map(p => ({ ...p, x: 0, y: 0, z: 0 })));
+  }, [activeTrajectory]);
   const currentTrackPoint = useMemo(() => sampleTrajectoryAtTime(preparedPoints, currentTime), [preparedPoints, currentTime]);
   const recentTrail = useMemo(() => preparedPoints.filter(point => point.t <= currentTime && point.t >= currentTime - 0.3
     && Number.isFinite(point.pixel_x) && Number.isFinite(point.pixel_y)), [preparedPoints, currentTime]);
+  // The on-video marker exists only while the ball is actually in tracked flight (not parked at either end).
+  const ballOnScreen = Boolean(currentTrackPoint && !currentTrackPoint.is_post_delivery && !currentTrackPoint.is_at_release
+    && Number.isFinite(currentTrackPoint.pixel_x) && Number.isFinite(currentTrackPoint.pixel_y));
 
   // ---------------------------------------------------------------------------
   // TRAJECTORY EXPORT (JSON & CSV & 3D Screenshot)
@@ -649,9 +695,9 @@ export default function DRSReview({
     lines.push(`# DRS Decision: ${drs?.decision || 'N/A'}`);
     lines.push(`# Pitching: ${drs?.pitching || 'N/A'} | Impact: ${drs?.impact || 'N/A'} | Wickets: ${drs?.wickets || 'N/A'}`);
     lines.push(`# LBW Probability: ${lbwProbability != null ? `${lbwProbability}%` : 'N/A'}`);
-    lines.push(`# Release Speed: ${releaseSpeed != null ? `${releaseSpeed} km/h` : 'N/A'} | Bounce Speed: ${bounceSpeed != null ? `${bounceSpeed ?? '—'} km/h` : 'N/A'} | Decay: ${speedLossPct != null ? `${speedLossPct}%` : 'N/A'}`);
-    lines.push(`# Seam Deviation: ${deviationAngle}° (${deviationLabel})`);
-    lines.push(`# Pitch Length Zone: ${lengthZone}`);
+    lines.push(`# Release Speed: ${releaseSpeed != null ? `${releaseSpeed} km/h` : 'N/A'} | Bounce Speed: ${bounceSpeed != null ? `${bounceSpeed} km/h` : 'N/A'} | Decay: ${speedLossPct != null ? `${speedLossPct}%` : 'N/A'}`);
+    lines.push(`# Seam Deviation: ${deviationAngle != null ? `${deviationAngle}°` : 'N/A'} (${deviationLabel})`);
+    lines.push(`# Pitch Length Zone: ${lengthZone || 'N/A'}`);
     lines.push('#');
     lines.push('frame_index,timestamp_s,x_meters,y_meters,z_meters,speed_kmh,phase,is_interpolated,confidence,pixel_x,pixel_y');
 
@@ -687,9 +733,9 @@ export default function DRSReview({
 
   const handleCaptureSnapshot = () => {
     try {
-      const canvas = document.querySelector('canvas');
+      const canvas = document.querySelector('.scene-panel canvas');
       if (!canvas) {
-        alert('Could not find 3D graphics canvas to capture.');
+        setActionError('Open the 3D or Split view to capture the Hawk-Eye scene.');
         return;
       }
       const dataUrl = canvas.toDataURL('image/png');
@@ -703,13 +749,13 @@ export default function DRSReview({
       setFeedbackMsg('High-resolution 3D pitch snapshot captured and downloaded!');
     } catch (err) {
       console.error('Failed to capture snapshot:', err);
-      alert('Could not capture snapshot: ' + err.message);
+      setActionError(`Could not capture the 3D view: ${err.message}`);
     }
   };
 
 
   return (
-    <Box component="main" id="main-content" tabIndex={-1} className="review-workspace" sx={{ display: 'flex', flexDirection: 'column', bgcolor: '#101318', color: 'white' }}>
+    <Box component="main" id="main-content" tabIndex={-1} className="review-workspace" sx={{ display: 'flex', flexDirection: 'column', bgcolor: 'var(--bg)', color: 'white' }}>
       <header className="review-header">
         <div className="review-header-line">
           <div className="review-heading">
@@ -754,8 +800,8 @@ export default function DRSReview({
         minHeight: 0,
         display: { xs: 'flex', lg: 'grid' },
         gridTemplateColumns: video && viewMode === 'split'
-          ? 'minmax(0, 1fr) minmax(0, 1.3fr) 300px'
-          : 'minmax(0, 1fr) 300px',
+          ? 'minmax(0, 1fr) minmax(0, 1.35fr) var(--inspector-w)'
+          : 'minmax(0, 1fr) var(--inspector-w)',
         gridTemplateRows: 'minmax(0, 1fr)',
         flexDirection: { xs: 'column', lg: 'row' },
         overflow: { xs: 'visible', lg: 'hidden' },
@@ -788,8 +834,8 @@ export default function DRSReview({
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              borderRight: { xs: 'none', md: viewMode === '3d' ? 'none' : '1px solid rgba(255,255,255,0.1)' },
-              borderBottom: { xs: viewMode === '3d' ? 'none' : '1px solid rgba(255,255,255,0.1)', md: 'none' }
+              borderRight: { xs: 'none', lg: viewMode === '3d' ? 'none' : '1px solid var(--line)' },
+              borderBottom: { xs: viewMode === '3d' ? 'none' : '1px solid var(--line)', lg: 'none' }
             }}
           >
             <video
@@ -810,23 +856,28 @@ export default function DRSReview({
             {videoRect && (showCvOverlay || showCvTrail) && (
               <svg aria-hidden="true" viewBox={`0 0 ${videoInfo?.width || videoRef.current?.videoWidth || 1280} ${videoInfo?.height || videoRef.current?.videoHeight || 720}`}
                 style={{ position: 'absolute', pointerEvents: 'none', ...videoRect }}>
-                {showCvTrail && recentTrail.length > 0 && (
-                  <polyline points={recentTrail.map(point => `${point.pixel_x},${point.pixel_y}`).join(' ')}
-                    fill="none" stroke="#00e5ff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
-                )}
-                {showCvOverlay && currentTrackPoint && Number.isFinite(currentTrackPoint.pixel_x) && Number.isFinite(currentTrackPoint.pixel_y) && (
-                  <g transform={`translate(${currentTrackPoint.pixel_x}, ${currentTrackPoint.pixel_y})`}>
-                    {/* Outer glowing target circle */}
-                    <circle cx="0" cy="0" r="16" fill="none"
-                      stroke={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'} strokeWidth="2.5" vectorEffect="non-scaling-stroke"
-                      strokeDasharray={currentTrackPoint.is_predicted || currentTrackPoint.is_interpolated ? '4 3' : undefined} />
-                    {/* Inner tracking dot */}
-                    <circle cx="0" cy="0" r="4" fill={currentTrackPoint.is_predicted ? '#f59e0b' : '#00e5ff'} />
-                    {/* Reticle corner crosshairs */}
-                    <line x1="-22" y1="0" x2="-12" y2="0" stroke="#00e5ff" strokeWidth="2" />
-                    <line x1="12" y1="0" x2="22" y2="0" stroke="#00e5ff" strokeWidth="2" />
-                    <line x1="0" y1="-22" x2="0" y2="-12" stroke="#00e5ff" strokeWidth="2" />
-                    <line x1="0" y1="12" x2="0" y2="22" stroke="#00e5ff" strokeWidth="2" />
+                <defs>
+                  <radialGradient id="ballGlow">
+                    <stop offset="0%" stopColor="#7df9ff" stopOpacity="0.95" />
+                    <stop offset="55%" stopColor="#00e5ff" stopOpacity="0.35" />
+                    <stop offset="100%" stopColor="#00e5ff" stopOpacity="0" />
+                  </radialGradient>
+                </defs>
+                {/* Comet trail: newest segments brightest and widest, fading out behind the ball */}
+                {showCvTrail && ballOnScreen && recentTrail.slice(1).map((point, i) => {
+                  const prev = recentTrail[i];
+                  const k = (i + 1) / recentTrail.length;
+                  return <line key={point.t} x1={prev.pixel_x} y1={prev.pixel_y} x2={point.pixel_x} y2={point.pixel_y}
+                    stroke="#00e5ff" strokeOpacity={0.15 + 0.75 * k} strokeWidth={1 + 4 * k} strokeLinecap="round"
+                    vectorEffect="non-scaling-stroke" />;
+                })}
+                {showCvOverlay && ballOnScreen && (
+                  <g transform={`translate(${currentTrackPoint.pixel_x}, ${currentTrackPoint.pixel_y})`} style={{ pointerEvents: 'none' }}>
+                    <circle r="18" fill="url(#ballGlow)" />
+                    <circle r="11" fill="none" stroke={currentTrackPoint.is_predicted ? '#fbbf24' : '#e0fbff'} strokeWidth="1.5"
+                      strokeOpacity="0.9" vectorEffect="non-scaling-stroke"
+                      strokeDasharray={currentTrackPoint.is_predicted ? '3 3' : undefined} />
+                    <circle r="2.5" fill="#ffffff" />
                   </g>
                 )}
               </svg>
@@ -834,6 +885,7 @@ export default function DRSReview({
 
             <Box className="video-status" role="status" sx={{
               position: 'absolute',
+              top: 'auto',
               bottom: 8,
               left: 8,
               right: 8,
@@ -872,10 +924,11 @@ export default function DRSReview({
         {(viewMode === '3d' || viewMode === 'split') && (
           <Box className="scene-panel" sx={{
             flex: 1.3,
-            height: { xs: 420, lg: 'auto' },
-            minHeight: { xs: 280, md: 'auto' },
+            height: { xs: 460, lg: 'auto' },
+            minHeight: { xs: 420, lg: 0 },
             position: 'relative',
-            bgcolor: '#141920'
+            overflow: 'hidden',
+            bgcolor: 'var(--bg-deep)'
           }}>
             <HawkEyeViewer
               trajectoryData={activeTrajectory}
@@ -889,6 +942,17 @@ export default function DRSReview({
               onOpenFlowHUD={() => setFlowHUDOpen(true)}
               onOpenReportCard={() => setReportCardOpen(true)}
             />
+
+            {isVideoMode && activeTrajectory?.reconstruction_method === '2d_track_only' && (
+              <Box sx={{ position: 'absolute', left: '50%', top: '42%', transform: 'translate(-50%, -50%)', zIndex: 11,
+                bgcolor: 'rgba(10, 22, 38, 0.9)', border: '1px solid rgba(245,158,11,0.5)', borderRadius: 2, p: 2, maxWidth: 380, textAlign: 'center' }}>
+                <Typography variant="body2" sx={{ color: '#fbbf24', fontWeight: 700 }}>3D flight not reconstructable</Typography>
+                <Typography variant="caption" sx={{ color: '#cbd5e1' }}>
+                  The ball was tracked in the video, but the camera could not be solved automatically (stumps or pitch
+                  edges not clear enough). Open “Correct pitch landmarks” and pick the four pitch corners to reconstruct the 3D flight.
+                </Typography>
+              </Box>
+            )}
 
             {/* In-Viewer Television Delivery telemetry Overlay */}
             {showBroadcastHUD && (
@@ -973,12 +1037,12 @@ export default function DRSReview({
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.3 }}>
                         <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.68rem' }}>LBW Impact Meter</Typography>
                         <Typography variant="caption" sx={{ fontWeight: 800, color: lbwColor, fontSize: '0.72rem' }}>
-                          {lbwProbability}% Hitting
+                          {lbwProbability != null ? `${lbwProbability}% Hitting` : 'Unavailable'}
                         </Typography>
                       </Box>
                       <Box sx={{ width: '100%', height: 6, bgcolor: 'rgba(255,255,255,0.1)', borderRadius: 3, overflow: 'hidden' }}>
                         <Box sx={{
-                          width: `${lbwProbability}%`,
+                          width: `${lbwProbability ?? 0}%`,
                           height: '100%',
                           bgcolor: lbwColor,
                           boxShadow: `0 0 8px ${lbwColor}`,
@@ -995,49 +1059,162 @@ export default function DRSReview({
 
         {/* Broadcast DRS Decision & Telemetry Sidebar */}
         <Box component="aside" aria-label="Delivery evidence" className="review-inspector" sx={{
-          width: { xs: '100%', lg: 300 },
+          width: '100%',
           flexShrink: 0,
-          bgcolor: '#181d25',
-          borderLeft: { xs: 'none', lg: '1px solid rgba(255,255,255,0.1)' },
-          borderTop: { xs: '1px solid rgba(255,255,255,0.1)', lg: 'none' },
+          bgcolor: 'var(--surface)',
+          borderLeft: { xs: 'none', lg: '1px solid var(--line)' },
+          borderTop: { xs: '1px solid var(--line)', lg: 'none' },
           p: 2,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
           overflowY: 'auto'
         }}>
-          {/* Header Card */}
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <Gavel sx={{ color: '#8ab4ff', fontSize: 24 }} />
-            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-              Review evidence
-            </Typography>
-          </Box>
+          {/* Inspector heading */}
+          <div className="inspector-head">
+            <Gavel sx={{ color: 'var(--accent)', fontSize: 20 }} />
+            <h2 className="inspector-title">Hawk-Eye review</h2>
+            <span className={`pill ${isSimulation ? 'pill-violet' : 'pill-accent'}`}>{isSimulation ? 'Simulation' : 'Tracked footage'}</span>
+          </div>
 
           {/* Loading state for uploaded video trajectory */}
           {isVideoMode && trajectoryLoading && (
-            <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
-              <CircularProgress size={16} sx={{ color: '#38bdf8' }} />
-              <Typography variant="body2" sx={{ color: '#94a3b8' }}>
+            <div className="inspector-card is-centered" role="status">
+              <CircularProgress size={16} sx={{ color: 'var(--accent)' }} />
+              <Typography variant="body2" sx={{ color: 'var(--muted)' }}>
                 Loading trajectory analysis…
               </Typography>
-            </Paper>
+            </div>
           )}
 
           {/* Error state */}
           {isVideoMode && trajectoryError && !trajectoryLoading && (
-            <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2 }}>
-              <Typography variant="body2" sx={{ color: trajectoryError === 'not_processed' ? '#fbbf24' : '#f87171' }}>
+            <div className="inspector-card is-centered is-stacked">
+              <Typography variant="body2" sx={{ color: trajectoryError === 'not_processed' ? 'var(--warn)' : 'var(--bad)' }}>
                 {trajectoryError === 'not_processed'
                   ? 'Analysis is not ready. Return to your deliveries to check processing or retry.'
                   : 'Analysis could not be loaded. Return to your deliveries and try again.'}
               </Typography>
-              <Button onClick={onBack} sx={{ mt: 1 }}>Back to deliveries</Button>
-            </Paper>
+              <Button onClick={onBack} size="small">Back to deliveries</Button>
+            </div>
           )}
 
+          {/* Automated Delivery Classification & Umpiring Card */}
+          {activeTrajectory && (
+            <section className="inspector-card" aria-labelledby="kinematics-title">
+              <div className="card-head">
+                <h3 id="kinematics-title" className="card-title">Delivery Kinematics & Umpiring</h3>
+                <span className={`pill ${activeTrajectory.is_no_ball || activeTrajectory.is_wide ? 'pill-bad' : 'pill-good'}`}>
+                  {activeTrajectory.is_no_ball ? 'NO BALL' : activeTrajectory.is_wide ? 'WIDE' : 'LEGAL BALL'}
+                </span>
+              </div>
+
+              <div className="card-lead">
+                {activeTrajectory.delivery_name || (lengthZone ? `${lengthZone} Delivery` : 'Delivery')}
+              </div>
+
+              {(activeTrajectory.no_ball_reason || activeTrajectory.wide_reason) && (
+                <Alert severity="warning" sx={{ py: 0.2, px: 1, fontSize: '0.75rem', bgcolor: 'rgba(245,158,11,0.12)', color: 'var(--warn)' }}>
+                  {activeTrajectory.no_ball_reason || activeTrajectory.wide_reason}
+                </Alert>
+              )}
+
+              <Box className="stat-grid">
+                {[
+                  { label: 'Release speed', value: releaseSpeed != null ? `${releaseSpeed} km/h` : '—', tone: 'accent' },
+                  { label: 'Length', value: lengthZone || '—', tone: 'good' },
+                  { label: 'Pitched', value: activeTrajectory.bounce_point?.y != null ? `${(10.06 - activeTrajectory.bounce_point.y).toFixed(2)} m from stumps` : '—' },
+                  { label: 'After bounce', value: bounceSpeed != null ? `${bounceSpeed} km/h` : '—' },
+                ].map(stat => (
+                  <Box key={stat.label} className={`stat-tile ${stat.tone || ''}`}>
+                    <span className="stat-label">{stat.label}</span>
+                    <span className="stat-value">{stat.value}</span>
+                  </Box>
+                ))}
+              </Box>
+            </section>
+          )}
+
+          {/* SWING_ANALYSIS_SLOT moved below the DRS card so the live verdict stays above the fold */}
+
+          {/* Official DRS Evaluation Card (Only when verified event evidence exists) */}
+          {!trajectoryLoading && (
+            <>
+              {drs ? (
+                <section className="inspector-card drs-card" aria-labelledby="drs-title">
+                  {/* Card Header: Title & Predicted Trajectory Badge */}
+                  <div className="card-head">
+                    <div className="card-title-row">
+                      <Timeline sx={{ color: 'var(--accent)', fontSize: 18 }} />
+                      <h3 id="drs-title" className="card-title">Hawk-Eye Predicted Trajectory</h3>
+                    </div>
+                    <span className="pill pill-accent">{drs.isPredicted ? 'HAWK-EYE PREDICTED' : 'OFFICIAL DRS'}</span>
+                  </div>
+
+                  <ol className="verdict-list" aria-live="polite">
+                    {[
+                      { key: 'pitching', label: 'Pitching', revealed: drsReveal.pitching, pending: 'TRACKING…', text: drs.pitching, tone: verdictTone('pitching', drs.pitching) },
+                      { key: 'impact', label: 'Impact', revealed: drsReveal.impact, pending: 'TRACKING…', text: drs.impact, tone: verdictTone('impact', drs.impact) },
+                      { key: 'wickets', label: 'Wickets', revealed: drsReveal.wickets, pending: 'PROJECTING…',
+                        text: drs.hit_stump ? `${drs.wickets} (${drs.hit_stump})` : drs.wickets, tone: verdictTone('wickets', drs.wickets) },
+                    ].map((row, index) => (
+                      <li key={row.key} className={`verdict-row ${row.revealed ? 'is-revealed' : 'is-pending'}`}>
+                        <span className="verdict-step" aria-hidden="true">{index + 1}</span>
+                        <span className="verdict-label">{row.label}</span>
+                        <span className={`verdict-chip ${row.revealed ? `tone-${row.tone}` : 'tone-pending'}`}>
+                          {row.revealed ? row.text : row.pending}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+
+                  {/* Final Big Decision Banner */}
+                  {!drsReveal.decision ? (
+                    <div className="decision-banner tone-pending">
+                      <span className="decision-text">DECISION PENDING</span>
+                      <span className="decision-note">Play the delivery through to the stumps</span>
+                    </div>
+                  ) : (
+                    <div className={`decision-banner tone-${decisionTone(drs.decision)}`} role="status">
+                      <span className="decision-text">
+                        {drs.decision.includes('LINE NOT MEASURED') ? 'NO VERDICT' : drs.decision.includes('NOT OUT') ? 'NOT OUT' : drs.decision.includes('UMPIRE') ? "UMPIRE'S CALL" : 'OUT'}
+                      </span>
+                      {drs.decision.includes('(') && (
+                        <span className="decision-note">{drs.decision}</span>
+                      )}
+                      {activeTrajectory?.drs_evaluation?.height_at_stumps_m != null && (
+                        <span className="decision-note">
+                          Ball height at stumps: {Math.round(activeTrajectory.drs_evaluation.height_at_stumps_m * 100)} cm (stumps 71 cm)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {activeTrajectory?.drs_evaluation?.line_observable === false && activeTrajectory.drs_evaluation.note && (
+                    <Typography variant="caption" sx={{ color: 'var(--muted)', fontSize: '0.7rem' }}>
+                      {activeTrajectory.drs_evaluation.note}
+                    </Typography>
+                  )}
+                </section>
+              ) : (
+                !trajectoryError && (
+                  <div className="inspector-card is-centered">
+                    <Typography variant="body2" sx={{ color: 'var(--muted)', fontSize: '0.8rem' }}>
+                      {isVideoMode
+                        ? 'DRS LBW decision unavailable: uncalibrated single-camera footage with no verified pad impact event.'
+                        : 'Pick a delivery preset above to view DRS evaluation.'}
+                    </Typography>
+                  </div>
+                )
+              )}
+            </>
+          )}
+
+          {/* Swing calculator & delivery classifier (measured air swing, seam deviation, pace, type) */}
+          {activeTrajectory && <SwingAnalysisCard trajectory={activeTrajectory} />}
+
+          {/* Evidence, timing & calibration (fine print after the verdict) */}
+          <Box className="evidence-block">
           {isVideoMode && activeTrajectory && <Typography variant="body2" color="text.secondary">
-            {activeTrajectory.ball_detected ? 'Approximate 3D reconstruction. Review the original footage for evidence.' : 'No ball detected. The original video is still available; try a clearer, fixed-camera clip.'}
+            {!activeTrajectory.ball_detected ? 'No ball detected. The original video is still available; try a clearer, fixed-camera clip.'
+              : activeTrajectory.reconstruction_method === '2d_track_only' ? 'Ball tracked in 2D only: the camera could not be solved. Use “Correct pitch landmarks” to click the four pitch corners and reconstruct the 3D flight.'
+              : 'Approximate 3D reconstruction. Review the original footage for evidence.'}
           </Typography>}
           {isVideoMode && preparedPoints.length > 0 && <Button variant="outlined" onClick={() => handleSeek(null, preparedPoints[0].t)}>
             Jump to first tracked frame ({preparedPoints[0].t.toFixed(2)}s)
@@ -1045,228 +1222,20 @@ export default function DRSReview({
           {isVideoMode && activeTrajectory && <>
             <Typography variant="caption" color="text.secondary">
               Timing: {activeTrajectory.timing_source === 'decoder_pts' ? 'decoder presentation timestamps' : 'approximate / unverified'}.
-              {' '}Calibration: {activeTrajectory.calibration_status === 'manual_pitch_plane' ? 'manual pitch plane; height unverified' : 'unverified'}.
+              {' '}Calibration: {activeTrajectory.calibration_status === 'auto_camera' ? `camera solved automatically from ${activeTrajectory.debug_info?.camera_source || 'pitch features'}; physics-fitted flight`
+                : activeTrajectory.calibration_status === 'manual_landmarks' ? 'camera solved from your pitch landmarks; physics-fitted flight'
+                : activeTrajectory.calibration_status === 'stump_scaled' ? 'scaled from both sets of stumps; gravity-fitted flight'
+                : activeTrajectory.calibration_status === 'manual_pitch_plane' ? 'manual pitch plane; height unverified' : 'unverified'}.
             </Typography>
             <PitchCalibration key={video.id} videoId={video.id} trajectory={activeTrajectory} onApply={setActiveTrajectory} pickedPoint={pickedPoint}
+              defaultOpen={activeTrajectory.reconstruction_method === '2d_track_only'}
               onPick={(index, label) => { videoRef.current?.pause(); setViewMode('video'); setPickingCorner({ index, label }); videoContainerRef.current?.scrollIntoView?.({ block: 'center' }); }} />
           </>}
-          {/* Automated Delivery Classification & Umpiring Card */}
-          {activeTrajectory && (
-            <Paper sx={{
-              p: 2,
-              bgcolor: '#1a2230',
-              borderRadius: 2,
-              border: '1px solid rgba(255,255,255,0.15)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 1.2
-            }}>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', letterSpacing: 0.8, textTransform: 'uppercase' }}>
-                  Delivery Kinematics & Umpiring
-                </Typography>
-                <Chip
-                  label={activeTrajectory.is_no_ball ? 'NO BALL' : activeTrajectory.is_wide ? 'WIDE' : 'LEGAL BALL'}
-                  size="small"
-                  sx={{
-                    bgcolor: activeTrajectory.is_no_ball || activeTrajectory.is_wide ? 'rgba(239,68,68,0.2)' : 'rgba(34,197,94,0.2)',
-                    color: activeTrajectory.is_no_ball || activeTrajectory.is_wide ? '#f87171' : '#4ade80',
-                    border: `1px solid ${activeTrajectory.is_no_ball || activeTrajectory.is_wide ? '#ef4444' : '#22c55e'}`,
-                    fontWeight: 800,
-                    fontSize: '0.65rem'
-                  }}
-                />
-              </Box>
+          </Box>
 
-              <Typography variant="body1" sx={{ fontWeight: 700, color: 'white' }}>
-                {activeTrajectory.delivery_name || `${activeTrajectory.length_zone || 'Good Length'} Delivery`}
-              </Typography>
-
-              {(activeTrajectory.no_ball_reason || activeTrajectory.wide_reason) && (
-                <Alert severity="warning" sx={{ py: 0.2, px: 1, fontSize: '0.75rem', bgcolor: 'rgba(245,158,11,0.15)', color: '#fbbf24' }}>
-                  {activeTrajectory.no_ball_reason || activeTrajectory.wide_reason}
-                </Alert>
-              )}
-
-              <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1, pt: 0.5 }}>
-                <Box sx={{ p: 1, bgcolor: '#111822', borderRadius: 1.5, border: '1px solid rgba(255,255,255,0.06)' }}>
-                  <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', fontSize: '0.68rem' }}>Release Speed</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 800, color: '#38bdf8' }}>
-                    {activeTrajectory.release_speed_kmh ? `${activeTrajectory.release_speed_kmh} km/h` : '138 km/h'}
-                  </Typography>
-                </Box>
-                <Box sx={{ p: 1, bgcolor: '#111822', borderRadius: 1.5, border: '1px solid rgba(255,255,255,0.06)' }}>
-                  <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', fontSize: '0.68rem' }}>Length Zone</Typography>
-                  <Typography variant="body2" sx={{ fontWeight: 800, color: '#4ade80' }}>
-                    {activeTrajectory.length_zone || 'Good Length'}
-                  </Typography>
-                </Box>
-              </Box>
-            </Paper>
-          )}
-
-          {/* Official DRS Evaluation Card (Only when verified event evidence exists) */}
-          {!trajectoryLoading && (
-            <>
-              {drs ? (
-                <Paper sx={{
-                  p: 2,
-                  bgcolor: '#202733',
-                  borderRadius: 2,
-                  border: '1px solid rgba(56, 189, 248, 0.35)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 1.5,
-                  boxShadow: '0 4px 20px rgba(0,0,0,0.4)'
-                }}>
-                  {/* Card Header: Title & Predicted Trajectory Badge */}
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.8 }}>
-                      <Timeline sx={{ color: '#38bdf8', fontSize: 18 }} />
-                      <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', letterSpacing: 0.8, textTransform: 'uppercase' }}>
-                        Hawk-Eye Predicted Trajectory
-                      </Typography>
-                    </Box>
-                    <Chip
-                      label={drs.isPredicted ? 'HAWK-EYE PREDICTED' : 'OFFICIAL DRS'}
-                      size="small"
-                      sx={{
-                        bgcolor: 'rgba(56, 189, 248, 0.15)',
-                        color: '#38bdf8',
-                        border: '1px solid rgba(56, 189, 248, 0.4)',
-                        fontWeight: 700,
-                        fontSize: '0.62rem',
-                        height: 20
-                      }}
-                    />
-                  </Box>
-
-                  {/* Pitching */}
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                      Pitching
-                    </Typography>
-                    <Chip
-                      label={drs.pitching}
-                      size="small"
-                      sx={{
-                        bgcolor: drs.pitching === 'IN LINE' ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)',
-                        color: drs.pitching === 'IN LINE' ? '#4ade80' : '#f87171',
-                        border: `1px solid ${drs.pitching === 'IN LINE' ? '#22c55e' : '#ef4444'}`,
-                        fontWeight: 700,
-                        fontSize: '0.72rem'
-                      }}
-                    />
-                  </Box>
-
-                  {/* Impact */}
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                      Impact
-                    </Typography>
-                    <Chip
-                      label={drs.impact}
-                      size="small"
-                      sx={{
-                        bgcolor: drs.impact === 'IN LINE' || drs.impact.includes('Predicted')
-                          ? 'rgba(34,197,94,0.2)'
-                          : 'rgba(239,68,68,0.2)',
-                        color: drs.impact === 'IN LINE' || drs.impact.includes('Predicted')
-                          ? '#4ade80'
-                          : '#f87171',
-                        border: `1px solid ${drs.impact === 'IN LINE' || drs.impact.includes('Predicted') ? '#22c55e' : '#ef4444'}`,
-                        fontWeight: 700,
-                        fontSize: '0.72rem'
-                      }}
-                    />
-                  </Box>
-
-                  {/* Wickets */}
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                      Wickets
-                    </Typography>
-                    <Chip
-                      label={drs.hit_stump ? `${drs.wickets} (${drs.hit_stump})` : drs.wickets}
-                      size="small"
-                      sx={{
-                        bgcolor: drs.wickets === 'HITTING'
-                          ? 'rgba(239,68,68,0.2)'
-                          : drs.wickets === "UMPIRE'S CALL"
-                          ? 'rgba(245,158,11,0.2)'
-                          : 'rgba(34,197,94,0.2)',
-                        color: drs.wickets === 'HITTING'
-                          ? '#f87171'
-                          : drs.wickets === "UMPIRE'S CALL"
-                          ? '#fbbf24'
-                          : '#4ade80',
-                        border: `1px solid ${
-                          drs.wickets === 'HITTING'
-                            ? '#ef4444'
-                            : drs.wickets === "UMPIRE'S CALL"
-                            ? '#f59e0b'
-                            : '#22c55e'
-                        }`,
-                        fontWeight: 700,
-                        fontSize: '0.72rem'
-                      }}
-                    />
-                  </Box>
-
-                  <Divider sx={{ borderColor: 'rgba(255,255,255,0.1)', my: 0.5 }} />
-
-                  {/* Final Big Decision Banner */}
-                  <Box sx={{
-                    textAlign: 'center',
-                    py: 1.2,
-                    borderRadius: 1.5,
-                    bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                      ? '#dc2626'
-                      : drs.decision.includes('UMPIRE')
-                      ? '#f59e0b'
-                      : '#16a34a',
-                    boxShadow: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                      ? '0 0 16px rgba(220, 38, 38, 0.4)'
-                      : drs.decision.includes('UMPIRE')
-                      ? '0 0 16px rgba(245, 158, 11, 0.4)'
-                      : '0 0 16px rgba(22, 163, 74, 0.4)'
-                  }}>
-                    <Typography variant="h6" sx={{ fontWeight: 800, letterSpacing: 1, color: '#ffffff', textTransform: 'uppercase' }}>
-                      {drs.decision.includes('NOT OUT') ? 'NOT OUT' : drs.decision.includes("UMPIRE") ? "UMPIRE'S CALL" : 'OUT'}
-                    </Typography>
-                    {drs.decision.includes('(') && (
-                      <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', fontSize: '0.7rem', display: 'block', mt: 0.2 }}>
-                        {drs.decision}
-                      </Typography>
-                    )}
-                  </Box>
-                </Paper>
-              ) : (
-                !trajectoryError && (
-                  <Paper sx={{ p: 2, bgcolor: '#202733', textAlign: 'center', borderRadius: 2 }}>
-                    <Typography variant="body2" sx={{ color: '#94a3b8', fontSize: '0.8rem' }}>
-                      {isVideoMode
-                        ? 'DRS LBW decision unavailable: uncalibrated single-camera footage with no verified pad impact event.'
-                        : 'Pick a delivery preset above to view DRS evaluation.'}
-                    </Typography>
-                  </Paper>
-                )
-              )}
-            </>
-          )}
-
-          <details className="inspector-section"><summary>Measurements</summary>
+          <details className="inspector-details"><summary>Measurements</summary>
           {/* Delivery measurements */}
-          <Paper sx={{
-            p: 2,
-            bgcolor: '#202733',
-            borderRadius: 2,
-            border: '1px solid rgba(56, 189, 248, 0.25)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 1.6,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.4)'
-          }}>
+          <div className="inspector-card details-card">
             {/* Header with TV Live Badge */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <Speed sx={{ color: '#38bdf8', fontSize: 20 }} />
@@ -1289,7 +1258,7 @@ export default function DRSReview({
             </Box>
 
             {/* 1. Release Speed Gauge & Bounce Speed */}
-            {isVideoMode && activeTrajectory?.release_speed_kmh == null ? (
+            {releaseSpeed == null ? (
               <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.6 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                   <Typography variant="caption" sx={{ color: '#94a3b8', fontWeight: 600 }}>Metric Speed</Typography>
@@ -1456,11 +1425,11 @@ export default function DRSReview({
                 </Typography>
               )}
             </Box>
-          </Paper>
+          </div>
 
           </details>
           {/* Save review notes Action */}
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Box className="inspector-actions">
             <Button
               variant="contained"
               startIcon={<Gavel />}
@@ -1472,37 +1441,21 @@ export default function DRSReview({
                 else setReviewOutcome('');
                 setReviewDialogOpen(true);
               }}
-              sx={{
-                bgcolor: '#8ab4ff',
-                color: 'primary.contrastText',
-                fontWeight: 700,
-                fontSize: '0.85rem',
-                py: 1.1,
-                borderRadius: 2,
-                boxShadow: '0 4px 12px rgba(230,57,70,0.3)',
-                '&:hover': { bgcolor: '#a8c7ff' }
-              }}
+              fullWidth
+              sx={{ fontWeight: 700, fontSize: '0.85rem', py: 1.1 }}
             >
               Save reviewer assessment
             </Button>
 
             {!video && <Typography variant="caption" color="text.secondary">Upload a delivery after signing in to save reviewer notes.</Typography>}
             {/* Broadcast Flow HUD & Match Certificate Shortcuts */}
-            <Box sx={{ display: 'flex', gap: 1 }}>
+            <Box className="button-pair">
               <Button
                 variant="outlined"
                 fullWidth
                 startIcon={<AccountTree sx={{ fontSize: 15 }} />}
                 onClick={() => setFlowHUDOpen(true)}
-                sx={{
-                  color: '#38bdf8',
-                  borderColor: 'rgba(56, 189, 248, 0.4)',
-                  fontSize: '0.74rem',
-                  fontWeight: 700,
-                  py: 0.8,
-                  borderRadius: 1.5,
-                  '&:hover': { borderColor: '#38bdf8', bgcolor: 'rgba(56, 189, 248, 0.1)' }
-                }}
+                sx={{ fontSize: '0.78rem' }}
               >
                 Decision Flow
               </Button>
@@ -1511,15 +1464,8 @@ export default function DRSReview({
                 fullWidth
                 startIcon={<Article sx={{ fontSize: 15 }} />}
                 onClick={() => setReportCardOpen(true)}
-                sx={{
-                  color: '#4ade80',
-                  borderColor: 'rgba(74, 222, 128, 0.4)',
-                  fontSize: '0.74rem',
-                  fontWeight: 700,
-                  py: 0.8,
-                  borderRadius: 1.5,
-                  '&:hover': { borderColor: '#4ade80', bgcolor: 'rgba(74, 222, 128, 0.1)' }
-                }}
+                color="success"
+                sx={{ fontSize: '0.78rem' }}
               >
                 Delivery report
               </Button>
@@ -1534,22 +1480,10 @@ export default function DRSReview({
             )}
           </Box>
 
-          <details className="review-export"><summary>Export data & capture view</summary>
+          <details className="inspector-details review-export"><summary>Export data & capture view</summary>
           {/* Trajectory Telemetry Export Section (Category E.2) */}
-          <Paper sx={{
-            p: 1.5,
-            bgcolor: '#202733',
-            borderRadius: 2,
-            border: '1px solid rgba(255,255,255,0.1)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 1
-          }}>
-            <Typography variant="caption" sx={{ fontWeight: 800, color: '#38bdf8', textTransform: 'uppercase', letterSpacing: 0.5, display: 'flex', alignItems: 'center', gap: 0.8 }}>
-              <Timeline sx={{ fontSize: 16 }} /> Export Telemetry &amp; 3D Data
-            </Typography>
-
-            <Box sx={{ display: 'flex', gap: 1 }}>
+          <div className="inspector-card details-card">
+            <Box className="button-pair">
               <Button
                 variant="outlined"
                 size="small"
@@ -1604,21 +1538,13 @@ export default function DRSReview({
             >
               Capture 3D View (PNG)
             </Button>
-          </Paper>
+          </div>
 
           </details>
           {/* Observable Computer Vision Diagnostics Panel */}
-          <details style={{ marginTop: 0 }}>
-            <summary style={{ color: '#adb8c7', fontSize: '12px', cursor: 'pointer', padding: '8px 0' }}>CV diagnostics</summary>
-          <Paper sx={{
-            p: 2,
-            bgcolor: '#202733',
-            borderRadius: 2,
-            border: '1px solid rgba(255,255,255,0.12)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 1.2
-          }}>
+          <details className="inspector-details">
+            <summary>CV diagnostics</summary>
+          <div className="inspector-card details-card">
             <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <Assessment sx={{ color: '#a78bfa', fontSize: 20 }} />
@@ -1736,13 +1662,13 @@ export default function DRSReview({
                 {isSimulation ? 'Physics simulation delivery — analytical aerodynamics model.' : 'No CV diagnostics available for this clip.'}
               </Typography>
             )}
-          </Paper>
+          </div>
           </details>
 
           {/* Interactive Instructions Card */}
-          <details style={{ marginTop: 'auto' }}>
-            <summary style={{ color: '#adb8c7', fontSize: '12px', cursor: 'pointer', padding: '8px 0' }}>Controls guide</summary>
-          <Box sx={{ p: 1.5, bgcolor: 'rgba(255,255,255,0.03)', borderRadius: 2 }}>
+          <details className="inspector-details controls-guide">
+            <summary>Controls guide</summary>
+          <Box className="inspector-card details-card">
             <Typography variant="caption" sx={{ color: '#94a3b8', display: 'block', mb: 0.5, fontWeight: 600 }}>
               Viewer controls
             </Typography>
@@ -1759,7 +1685,7 @@ export default function DRSReview({
       </Box>
 
       {/* Spoken AI Voice Commentary & Visual Closed-Captions Subtitle Strip */}
-      {showCommentary && <Box sx={{ px: { xs: 1.5, sm: 2.5 }, py: 0.8, bgcolor: '#141920', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+      {showCommentary && <Box sx={{ px: { xs: 1.5, sm: 2.5 }, py: 0.8, bgcolor: 'var(--bg-deep)', borderTop: '1px solid rgba(255,255,255,0.08)' }}>
         <DRSCommentary
           trajectoryData={activeTrajectory}
           currentTime={currentTime}
@@ -1772,14 +1698,14 @@ export default function DRSReview({
       {/* Bottom Timeline Controls */}
       <Paper className="review-playback" elevation={0} sx={{
         borderRadius: 0,
-        bgcolor: '#181d25',
-        px: 3,
-        py: 1.5,
-        borderTop: '1px solid rgba(255,255,255,0.1)'
+        bgcolor: 'var(--surface)',
+        px: { xs: 2, sm: 3 },
+        py: 1.25,
+        borderTop: '1px solid var(--line)'
       }}>
         {/* Timeline Slider */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
-          <Typography variant="caption" sx={{ color: '#94a3b8', minWidth: 60, fontFamily: 'monospace' }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 0.5 }}>
+          <Typography variant="caption" className="mono" sx={{ color: 'var(--muted)', minWidth: 60 }}>
             {formatTime(currentTime)}
           </Typography>
           <Slider
@@ -1792,13 +1718,13 @@ export default function DRSReview({
             onChange={handleSeek}
             onChangeCommitted={() => setIsSeeking(false)}
             sx={{
-              color: '#8ab4ff',
+              color: 'var(--accent)',
               '& .MuiSlider-thumb': { width: 14, height: 14 },
               '& .MuiSlider-track': { height: 4 },
-              '& .MuiSlider-rail': { height: 4, bgcolor: 'rgba(255,255,255,0.2)' }
+              '& .MuiSlider-rail': { height: 4, bgcolor: 'rgba(255,255,255,0.18)' }
             }}
           />
-          <Typography variant="caption" sx={{ color: '#94a3b8', minWidth: 60, fontFamily: 'monospace' }}>
+          <Typography variant="caption" className="mono" sx={{ color: 'var(--muted)', minWidth: 60, textAlign: 'right' }}>
             {formatTime(duration)}
           </Typography>
         </Box>
@@ -1806,7 +1732,7 @@ export default function DRSReview({
         {/* Playback & Speed Controls */}
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <IconButton onClick={restart} sx={{ color: 'white' }} aria-label="Restart">
+            <IconButton onClick={restart} sx={{ color: 'text.primary' }} aria-label="Restart">
               <Replay fontSize="small" />
             </IconButton>
             <IconButton
@@ -1820,11 +1746,13 @@ export default function DRSReview({
             <IconButton
               onClick={togglePlay}
               sx={{
-                color: '#172014',
-                bgcolor: '#8ab4ff',
-                '&:hover': { bgcolor: '#a8c7ff' },
-                width: 38,
-                height: 38
+                color: 'primary.contrastText',
+                bgcolor: 'var(--accent)',
+                boxShadow: '0 0 0 4px rgba(56,189,248,0.15)',
+                '&:hover': { bgcolor: 'var(--accent-strong)' },
+                width: 44,
+                height: 44,
+                mx: 0.5
               }}
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
@@ -1841,7 +1769,8 @@ export default function DRSReview({
           </Box>
 
           {/* Speed Buttons */}
-          <Box sx={{ display: 'flex', gap: 0.8 }}>
+          <Box sx={{ display: 'flex', gap: 0.75, alignItems: 'center' }} role="group" aria-label="Playback speed">
+            <Typography variant="caption" sx={{ color: 'var(--muted)', mr: 0.5, display: { xs: 'none', sm: 'inline' } }}>Speed</Typography>
             {PLAYBACK_RATES.map((rate) => (
               <Button
                 key={rate}
@@ -1855,9 +1784,9 @@ export default function DRSReview({
                   fontSize: '0.75rem',
                   color: playbackRate === rate ? 'primary.contrastText' : 'text.primary',
                   borderColor: 'divider',
-                  bgcolor: playbackRate === rate ? '#8ab4ff' : 'transparent',
+                  bgcolor: playbackRate === rate ? 'var(--accent)' : 'transparent',
                   '&:hover': {
-                    bgcolor: playbackRate === rate ? '#a8c7ff' : 'rgba(255,255,255,0.1)'
+                    bgcolor: playbackRate === rate ? 'var(--accent-strong)' : 'rgba(255,255,255,0.08)'
                   }
                 }}
               >
@@ -1874,16 +1803,16 @@ export default function DRSReview({
         onClose={() => setReviewDialogOpen(false)}
         PaperProps={{
           sx: {
-            bgcolor: '#202733',
-            color: 'white',
+            bgcolor: 'var(--card)',
+            color: 'text.primary',
             borderRadius: 3,
-            border: '1px solid rgba(255,255,255,0.15)',
-            minWidth: { xs: 300, sm: 420 },
+            border: '1px solid var(--line-strong)',
+            width: { xs: 'calc(100% - 32px)', sm: 440 },
             p: 1
           }
         }}
       >
-        <DialogTitle sx={{ fontWeight: 800, color: '#8ab4ff', display: 'flex', alignItems: 'center', gap: 1 }}>
+        <DialogTitle sx={{ fontWeight: 800, color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 1 }}>
           <Gavel /> Save reviewer assessment
         </DialogTitle>
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 1 }}>
@@ -1938,7 +1867,7 @@ export default function DRSReview({
             variant="contained"
             onClick={handleSaveReview}
             disabled={savingReview || !reviewOutcome}
-            sx={{ bgcolor: '#8ab4ff', fontWeight: 700, '&:hover': { bgcolor: '#a8c7ff' } }}
+            sx={{ fontWeight: 700 }}
           >
             {savingReview ? 'Saving...' : 'Save Decision'}
           </Button>
@@ -1964,7 +1893,7 @@ export default function DRSReview({
         onClose={() => setFeedbackMsg('')}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
       >
-        <Alert severity="info" onClose={() => setFeedbackMsg('')} sx={{ width: '100%', fontWeight: 600, bgcolor: '#202733', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.4)' }}>
+        <Alert severity="info" onClose={() => setFeedbackMsg('')} sx={{ width: '100%', fontWeight: 600, bgcolor: 'var(--card)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.4)' }}>
           {feedbackMsg}
         </Alert>
       </Snackbar>

@@ -17,7 +17,7 @@ class DecisionModel(BaseModel):
     type: str
     outcome: str
     timestamp: float
-    confidence: float
+    confidence: Optional[float] = None
 
 class CreateReviewRequest(BaseModel):
     video_id: str
@@ -31,15 +31,13 @@ async def list_reviews(
     db: Session = Depends(get_db)
 ):
     """List reviews, optionally filtered by video_id."""
-    review_service = ReviewService(db)
+    # Reviews are private: anonymous callers see nothing and users only see their own.
+    if not current_user:
+        return []
+    query = db.query(ReviewSession).filter(ReviewSession.user_id == current_user.id)
     if video_id:
-        reviews = review_service.get_video_reviews(video_id)
-    else:
-        user_id = current_user.id if current_user else None
-        query = db.query(ReviewSession)
-        if user_id:
-            query = query.filter(ReviewSession.user_id == user_id)
-        reviews = query.all()
+        query = query.filter(ReviewSession.video_id == video_id)
+    reviews = query.all()
 
     return [
         {

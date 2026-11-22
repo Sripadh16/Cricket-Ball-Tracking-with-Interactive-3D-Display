@@ -8,30 +8,62 @@ const DRSReview = lazy(() => import('./pages/DRSReview'));
 const theme = createTheme({
   palette: {
     mode: 'dark',
-    primary: { main: '#8ab4ff', contrastText: '#101318' },
-    secondary: { main: '#a8bba7' },
-    background: { default: '#101318', paper: '#181d25' },
-    text: { primary: '#f2f5f9', secondary: '#adb8c7' },
-    divider: '#343e4b',
-    error: { main: '#e89583' },
-    warning: { main: '#dfbd83' },
-    success: { main: '#b5ce93' },
+    primary: { main: '#38bdf8', light: '#7dd3fc', dark: '#0ea5e9', contrastText: '#06111f' },
+    secondary: { main: '#a78bfa' },
+    background: { default: '#0a1220', paper: '#101b2d' },
+    text: { primary: '#eef4fb', secondary: '#93a4bd' },
+    divider: '#1f2d45',
+    error: { main: '#f87171' },
+    warning: { main: '#fbbf24' },
+    success: { main: '#4ade80' },
   },
   typography: {
-    fontFamily: "'Segoe UI', system-ui, sans-serif",
-    button: { textTransform: 'none', fontWeight: 600 },
-    h1: { fontWeight: 500 },
-    h2: { fontWeight: 500 },
+    fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
+    button: { textTransform: 'none', fontWeight: 600, letterSpacing: 0 },
+    h1: { fontWeight: 700 },
+    h2: { fontWeight: 650 },
+    h6: { fontWeight: 700 },
   },
-  shape: { borderRadius: 8 },
+  shape: { borderRadius: 10 },
   components: {
-    MuiButton: { defaultProps: { disableElevation: true }, styleOverrides: { root: { minHeight: 40, padding: '9px 18px', borderRadius: 6 }, sizeSmall: { minHeight: 32, padding: '5px 12px' } } },
+    MuiButton: {
+      defaultProps: { disableElevation: true },
+      styleOverrides: {
+        root: { minHeight: 40, padding: '8px 18px', borderRadius: 8 },
+        sizeSmall: { minHeight: 32, padding: '5px 12px' },
+        containedPrimary: { '&:hover': { backgroundColor: '#7dd3fc' } },
+        outlined: { borderColor: '#2b3d5c' },
+      },
+    },
     MuiPaper: { styleOverrides: { root: { backgroundImage: 'none' } } },
-    MuiOutlinedInput: { styleOverrides: { root: { fontSize: 14, borderRadius: 6 } } },
+    MuiDialog: { styleOverrides: { paper: { backgroundColor: '#12203a', border: '1px solid #2b3d5c', borderRadius: 14 } } },
+    MuiOutlinedInput: {
+      styleOverrides: {
+        root: { fontSize: 14, borderRadius: 8, backgroundColor: 'rgba(11,21,39,0.6)' },
+        notchedOutline: { borderColor: '#2b3d5c' },
+      },
+    },
     MuiTab: { styleOverrides: { root: { textTransform: 'none', fontSize: 13, minHeight: 46 } } },
-    MuiChip: { styleOverrides: { root: { borderRadius: 5, fontWeight: 500, fontSize: 11 } } },
-    MuiToggleButton: { styleOverrides: { root: { textTransform: 'none', fontSize: 13, minHeight: 44 } } },
-    MuiIconButton: { styleOverrides: { root: { minWidth: 44, minHeight: 44 } } },
+    MuiChip: { styleOverrides: { root: { borderRadius: 6, fontWeight: 600, fontSize: 11 } } },
+    MuiToggleButton: {
+      styleOverrides: {
+        root: {
+          textTransform: 'none', fontSize: 13, minHeight: 36, borderColor: '#2b3d5c',
+          '&.Mui-selected': { color: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.14)' },
+          '&.Mui-selected:hover': { backgroundColor: 'rgba(56,189,248,0.22)' },
+        },
+      },
+    },
+    MuiIconButton: { styleOverrides: { root: { minWidth: 40, minHeight: 40 } } },
+    MuiTooltip: {
+      defaultProps: { arrow: true },
+      styleOverrides: {
+        tooltip: { backgroundColor: '#162744', border: '1px solid #2b3d5c', color: '#eef4fb', fontSize: 12, fontWeight: 500, padding: '6px 10px' },
+        arrow: { color: '#162744' },
+      },
+    },
+    MuiAlert: { styleOverrides: { root: { borderRadius: 10 } } },
+    MuiSwitch: { styleOverrides: { root: { marginRight: 2 } } },
     MuiCssBaseline: { styleOverrides: { body: { fontVariantNumeric: 'tabular-nums' } } },
   },
 });
@@ -149,7 +181,7 @@ function App() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: '#101318'
+          background: 'var(--bg)'
         }}>
           <div className="loading-spinner" style={{ width: 48, height: 48, borderWidth: 4 }} />
         </div>

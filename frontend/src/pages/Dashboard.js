@@ -66,28 +66,43 @@ function VideoRecorder({ open, onClose, onRecorded }) {
   }, [open, startCamera, stopCamera]);
 
   const startRecording = () => {
-    if (!stream) return;
+    if (!stream || countdownIntervalRef.current) return;
 
-    setCountdown(3);
+    let remaining = 3;
+    setCountdown(remaining);
     countdownIntervalRef.current = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(countdownIntervalRef.current);
-          countdownIntervalRef.current = null;
-          beginRecording();
-          return 0;
-        }
-        return prev - 1;
-      });
+      remaining -= 1;
+      setCountdown(Math.max(0, remaining));
+      if (remaining <= 0) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+        beginRecording();
+      }
     }, 1000);
   };
 
   const beginRecording = () => {
-    if (!stream) return;
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    // stopCamera() stops the stream tracks and clears the countdown interval/state.
+    const failRecording = (message) => {
+      mediaRecorderRef.current = null;
+      stopCamera();
+      setRecording(false);
+      setCameraError(message);
+    };
+    if (!stream || typeof MediaRecorder === 'undefined') {
+      failRecording('Recording is not supported in this browser.');
+      return;
+    }
+    const mimeType = MediaRecorder.isTypeSupported?.('video/webm;codecs=vp9')
       ? 'video/webm;codecs=vp9'
       : 'video/webm';
-    const mediaRecorder = new MediaRecorder(stream, { mimeType });
+    let mediaRecorder;
+    try {
+      mediaRecorder = new MediaRecorder(stream, { mimeType });
+    } catch (err) {
+      failRecording(`Recording could not start: ${err.message || 'unsupported video format'}.`);
+      return;
+    }
     mediaRecorderRef.current = mediaRecorder;
     const recordedChunks = [];
 
@@ -101,7 +116,12 @@ function VideoRecorder({ open, onClose, onRecorded }) {
       handleClose();
     };
 
-    mediaRecorder.start();
+    try {
+      mediaRecorder.start();
+    } catch (err) {
+      failRecording(`Recording could not start: ${err.message || 'recorder error'}.`);
+      return;
+    }
     setRecording(true);
   };
 
@@ -199,8 +219,8 @@ function VideoRecorder({ open, onClose, onRecorded }) {
               position: 'absolute',
               top: 16,
               right: 16,
-              bgcolor: '#e63946',
-              color: 'white',
+              bgcolor: 'error.main',
+              color: '#1c0606',
               fontWeight: 700,
               animation: 'pulse 1s infinite'
             }}
@@ -328,7 +348,6 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             variant="outlined"
             onClick={onLaunchDemo}
             startIcon={<SportsCricket fontSize="small" />}
-            sx={{ borderColor: '#8ab4ff', color: '#8ab4ff' }}
           >
             Simulation (3D Hawk-Eye)
           </Button>
@@ -344,8 +363,8 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
       </nav>
       <main id="main-content" className="studio-main" tabIndex={-1}>
         <header className="page-intro">
-          <div><h1>Cricket Ball Tracking & DRS Lab</h1><p>Run 3D Hawk-Eye simulations or upload a match clip for automated ball tracking and LBW analysis.</p></div>
-          <span className="eyebrow nav-context" style={{ color: '#adb8c7' }}>Computer vision / 3D visualization</span>
+          <div><span className="eyebrow">Hawk-Eye · Decision Review System</span><h1>Cricket Ball Tracking & DRS Lab</h1><p>Run 3D Hawk-Eye simulations or upload a match clip for automated ball tracking and LBW analysis.</p></div>
+          <span className="eyebrow nav-context" style={{ color: 'var(--muted)' }}>Computer vision / 3D visualisation</span>
         </header>
         <div className="workspace-grid">
           <section className={'upload-panel' + (dragging ? ' is-dragging' : '')} aria-labelledby="upload-heading"
@@ -353,7 +372,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             onDrop={e => { e.preventDefault(); setDragging(false); const file = e.dataTransfer.files[0]; if (file) uploadVideo(file); }}>
             <div className="upload-icon"><CloudUpload fontSize="small" /></div>
             <h2 id="upload-heading">Upload Video to Analyse</h2>
-            <p>Drop a cricket delivery video here, or click below to upload and analyse directly.<br />MP4, MOV, AVI, MKV, WebM · Up to {MAX_UPLOAD_SIZE_MB} MB</p>
+            <p>Drop a cricket delivery video here, or choose a file to upload and analyse it automatically.<br /><span className="upload-formats">MP4 · MOV · AVI · MKV · WebM — up to {MAX_UPLOAD_SIZE_MB} MB</span></p>
             <div className="upload-actions">
               <Button
                 variant="contained"
@@ -361,11 +380,11 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
                 onClick={() => fileInputRef.current.click()}
                 disabled={uploading}
                 startIcon={<CloudUpload />}
-                sx={{ px: 3, py: 1.2, fontWeight: 700 }}
+                sx={{ px: 3, fontWeight: 700 }}
               >
                 Upload Video to Analyse
               </Button>
-              <Button color="inherit" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
+              <Button variant="outlined" color="inherit" size="large" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
                 Record Clip
               </Button>
             </div>
@@ -376,6 +395,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             <PitchDiagram />
             <div className="simulation-copy">
               <div className="simulation-copy-text">
+                <span className="eyebrow" style={{ color: 'var(--accent-2)' }}>Physics demo</span>
                 <h2 id="simulation-heading">3D Hawk-Eye Simulation</h2>
                 <p>Interactive 3D physics demonstration with ball flight paths, pitch bounce, dynamic stumps, and LBW decisions.</p>
               </div>
@@ -384,7 +404,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
                 color="primary"
                 endIcon={<ArrowForward />}
                 onClick={onLaunchDemo}
-                sx={{ flexShrink: 0, px: 2.5, py: 1, fontWeight: 600 }}
+                sx={{ flexShrink: 0, px: 2.5, fontWeight: 600 }}
               >
                 Launch Simulation
               </Button>
@@ -395,11 +415,11 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
         {error && <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')} action={<Button size="small" color="inherit" onClick={() => loadVideos()}>Retry</Button>}>{error}</Alert>}
         <section aria-labelledby="library-heading">
           <div className="library-heading">
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: 14 }}><h2 id="library-heading">Your deliveries</h2><span className="muted mono" style={{ fontSize: 11 }}>{loading ? '—' : readyCount + ' ready / ' + videos.length + ' total'}</span></div>
-            <div className="library-tools"><TextField size="small" placeholder="Find a delivery" value={query} onChange={e => setQuery(e.target.value)} inputProps={{ 'aria-label': 'Search deliveries' }} InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} /><Tooltip title="Refresh deliveries"><IconButton onClick={() => loadVideos()} aria-label="Refresh deliveries" disabled={loading}><Refresh fontSize="small" /></IconButton></Tooltip></div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><h2 id="library-heading">Your deliveries</h2><span className="library-count">{loading ? '—' : readyCount + ' ready / ' + videos.length + ' total'}</span></div>
+            <div className="library-tools"><TextField size="small" placeholder="Find a delivery" value={query} onChange={e => setQuery(e.target.value)} inputProps={{ 'aria-label': 'Search deliveries' }} InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} /><Tooltip title="Refresh deliveries"><span><IconButton onClick={() => loadVideos()} aria-label="Refresh deliveries" disabled={loading}><Refresh fontSize="small" /></IconButton></span></Tooltip></div>
           </div>
           {loading ? <Box aria-label="Loading deliveries" role="status">{[0, 1, 2].map(i => <Skeleton key={i} variant="rounded" height={72} sx={{ mb: 1 }} />)}</Box> : visibleVideos.length === 0 ? (
-            <div className="empty-library"><VideoLibrary sx={{ color: '#879c77', fontSize: 30 }} /><h3>{query ? 'No matching deliveries.' : 'Your first delivery starts here.'}</h3><p>{query ? 'Try another filename or clear your search.' : 'Upload a clip to build your library, or take a look around the simulation lab first.'}</p><Button variant="outlined" onClick={() => query ? setQuery('') : fileInputRef.current.click()}>{query ? 'Clear search' : 'Choose your first clip'}</Button></div>
+            <div className="empty-library"><VideoLibrary sx={{ color: 'var(--accent)', fontSize: 30 }} /><h3>{query ? 'No matching deliveries.' : 'Your first delivery starts here.'}</h3><p>{query ? 'Try another filename or clear your search.' : 'Upload a clip to build your library, or take a look around the simulation lab first.'}</p><Button variant="outlined" onClick={() => query ? setQuery('') : fileInputRef.current.click()}>{query ? 'Clear search' : 'Choose your first clip'}</Button></div>
           ) : <div className="library-list">{visibleVideos.map(video => {
             const name = video.original_filename || video.filename;
             const busy = video.status === 'processing' || reprocessingId === video.id;
@@ -408,8 +428,8 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             return <article key={video.id} className="delivery-row">
               <div className="delivery-thumb" aria-hidden="true">{ready ? <video src={API_BASE_URL + '/videos/' + video.id + '/stream?token=' + encodeURIComponent(token || '')} preload="metadata" muted playsInline /> : busy ? <CircularProgress size={18} /> : <Videocam fontSize="small" />}</div>
               <div style={{ minWidth: 0 }}><button className="delivery-name" onClick={() => onVideoSelect(video)} disabled={uploading} title={name}>{name}</button><div className="delivery-meta">{formatSize(video.file_size)}{(video.created_at || video.upload_date) ? ' · ' + new Date(video.created_at || video.upload_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''}</div></div>
-              <div className="delivery-status status-label" style={{ color: busy ? '#dfbd83' : ready ? '#8ab4ff' : failed ? '#e89583' : '#adb8c7' }}><span className="status-dot" />{busy ? 'Analyzing' : ready ? (video.ball_detected === false ? 'No ball detected' : 'Ready to review') : failed ? 'Needs attention' : 'Uploaded'}</div>
-              <div className="delivery-actions" style={{ display: 'flex', justifyContent: 'flex-end' }}><Tooltip title="Reprocess clip"><span><IconButton aria-label={'Reprocess ' + name} disabled={busy} onClick={() => handleReprocess(video)}><Refresh fontSize="small" /></IconButton></span></Tooltip><Tooltip title="Delete clip"><span><IconButton aria-label={'Delete ' + name} disabled={busy} onClick={() => setDeleteTarget(video)}><Delete sx={{ fontSize: 18 }} /></IconButton></span></Tooltip>{<Tooltip title={ready ? 'Open analysis' : 'Open source video'}><IconButton aria-label={'Open analysis for ' + name} onClick={() => onVideoSelect(video)} sx={{ color: 'primary.main' }}><ArrowForward sx={{ fontSize: 18 }} /></IconButton></Tooltip>}</div>
+              <div className="delivery-status status-label" style={{ color: busy ? 'var(--warn)' : ready ? (video.ball_detected === false ? 'var(--warn)' : 'var(--good)') : failed ? 'var(--bad)' : 'var(--muted)' }}><span className="status-dot" /><span>{busy ? 'Analysing' : ready ? (video.ball_detected === false ? 'No ball detected' : 'Ready to review') : failed ? 'Needs attention' : 'Uploaded'}</span></div>
+              <div className="delivery-actions"><Tooltip title="Reprocess clip"><span><IconButton aria-label={'Reprocess ' + name} disabled={busy} onClick={() => handleReprocess(video)}><Refresh fontSize="small" /></IconButton></span></Tooltip><Tooltip title="Delete clip"><span><IconButton aria-label={'Delete ' + name} disabled={busy} onClick={() => setDeleteTarget(video)}><Delete sx={{ fontSize: 18 }} /></IconButton></span></Tooltip><Tooltip title={ready ? 'Open analysis' : 'Open source video'}><IconButton aria-label={'Open analysis for ' + name} onClick={() => onVideoSelect(video)} sx={{ color: 'primary.main' }}><ArrowForward sx={{ fontSize: 18 }} /></IconButton></Tooltip></div>
             </article>;
           })}</div>}
         </section>

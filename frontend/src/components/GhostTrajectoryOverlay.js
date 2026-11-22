@@ -774,6 +774,8 @@ export function GhostDivergencePill({
             <IconButton
               size="small"
               onClick={() => setExpanded(!expanded)}
+              aria-label={expanded ? 'Collapse ghost details' : 'Expand ghost details'}
+              aria-expanded={expanded}
               sx={{ color: '#c084fc', p: 0.3 }}
             >
               {expanded ? <ExpandLess sx={{ fontSize: 18 }} /> : <ExpandMore sx={{ fontSize: 18 }} />}
@@ -784,6 +786,7 @@ export function GhostDivergencePill({
               <IconButton
                 size="small"
                 onClick={onClearGhost}
+                aria-label="Remove ghost overlay"
                 sx={{ color: '#94a3b8', p: 0.3, '&:hover': { color: '#f87171' } }}
               >
                 ×

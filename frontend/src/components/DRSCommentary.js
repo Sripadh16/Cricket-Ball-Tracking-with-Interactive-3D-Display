@@ -320,6 +320,8 @@ export default function DRSCommentary({
           <Tooltip title={isMuted ? 'Unmute AI Commentary' : 'Mute Commentary'}>
             <IconButton
               size="small"
+              aria-label={isMuted ? 'Unmute commentary' : 'Mute commentary'}
+              aria-pressed={isMuted}
               onClick={() => {
                 if (!isMuted && window.speechSynthesis) window.speechSynthesis.cancel();
                 setIsMuted(!isMuted);
@@ -434,7 +436,8 @@ export default function DRSCommentary({
 
             {/* Test Voice / Speak Now Button */}
             <Tooltip title="Test voice dialogue for current delivery">
-              <IconButton
+              <span style={{ display: 'inline-flex' }}><IconButton
+                aria-label="Speak verdict for current delivery"
                 size="small"
                 onClick={handlePlayFullVerdict}
                 disabled={isMuted}
@@ -447,7 +450,7 @@ export default function DRSCommentary({
                 }}
               >
                 <Hearing sx={{ fontSize: 16 }} />
-              </IconButton>
+              </IconButton></span>
             </Tooltip>
           </Box>
         </Paper>

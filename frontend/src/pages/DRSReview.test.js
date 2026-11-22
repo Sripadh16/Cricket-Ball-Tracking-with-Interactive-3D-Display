@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import DRSReview from './DRSReview';
 
@@ -18,6 +18,13 @@ beforeEach(() => {
   window.scrollTo = jest.fn();
 });
 afterEach(() => localStorage.clear());
+
+function seekTo(container, time) {
+  const media = container.querySelector('video');
+  Object.defineProperty(media, 'duration', { configurable: true, value: 2 });
+  media.currentTime = time;
+  act(() => { fireEvent(media, new Event('seeked')); });
+}
 
 test('an upload with incomplete analysis remains usable without invented metrics or a default verdict', () => {
   render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={{ points: [], ball_detected: false, drs_evaluation: {} }} onBack={() => {}} />);
@@ -58,8 +65,12 @@ test('displays Hawk-Eye predictive trajectory card when drs_evaluation and extra
       hit_stump: 'Middle Stump'
     }
   };
-  render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
+  const { container } = render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
   expect(screen.getByText('Hawk-Eye Predicted Trajectory')).toBeInTheDocument();
+  // Verdicts are revealed in real time: nothing is decided before the ball reaches the stumps.
+  expect(screen.getByText('DECISION PENDING')).toBeInTheDocument();
+  expect(screen.queryByText('HITTING (Middle Stump)')).not.toBeInTheDocument();
+  seekTo(container, 1.0);
   expect(screen.getByText('Pitching')).toBeInTheDocument();
   expect(screen.getAllByText('IN LINE')).toHaveLength(2);
   expect(screen.getByText('Wickets')).toBeInTheDocument();
@@ -75,9 +86,10 @@ test('derives Hawk-Eye predicted path when extrapolated_points are present witho
     extrapolated_points: [{ t: 0.8, x: 0.02, y: 10.06, z: 0.50 }],
     stump_plane_target: { x: 0.02, y: 10.06, z: 0.50, hit_stump: 'Off Stump' }
   };
-  render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
+  const { container } = render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} trajectoryData={trajectoryData} onBack={() => {}} />);
   expect(screen.getByText('Hawk-Eye Predicted Trajectory')).toBeInTheDocument();
   expect(screen.getByText('HAWK-EYE PREDICTED')).toBeInTheDocument();
+  seekTo(container, 1.0);
   expect(screen.getByText('Predicted path to wickets')).toBeInTheDocument();
   expect(screen.getByText('HITTING (Off Stump)')).toBeInTheDocument();
   expect(screen.getByText('OUT')).toBeInTheDocument();

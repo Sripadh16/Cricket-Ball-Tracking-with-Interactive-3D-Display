@@ -36,6 +36,8 @@ export default function DecisionFlowHUD({
 
   const finalDecisionText = !hasVerdict
     ? 'UNAVAILABLE'
+    : rawDecision.includes('LINE NOT MEASURED')
+    ? 'NO VERDICT'
     : isOut
     ? 'OUT'
     : isUmpiresCall

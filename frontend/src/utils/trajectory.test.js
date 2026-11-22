@@ -8,11 +8,16 @@ test('prepares immutable, finite, ordered samples and resolves duplicate event t
   expect(input).toHaveLength(4);
 });
 
-test('sampling respects coverage, gaps, exact events, pixel zero, and unknown metrics', () => {
+test('sampling anchors outside coverage, bridges gaps, keeps exact events, pixel zero, and unknown metrics', () => {
   const points = [point(2), point(2.1, 10), point(4)];
-  expect(sampleTrajectoryAtTime(points, 0)).toBeNull();
-  expect(sampleTrajectoryAtTime(points, 5)).toBeNull();
-  expect(sampleTrajectoryAtTime(points, 3)).toBeNull();
+  // Run-up: the ball waits at the release point instead of disappearing.
+  expect(sampleTrajectoryAtTime(points, 0)).toEqual({ ...point(2), is_at_release: true });
+  // After the last tracked frame the ball stays at the final point.
+  expect(sampleTrajectoryAtTime(points, 5)).toEqual({ ...point(4), is_post_delivery: true });
+  // Detection gaps are bridged by interpolation so the 3D ball never blinks out.
+  expect(sampleTrajectoryAtTime(points, 3).x).toBeCloseTo(10 * (1 - 0.9 / 1.9));
+  expect(sampleTrajectoryAtTime(points, 3).is_interpolated).toBe(true);
+  expect(sampleTrajectoryAtTime(points, NaN)).toBeNull();
   expect(sampleTrajectoryAtTime(points, 2).pixel_x).toBe(0);
   expect(sampleTrajectoryAtTime(points, 2.05).x).toBeCloseTo(5);
   expect(sampleTrajectoryAtTime(points, 2.05).confidence).toBeNull();

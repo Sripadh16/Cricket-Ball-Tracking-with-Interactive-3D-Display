@@ -1,7 +1,5 @@
 from sqlalchemy.orm import Session
 from models.review_session import ReviewSession
-from models.video import Video
-import uuid
 from typing import Optional, List, Dict
 
 class ReviewService:

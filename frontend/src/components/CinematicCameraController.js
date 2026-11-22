@@ -9,8 +9,8 @@ export const CAMERA_PRESETS = {
   chase: { position: [0, 2.0, -12.0], target: [0, 0.5, 0], name: 'Chase Cam' },
   batsman: { position: [0, 1.6, 9.2], target: [0, 1.2, -10], name: 'Batsman POV' },
   umpire: { position: [0, 1.7, 13.5], target: [0, 0.6, 0], name: 'Umpire' },
-  bowler: { position: [0, 1.8, -13.5], target: [0, 0.6, 0], name: 'Bowler' },
-  side: { position: [14, 3.5, 2], target: [0, 0.5, 2], name: 'Side Arc' },
+  bowler: { position: [1.6, 6.2, -19.5], target: [0, 0.5, 3.0], name: 'Bowler' }, // raised and off-line (Hawk-Eye TV angle) so the arc and bounce read clearly
+  side: { position: [21, 3.2, 0], target: [0, 0.9, 0], name: 'Side Arc' },
   aerial: { position: [0, 22, 0], target: [0, 0, 0], name: 'Pitch Map' },
   impact: { position: [1.8, 0.85, 9.8], target: [0, 0.45, 9.1], name: 'Impact Zoom' },
   bullet_time: { position: [2.2, 0.9, 9.2], target: [0, 0.45, 8.8], name: 'Bullet Time' },
