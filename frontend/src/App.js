@@ -8,11 +8,11 @@ const DRSReview = lazy(() => import('./pages/DRSReview'));
 const theme = createTheme({
   palette: {
     mode: 'dark',
-    primary: { main: '#38bdf8', light: '#7dd3fc', dark: '#0ea5e9', contrastText: '#06111f' },
-    secondary: { main: '#a78bfa' },
-    background: { default: '#0a1220', paper: '#101b2d' },
-    text: { primary: '#eef4fb', secondary: '#93a4bd' },
-    divider: '#1f2d45',
+    primary: { main: '#c9ef83', light: '#ddf9ac', dark: '#aed864', contrastText: '#151e10' },
+    secondary: { main: '#e8c790' },
+    background: { default: '#101715', paper: '#161f1b' },
+    text: { primary: '#f6f5eb', secondary: '#a6b7ac' },
+    divider: '#26352d',
     error: { main: '#f87171' },
     warning: { main: '#fbbf24' },
     success: { main: '#4ade80' },
@@ -31,16 +31,16 @@ const theme = createTheme({
       styleOverrides: {
         root: { minHeight: 40, padding: '8px 18px', borderRadius: 8 },
         sizeSmall: { minHeight: 32, padding: '5px 12px' },
-        containedPrimary: { '&:hover': { backgroundColor: '#7dd3fc' } },
-        outlined: { borderColor: '#2b3d5c' },
+        containedPrimary: { '&:hover': { backgroundColor: '#ddf9ac' } },
+        outlined: { borderColor: '#405347' },
       },
     },
     MuiPaper: { styleOverrides: { root: { backgroundImage: 'none' } } },
-    MuiDialog: { styleOverrides: { paper: { backgroundColor: '#12203a', border: '1px solid #2b3d5c', borderRadius: 14 } } },
+    MuiDialog: { styleOverrides: { paper: { backgroundColor: '#1b2721', border: '1px solid #405347', borderRadius: 14 } } },
     MuiOutlinedInput: {
       styleOverrides: {
-        root: { fontSize: 14, borderRadius: 8, backgroundColor: 'rgba(11,21,39,0.6)' },
-        notchedOutline: { borderColor: '#2b3d5c' },
+        root: { fontSize: 14, borderRadius: 8, backgroundColor: 'rgba(17,26,22,0.6)' },
+        notchedOutline: { borderColor: '#405347' },
       },
     },
     MuiTab: { styleOverrides: { root: { textTransform: 'none', fontSize: 13, minHeight: 46 } } },
@@ -48,9 +48,9 @@ const theme = createTheme({
     MuiToggleButton: {
       styleOverrides: {
         root: {
-          textTransform: 'none', fontSize: 13, minHeight: 36, borderColor: '#2b3d5c',
-          '&.Mui-selected': { color: '#38bdf8', backgroundColor: 'rgba(56,189,248,0.14)' },
-          '&.Mui-selected:hover': { backgroundColor: 'rgba(56,189,248,0.22)' },
+          textTransform: 'none', fontSize: 13, minHeight: 36, borderColor: '#405347',
+          '&.Mui-selected': { color: '#c9ef83', backgroundColor: 'rgba(201,239,131,0.14)' },
+          '&.Mui-selected:hover': { backgroundColor: 'rgba(201,239,131,0.22)' },
         },
       },
     },
@@ -58,8 +58,8 @@ const theme = createTheme({
     MuiTooltip: {
       defaultProps: { arrow: true },
       styleOverrides: {
-        tooltip: { backgroundColor: '#162744', border: '1px solid #2b3d5c', color: '#eef4fb', fontSize: 12, fontWeight: 500, padding: '6px 10px' },
-        arrow: { color: '#162744' },
+        tooltip: { backgroundColor: '#233129', border: '1px solid #405347', color: '#f6f5eb', fontSize: 12, fontWeight: 500, padding: '6px 10px' },
+        arrow: { color: '#233129' },
       },
     },
     MuiAlert: { styleOverrides: { root: { borderRadius: 10 } } },
@@ -76,25 +76,7 @@ function App() {
   const [trajectoryLoading, setTrajectoryLoading] = useState(false);
   // trajectoryError: 'not_processed' | 'load_error' | null
   const [trajectoryError, setTrajectoryError] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const ensureAuth = async () => {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        try {
-          const res = await api.post('/auth/guest');
-          if (res.data?.access_token) {
-            localStorage.setItem('token', res.data.access_token);
-          }
-        } catch (err) {
-          console.warn('Could not provision guest session:', err);
-        }
-      }
-      setLoading(false);
-    };
-    ensureAuth();
-  }, []);
+  const [trackingProgress, setTrackingProgress] = useState(null);
 
   // Ref to cancel/ignore stale async trajectory fetches when user rapidly switches videos
   const activeVideoFetchId = useRef(0);
@@ -106,6 +88,7 @@ function App() {
     setTrajectoryData(null);
     setTrajectoryLoading(true);
     setTrajectoryError(null);
+    setTrackingProgress(null);
     setCurrentView('review');
 
     try {
@@ -134,6 +117,7 @@ function App() {
       try {
         const progress = await api.get(`/videos/${selectedVideo.id}/progress`);
         if (cancelled || fetchId !== activeVideoFetchId.current) return;
+        setTrackingProgress(progress.data.progress);
         if (['error', 'failed'].includes(progress.data.status)) {
           setTrajectoryError('processing_failed');
           return;
@@ -172,23 +156,6 @@ function App() {
     setTrajectoryError(null);
   }, []);
 
-  if (loading) {
-    return (
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        <div style={{
-          minHeight: '100dvh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'var(--bg)'
-        }}>
-          <div className="loading-spinner" style={{ width: 48, height: 48, borderWidth: 4 }} />
-        </div>
-      </ThemeProvider>
-    );
-  }
-
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
@@ -205,6 +172,7 @@ function App() {
           trajectoryData={trajectoryData}
           trajectoryLoading={trajectoryLoading}
           trajectoryError={trajectoryError}
+          trackingProgress={trackingProgress}
           onBack={handleBackToDashboard}
         />
         </Suspense>

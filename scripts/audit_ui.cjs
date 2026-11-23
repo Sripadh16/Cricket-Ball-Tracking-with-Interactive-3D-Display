@@ -1,4 +1,4 @@
-// Usage: node scripts/audit_ui.cjs <Chromium executable> <fixture JSON> <output directory>
+// Usage: node scripts/audit_ui.cjs <Chromium executable> <fixture JSON> <output directory> [build directory] [recorded MP4]
 // Fixtures isolate UI checks from accounts, private footage, and running analysis jobs.
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,10 +8,10 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 
 async function main() {
-  const [executable, fixturePath, output, buildPath] = process.argv.slice(2);
+  const [executable, fixturePath, output, buildPath, recordedClip] = process.argv.slice(2);
   assert(executable && fixturePath && output, 'Provide Chromium, fixture, and output paths');
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-  let mediaFile = path.join(path.dirname(fixturePath), 'timing.webm');
+  let mediaFile = recordedClip || path.join(path.dirname(fixturePath), 'timing.webm');
   fs.mkdirSync(output, { recursive: true });
   const build = buildPath ? path.resolve(buildPath) : path.resolve(__dirname, '../frontend/build');
   const server = http.createServer((request, response) => {
@@ -45,6 +45,8 @@ async function main() {
       socket.send(JSON.stringify({ id: requestId, method, params }));
     });
     const errors = [];
+    let backendAvailable = false;
+    let offlinePresetRequests = 0;
     socket.onmessage = event => {
       const message = JSON.parse(event.data);
       if (message.id) {
@@ -57,6 +59,11 @@ async function main() {
       if (message.method === 'Fetch.requestPaused') {
         const { request, requestId } = message.params;
         const url = new URL(request.url);
+        if (!backendAvailable) {
+          if (url.pathname.startsWith('/videos/presets/')) offlinePresetRequests++;
+          send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' }).catch(error => errors.push(error.message));
+          return;
+        }
         const stream = url.pathname.endsWith('/stream');
         let bytes;
         let range;
@@ -72,7 +79,7 @@ async function main() {
           : url.pathname.endsWith('/trajectory') ? fixture.uploadTrajectory
           : url.pathname === '/videos/' ? { videos: fixture.videos } : {};
         send('Fetch.fulfillRequest', { requestId, responseCode: stream && range ? 206 : 200, responseHeaders: [
-          { name: 'Content-Type', value: stream ? 'video/webm' : 'application/json' },
+          { name: 'Content-Type', value: stream ? (recordedClip ? 'video/mp4' : 'video/webm') : 'application/json' },
           ...(stream ? [{ name: 'Accept-Ranges', value: 'bytes' }, { name: 'Content-Length', value: String(end - start + 1) },
             ...(range ? [{ name: 'Content-Range', value: `bytes ${start}-${end}/${bytes.length}` }] : [])] : []),
           { name: 'Access-Control-Allow-Origin', value: '*' },
@@ -106,27 +113,35 @@ async function main() {
       fs.writeFileSync(path.join(output, `${name}.png`), Buffer.from(data, 'base64'));
     };
     const click = text => evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.trim() === ${JSON.stringify(text)})?.click()`);
+    const selectPreset = async preset => {
+      await evaluate(`document.querySelector('[aria-label="Delivery source"]').parentElement.querySelector('[role="combobox"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))`);
+      const selector = JSON.stringify(`[data-value="${preset}"]`);
+      await waitFor(`document.querySelector(${selector})`);
+      await evaluate(`document.querySelector(${selector}).click()`);
+    };
     const overflow = () => evaluate('document.documentElement.scrollWidth > innerWidth');
     await viewport(1440, 900);
     await send('Page.navigate', { url: baseUrl });
-    await waitFor('document.querySelector(".auth-layout")');
+    await waitFor('document.querySelector(".studio-hero img")?.naturalWidth > 0');
     await screenshot('entry-desktop');
     await viewport(375, 812);
     await sleep(200);
     assert.equal(await overflow(), false, 'Entry overflows mobile viewport');
     await screenshot('entry-mobile');
-    await click('Continue without account');
+    await click('Launch simulation');
     await waitFor('document.querySelector(".review-workspace")');
     await sleep(900);
+    assert.equal(await evaluate('document.querySelector(".decision-text").textContent'), 'DECISION PENDING');
+    assert.ok(await evaluate('document.querySelector(".scene-panel").innerText.includes("LBW Out") === false'), 'The scene reveals the result before playback');
     assert.equal(await overflow(), false, 'Demo overflows mobile viewport');
     await screenshot('demo-mobile');
     await viewport(1440, 900);
+    await click('Side');
     await sleep(300);
     await screenshot('demo-desktop');
-    await evaluate(`document.querySelector('[aria-label="Delivery source"]').parentElement.querySelector('[role="combobox"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))`);
-    await waitFor(`document.querySelector('[data-value="offcutter_bowled"]')`);
-    await evaluate(`document.querySelector('[data-value="offcutter_bowled"]').click()`);
+    await selectPreset('offcutter_bowled');
     await waitFor('document.body.innerText.includes("Good Length Off-Cutter")');
+    assert.equal(offlinePresetRequests, 0, 'Standard simulations must load without making preset requests');
     await sleep(400);
     await click('0.5x');
     // Capture the actual canvas playback for visual motion review, using generated physics only.
@@ -160,10 +175,21 @@ async function main() {
       fs.writeFileSync(path.join(output, `motion-${frame.time.toFixed(2)}.png`), Buffer.from(frame.png, 'base64'));
     }
     assert.equal(await evaluate('document.querySelector("[aria-label=Play]") !== null'), true, 'Simulation should stop at the end instead of jumping into a loop');
+    await sleep(150);
     const pausedFrame = await evaluate('document.querySelector("canvas").toDataURL()');
     await sleep(250);
-    assert.equal(await evaluate('document.querySelector("canvas").toDataURL()'), pausedFrame, 'Paused replay should not keep animating');
+    assert.ok(await evaluate('document.querySelector("canvas").toDataURL()') === pausedFrame, 'Paused replay should not keep animating');
     await screenshot('demo-after-delivery');
+    if (recordedClip) {
+      for (const [preset, decision] of [['inswinger_lbw', 'OUT'], ['legspin_umpires_call', "UMPIRE'S CALL"]]) {
+        await selectPreset(preset);
+        await waitFor('document.querySelector(".decision-text")?.textContent === "DECISION PENDING"');
+        await evaluate('document.querySelector("[aria-label=Play]").click()');
+        await waitFor(`document.querySelector(".decision-text")?.textContent === ${JSON.stringify(decision)}`);
+        await waitFor('document.querySelector("[aria-label=Play]")');
+      }
+      assert.equal(offlinePresetRequests, 0, 'Rehearsed deliveries must load offline');
+    }
     await evaluate('document.querySelector(".viewer-tools").open = true');
     await click('UltraEdge demo');
     await waitFor('document.body.innerText.includes("Simulated audio demonstration")');
@@ -178,7 +204,8 @@ async function main() {
     await sleep(200);
     await screenshot('demo-reduced-motion');
     await send('Emulation.setEmulatedMedia', { features: [] });
-    assert.equal(await evaluate('document.querySelectorAll(".viewer-camera-bar > .MuiToggleButtonGroup-root button").length'), 4, 'Primary camera toolbar exceeds four choices');
+    assert.equal(await evaluate('document.querySelectorAll(".viewer-camera-bar > .MuiToggleButtonGroup-root button").length'), 5, 'Primary camera toolbar is missing an angle');
+    backendAvailable = true;
     await evaluate('localStorage.setItem("token", "ui-fixture-token"); location.reload()');
     await waitFor('document.querySelector(".delivery-row")');
     await screenshot('library-desktop');
@@ -190,11 +217,35 @@ async function main() {
     await evaluate('document.querySelector(".delivery-name").click()');
     await waitFor('document.querySelector(".review-workspace")');
     assert.equal(await evaluate('window.scrollY'), 0, 'Review inherited library scroll position');
-    await evaluate('document.querySelector("video").load()');
+    if (!recordedClip) await evaluate('document.querySelector("video").load()');
     await waitFor('document.querySelector("video").readyState >= 2');
     assert.equal(await overflow(), false, 'Uploaded review overflows mobile viewport');
     assert.equal(await evaluate('document.querySelector(".review-controls [value=split]") !== null'), false, 'Mobile defaults to split');
     await screenshot('upload-mobile');
+    if (recordedClip) {
+      await waitFor('document.querySelector(".decision-text")?.textContent === "NO VERDICT"');
+      assert.ok(fixture.uploadTrajectory.pixel_track?.length >= 2, 'Two tracked detections are required');
+      const samples = fixture.uploadTrajectory.pixel_track;
+      const first = samples[0].t, second = samples[1].t, last = samples.at(-1).t;
+      const atTime = time => `Math.abs(document.querySelector('video').currentTime - ${time}) < 0.005 && !document.querySelector('video').seeking`;
+      await waitFor(atTime(first));
+      await waitFor('Array.from(document.querySelectorAll("button")).some(button => button.textContent.trim() === "Next detection" && !button.disabled)');
+      await click('Next detection');
+      await waitFor(atTime(second));
+      await click('Previous detection');
+      await waitFor(atTime(first));
+      await click('Replay detections at ¼ speed');
+      await waitFor('!document.querySelector("video").paused && document.querySelector("video").playbackRate === 0.25');
+      await waitFor(`document.querySelector('video').paused && document.querySelector('video').currentTime >= ${last} - 0.005`);
+      assert.ok(await evaluate(`document.querySelector('video').currentTime < ${last} + 0.12`), 'Guided playback continued outside the tracked interval');
+      await viewport(1440, 900);
+      assert.equal(await overflow(), false, 'Recorded clip overflows review');
+      assert.equal(await evaluate('document.querySelector(".scene-panel") !== null'), false, 'A 2D-only clip should open in Video view');
+      await screenshot('guided-real-clip');
+      assert.deepEqual(errors, [], 'Uncaught browser exceptions during recorded clip review');
+      console.log('PASS: real MP4 cues the first detection, steps across detections, shows No verdict, and pauses after the quarter-speed replay');
+      return;
+    }
     for (const width of [768, 1024]) {
       await viewport(width, 900);
       await sleep(200);
@@ -282,7 +333,7 @@ async function main() {
       timingPassed, timingToleranceSeconds: 1 / 30 + 0.005,
       viewportChecks: [375, 768, 1024, 1200, 1279, 1440, 1920], layoutChecks: ['scroll reset', 'split panel boundaries', 'visible toolbar and playback', 'wide recorded video'], motionChecks: ['bowled replay capture', 'stops at end', 'paused canvas stable', 'reduced motion render'], errors, timing,
       media: 'Synthetic 30fps WebM source and API fixtures; real cricket accuracy not measured' }, null, 2));
-    console.log('PASS: guest entry, library, review, camera toolbar, mobile overflow, explicit reviewer outcome, no uncaught exceptions');
+    console.log('PASS: offline simulation, library, review, camera toolbar, mobile overflow, explicit reviewer outcome, no uncaught exceptions');
     console.log(JSON.stringify({ timingPassed, timing }));
     if (!timingPassed) process.exitCode = 1;
   } finally {

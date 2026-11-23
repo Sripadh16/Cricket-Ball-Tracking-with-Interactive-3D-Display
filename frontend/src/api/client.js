@@ -8,6 +8,21 @@ const api = axios.create({
   timeout: 300000,
 });
 
+let guestSession;
+
+export function ensureGuestSession() {
+  if (localStorage.getItem('token')) return Promise.resolve();
+  if (!guestSession) {
+    guestSession = api.post('/auth/guest', null, { timeout: 8000 })
+      .then(({ data }) => {
+        if (!data.access_token) throw new Error('Guest session did not return a token');
+        if (!localStorage.getItem('token')) localStorage.setItem('token', data.access_token);
+      })
+      .finally(() => { guestSession = undefined; });
+  }
+  return guestSession;
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
   if (token) {
@@ -22,7 +37,8 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error.response?.status === 401) {
+    const token = localStorage.getItem('token');
+    if (error.response?.status === 401 && token && error.config?.headers?.Authorization === `Bearer ${token}`) {
       localStorage.removeItem('token');
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('auth:unauthorized'));

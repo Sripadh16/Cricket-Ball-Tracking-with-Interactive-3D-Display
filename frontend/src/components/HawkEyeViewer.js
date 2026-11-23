@@ -1,7 +1,7 @@
 import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import {
-  Box, Typography, ToggleButton, ToggleButtonGroup, Chip,
+  Box, Typography, ToggleButton, ToggleButtonGroup,
   FormControlLabel, Switch, Paper, Tooltip, IconButton, Button,
   Menu, MenuItem, ListItemIcon, ListItemText, Select, FormControl, useMediaQuery
 } from '@mui/material';
@@ -86,6 +86,12 @@ function CricketPitch({ showZones = false, theme, pitchType }) {
         <circleGeometry args={[36, 64]} />
         <meshStandardMaterial color={pConfig.outfieldColor} roughness={0.8} />
       </mesh>
+      {theme?.id === 'broadcast' && [4, 12, 20, 28].map(radius => (
+        <mesh key={radius} rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.013, 0]} receiveShadow>
+          <ringGeometry args={[radius, radius + 4, 64]} />
+          <meshStandardMaterial color="#244a36" roughness={0.95} />
+        </mesh>
+      ))}
 
       {/* Cyberpunk / Thermal Stadium Grid Lines Overlay */}
       {pConfig.showGrid && (
@@ -368,21 +374,8 @@ function BallCometTail({ currentBallPos, allPoints, currentTime, theme }) {
 }
 
 // Concentric Animated Halo at Pitch Bounce Spot
-function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme }) {
-  const outerRingRef = useRef();
-  const pulseRingRef = useRef();
-
-  useFrame(({ clock }) => {
-    const t = clock.getElapsedTime();
-    if (pulseRingRef.current) {
-      const scale = 1 + (Math.sin(t * 3.5) + 1) * 0.22;
-      pulseRingRef.current.scale.set(scale, scale, 1);
-    }
-    if (outerRingRef.current) {
-      outerRingRef.current.rotation.z = t * 0.4;
-    }
-  });
-
+function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme, replayTime }) {
+  const pulseScale = 1 + (Math.sin(replayTime * 3.5) + 1) * 0.22;
   if (!bouncePoint) return null;
 
   const spotColor = theme?.trajectory?.postBounce || '#ffb703';
@@ -425,13 +418,13 @@ function PitchingSpotMarker({ bouncePoint, lengthZone, onSelectPoint, theme }) {
   return (
     <group position={[bouncePoint.x, 0.005, bouncePoint.z]}>
       {/* Outer pulsing wave ring */}
-      <mesh ref={pulseRingRef} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} scale={[pulseScale, pulseScale, 1]}>
         <ringGeometry args={[0.20, 0.27, 32]} />
         <meshBasicMaterial color={spotColor} transparent opacity={0.65} side={THREE.DoubleSide} />
       </mesh>
 
       {/* Rotating outer compass ring */}
-      <mesh ref={outerRingRef} rotation={[-Math.PI / 2, 0, 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, replayTime * 0.4]}>
         <ringGeometry args={[0.15, 0.18, 32]} />
         <meshBasicMaterial color={zoneColor} transparent opacity={0.8} side={THREE.DoubleSide} />
       </mesh>
@@ -516,16 +509,8 @@ function ImpactMarker({ impactPoint, onSelectPoint, theme }) {
 }
 
 // Stumps Target Plane & Impact Marker at Y = 10.06m
-function StumpsTargetPlane({ target, drsVerdict }) {
-  const pulseRef = useRef();
-
-  useFrame(({ clock }) => {
-    if (pulseRef.current) {
-      const s = 1 + (Math.sin(clock.getElapsedTime() * 4) + 1) * 0.18;
-      pulseRef.current.scale.set(s, s, 1);
-    }
-  });
-
+function StumpsTargetPlane({ target, drsVerdict, replayTime }) {
+  const pulseScale = 1 + (Math.sin(replayTime * 4) + 1) * 0.18;
   if (!target) return null;
 
   const isHitting = drsVerdict?.wickets === 'HITTING';
@@ -580,7 +565,7 @@ function StumpsTargetPlane({ target, drsVerdict }) {
       </line>
 
       {/* Outer pulsing ripple ring */}
-      <mesh ref={pulseRef} position={[target.x, target.z, 0.003]}>
+      <mesh position={[target.x, target.z, 0.003]} scale={[pulseScale, pulseScale, 1]}>
         <ringGeometry args={[BALL_RADIUS * 1.05, BALL_RADIUS * 1.45, 32]} />
         <meshBasicMaterial color={glowColor} transparent opacity={0.65} side={THREE.DoubleSide} />
       </mesh>
@@ -1110,6 +1095,7 @@ function Scene({
       {/* 3D Event Markers */}
       <PitchingSpotMarker
         bouncePoint={bounceReached ? bouncePoint : null}
+        replayTime={reducedMotion ? 0 : currentTime}
         lengthZone={trajectoryData?.length_zone}
         onSelectPoint={onSelectPoint}
         theme={theme}
@@ -1119,6 +1105,7 @@ function Scene({
       {showExtrapolation && stumpTarget && stumpsReached && (
         <StumpsTargetPlane
           target={stumpTarget}
+          replayTime={reducedMotion ? 0 : currentTime}
           drsVerdict={trajectoryData?.drs_evaluation}
         />
       )}
@@ -1203,7 +1190,8 @@ export default function HawkEyeViewer({
   onOpenReportCard = null
 }) {
   const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
-  const [cameraView, setCameraView] = useState('bowler');
+  const compact = useMediaQuery('(max-width: 767px)');
+  const [cameraView, setCameraView] = useState(() => isSimulation && !compact ? 'side' : 'bowler');
   const [ghostPreset, setGhostPreset] = useState(initialGhostPreset);
   const [showExtrapolation, setShowExtrapolation] = useState(true);
   const [showFullPath, setShowFullPath] = useState(true);
@@ -1256,16 +1244,6 @@ export default function HawkEyeViewer({
   const [showFlowHUDOverlay, setShowFlowHUDOverlay] = useState(false);
 
   const theme = useMemo(() => getThemeColors(themeName), [themeName]);
-  const drsRevealT = (() => {
-    const ext = trajectoryData?.extrapolated_points;
-    const pts = trajectoryData?.points;
-    const t = ext?.length ? ext[ext.length - 1].t : trajectoryData?.impact_point?.t ?? (pts?.length ? pts[pts.length - 1].t : null);
-    return Number.isFinite(t) ? t : -Infinity;
-  })();
-  // The verdict badge appears only once the (projected) ball reaches the stumps, like a live review.
-  const drs = typeof trajectoryData?.drs_evaluation?.decision === 'string' && currentTime + 1e-3 >= drsRevealT
-    ? trajectoryData.drs_evaluation : null;
-
   return (
     <Box sx={{
       height: '100%',
@@ -1335,82 +1313,10 @@ export default function HawkEyeViewer({
         />
       )}
 
-      {/* Header Overlay: DRS Live Badge & Delivery Type */}
-      <Box sx={{
-        position: 'absolute',
-        top: 14,
-        left: 14,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 0.8,
-        pointerEvents: 'none',
-        zIndex: 10
-      }}>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Chip
-            icon={<SportsCricket sx={{ fontSize: 16 }} />}
-            label={trajectoryData?.delivery_name || (isSimulation ? 'Simulated delivery · 3D' : 'Hawk-Eye 3D Track')}
-            size="small"
-            sx={{
-              background: '#202733',
-              color: 'white',
-              fontWeight: 800,
-              fontSize: '0.75rem',
-              letterSpacing: 0.8,
-              border: `1px solid ${theme.ui.borderColor}`
-            }}
-          />
-          {trajectoryData?.release_speed_kmh && (
-            <Chip
-              label={`${trajectoryData.release_speed_kmh} km/h`}
-              size="small"
-              sx={{
-                bgcolor: 'rgba(56, 189, 248, 0.2)',
-                color: '#38bdf8',
-                fontWeight: 800,
-                fontSize: '0.75rem',
-                border: '1px solid rgba(56, 189, 248, 0.4)'
-              }}
-            />
-          )}
-          {trajectoryData?.is_wide && (
-            <Chip
-              label="WIDE BALL"
-              size="small"
-              sx={{ bgcolor: '#ef4444', color: 'white', fontWeight: 900, fontSize: '0.72rem' }}
-            />
-          )}
-          {trajectoryData?.is_no_ball && (
-            <Chip
-              label="NO BALL"
-              size="small"
-              sx={{ bgcolor: '#dc2626', color: 'white', fontWeight: 900, fontSize: '0.72rem' }}
-            />
-          )}
-          {drs && (
-            <Chip
-              label={drs.decision}
-              size="small"
-              sx={{
-                bgcolor: drs.decision.includes('OUT') && !drs.decision.includes('NOT')
-                  ? 'rgba(239,68,68,0.95)'
-                  : drs.decision.includes('UMPIRE')
-                  ? 'rgba(245,158,11,0.95)'
-                  : 'rgba(34,197,94,0.95)',
-                color: 'white',
-                fontWeight: 800,
-                fontSize: '0.75rem'
-              }}
-            />
-          )}
-        </Box>
-
-        {trajectoryData?.title && (
-          <Typography variant="caption" sx={{ color: '#e2e8f0', fontWeight: 600, textShadow: '0 2px 4px rgba(0,0,0,0.8)' }}>
-            {trajectoryData.title} {trajectoryData.release_speed_kmh ? `• ${trajectoryData.release_speed_kmh} km/h` : ''}
-          </Typography>
-        )}
-      </Box>
+      <div className="scene-source">
+        <SportsCricket sx={{ fontSize: 16 }} />
+        {isSimulation ? 'Simulated flight' : '3D reconstruction'}
+      </div>
 
       <details className="viewer-tools"><summary>Scene tools</summary><div className="viewer-tools-content">
       {/* Top Right: Theme Switcher & Trajectory Color Legend */}
