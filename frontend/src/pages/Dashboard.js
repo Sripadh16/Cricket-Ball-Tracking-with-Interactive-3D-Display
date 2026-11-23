@@ -5,11 +5,10 @@ import {
 } from '@mui/material';
 import {
   CloudUpload, Videocam, Refresh, Delete,
-  Close, Stop,
-  FlipCameraIos, SportsCricket, ArrowForward, Search, InfoOutlined, VideoLibrary
+  Close, Stop, PlayArrow,
+  FlipCameraIos, SportsCricket, ArrowForward, Search, VideoLibrary
 } from '@mui/icons-material';
-import api, { API_BASE_URL, MAX_UPLOAD_SIZE_MB } from '../api/client';
-import PitchDiagram from '../components/PitchDiagram';
+import api, { API_BASE_URL, ensureGuestSession, MAX_UPLOAD_SIZE_MB } from '../api/client';
 
 function VideoRecorder({ open, onClose, onRecorded }) {
   const videoRef = useRef(null);
@@ -238,6 +237,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState('');
+  const [libraryError, setLibraryError] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
   const [reprocessingId, setReprocessingId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -249,25 +249,17 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const loadVideos = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true);
     try {
-      const response = await api.get('/videos/');
+      await ensureGuestSession();
+      const requestVideos = () => api.get('/videos/', { timeout: 8000 });
+      const response = await requestVideos().catch(async err => {
+        if (err.response?.status !== 401) throw err;
+        await ensureGuestSession();
+        return requestVideos();
+      });
       setVideos(response.data.videos || []);
-      setError('');
-    } catch (err) {
-      if (err.response?.status === 401) {
-        try {
-          const guestRes = await api.post('/auth/guest');
-          if (guestRes.data?.access_token) {
-            localStorage.setItem('token', guestRes.data.access_token);
-            const retryRes = await api.get('/videos/');
-            setVideos(retryRes.data.videos || []);
-            setError('');
-            return;
-          }
-        } catch {
-          // ignore fallback error
-        }
-      }
-      setError('Could not load deliveries. Check the connection and refresh.');
+      setLibraryError(false);
+    } catch {
+      setLibraryError(true);
     } finally {
       if (showSpinner) setLoading(false);
     }
@@ -297,12 +289,14 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
     const formData = new FormData();
     formData.append('file', file);
     try {
+      await ensureGuestSession();
       const res = await api.post('/videos/upload', formData, { onUploadProgress: e => {
         if (e.total) setUploadProgress(Math.min(100, Math.round(e.loaded * 100 / e.total)));
       }});
-      await loadVideos(false);
       if (res.data?.id) {
         onVideoSelect(res.data);
+      } else {
+        await loadVideos(false);
       }
     } catch (err) {
       const detail = err.response?.data?.detail;
@@ -339,87 +333,67 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const token = localStorage.getItem('token');
 
   return (
-    <Box sx={{ minHeight: '100dvh', bgcolor: 'background.default' }}>
+    <div className="studio">
       <nav className="studio-nav" aria-label="Workspace navigation">
-        <div className="wordmark"><span className="brand-symbol"><SportsCricket sx={{ fontSize: 17 }} /></span>crease<span className="muted" style={{ fontWeight: 400 }}>/ lab</span></div>
+        <a href="#main-content" className="wordmark">
+          <span className="brand-symbol"><SportsCricket sx={{ fontSize: 18 }} /></span>
+          <span>crease<span className="brand-divider">/</span>lab</span>
+        </a>
         <div className="nav-links">
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={onLaunchDemo}
-            startIcon={<SportsCricket fontSize="small" />}
-          >
-            Simulation (3D Hawk-Eye)
-          </Button>
-          <Button
-            size="small"
-            variant="contained"
-            onClick={() => fileInputRef.current?.click()}
-            startIcon={<CloudUpload fontSize="small" />}
-          >
-            Upload Video to Analyse
-          </Button>
+          <a href="#deliveries">Delivery library</a>
+          <Button variant="outlined" color="inherit" onClick={() => fileInputRef.current?.click()}
+            disabled={uploading} startIcon={<CloudUpload fontSize="small" />}>Upload clip</Button>
         </div>
       </nav>
       <main id="main-content" className="studio-main" tabIndex={-1}>
-        <header className="page-intro">
-          <div><span className="eyebrow">Hawk-Eye · Decision Review System</span><h1>Cricket Ball Tracking & DRS Lab</h1><p>Run 3D Hawk-Eye simulations or upload a match clip for automated ball tracking and LBW analysis.</p></div>
-          <span className="eyebrow nav-context" style={{ color: 'var(--muted)' }}>Computer vision / 3D visualisation</span>
+        <header className="studio-hero">
+          <div className="studio-hero-copy">
+            <span className="eyebrow">Cricket ball tracking &amp; DRS</span>
+            <h1>Every delivery,<br /><em>in detail.</em></h1>
+            <p>Follow the ball from release to wicket. Replay a simulated delivery in 3D or track the ball in your own footage.</p>
+            <Button variant="contained" size="large" onClick={onLaunchDemo} startIcon={<PlayArrow />}>
+              Launch simulation
+            </Button>
+          </div>
+          <figure className="studio-hero-visual">
+            <img src={process.env.PUBLIC_URL + '/delivery-preview.webp'} width="1280" height="853"
+              alt="Illustrated ball path bouncing on a cricket pitch and curving toward the stumps" />
+            <figcaption>Trajectory illustration</figcaption>
+          </figure>
         </header>
-        <div className="workspace-grid">
-          <section className={'upload-panel' + (dragging ? ' is-dragging' : '')} aria-labelledby="upload-heading"
-            onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
-            onDrop={e => { e.preventDefault(); setDragging(false); const file = e.dataTransfer.files[0]; if (file) uploadVideo(file); }}>
-            <div className="upload-icon"><CloudUpload fontSize="small" /></div>
-            <h2 id="upload-heading">Upload Video to Analyse</h2>
-            <p>Drop a cricket delivery video here, or choose a file to upload and analyse it automatically.<br /><span className="upload-formats">MP4 · MOV · AVI · MKV · WebM — up to {MAX_UPLOAD_SIZE_MB} MB</span></p>
-            <div className="upload-actions">
-              <Button
-                variant="contained"
-                size="large"
-                onClick={() => fileInputRef.current.click()}
-                disabled={uploading}
-                startIcon={<CloudUpload />}
-                sx={{ px: 3, fontWeight: 700 }}
-              >
-                Upload Video to Analyse
-              </Button>
-              <Button variant="outlined" color="inherit" size="large" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
-                Record Clip
-              </Button>
-            </div>
-            <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.mkv,.webm" hidden aria-label="Choose cricket video" onChange={e => { const file = e.target.files?.[0]; if (file) uploadVideo(file); e.target.value = ''; }} />
-            {uploading && <Box sx={{ width: '100%', mt: 2 }} role="status"><Typography variant="caption">{uploadProgress < 100 ? 'Uploading clip · ' + uploadProgress + '%' : 'Upload received · preparing analysis…'}</Typography><LinearProgress sx={{ mt: 1 }} variant={uploadProgress < 100 ? 'determinate' : 'indeterminate'} value={uploadProgress} /></Box>}
-          </section>
-          <section className="simulation-panel" aria-labelledby="simulation-heading">
-            <PitchDiagram />
-            <div className="simulation-copy">
-              <div className="simulation-copy-text">
-                <span className="eyebrow" style={{ color: 'var(--accent-2)' }}>Physics demo</span>
-                <h2 id="simulation-heading">3D Hawk-Eye Simulation</h2>
-                <p>Interactive 3D physics demonstration with ball flight paths, pitch bounce, dynamic stumps, and LBW decisions.</p>
-              </div>
-              <Button
-                variant="contained"
-                color="primary"
-                endIcon={<ArrowForward />}
-                onClick={onLaunchDemo}
-                sx={{ flexShrink: 0, px: 2.5, fontWeight: 600 }}
-              >
-                Launch Simulation
-              </Button>
-            </div>
-          </section>
-        </div>
-        <p className="capture-note"><InfoOutlined sx={{ fontSize: 16, mt: .2 }} /><span>For a clearer track: use a fixed camera, keep the ball visible, and capture one delivery per clip. Reconstructed 3D positions are approximate.</span></p>
-        {error && <Alert severity="error" sx={{ mb: 3 }} onClose={() => setError('')} action={<Button size="small" color="inherit" onClick={() => loadVideos()}>Retry</Button>}>{error}</Alert>}
-        <section aria-labelledby="library-heading">
+        <section className={'upload-panel' + (dragging ? ' is-dragging' : '')} aria-labelledby="upload-heading"
+          onDragOver={e => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
+          onDrop={e => { e.preventDefault(); setDragging(false); const file = e.dataTransfer.files[0]; if (file) uploadVideo(file); }}>
+          <div className="upload-icon"><CloudUpload /></div>
+          <div className="upload-copy">
+            <h2 id="upload-heading">Analyse a delivery</h2>
+            <p>Drop a clip here or choose a file. Use a fixed camera and keep the ball in view.</p>
+            <span className="upload-formats">MP4, MOV, AVI, MKV or WebM · up to {MAX_UPLOAD_SIZE_MB} MB</span>
+          </div>
+          <div className="upload-actions">
+            <Button variant="outlined" color="inherit" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
+              Record clip
+            </Button>
+            <Button variant="contained" disabled={uploading} onClick={() => fileInputRef.current.click()} endIcon={<ArrowForward fontSize="small" />}>
+              Choose file
+            </Button>
+          </div>
+          <input ref={fileInputRef} type="file" accept=".mp4,.mov,.avi,.mkv,.webm" hidden aria-label="Choose cricket video" onChange={e => { const file = e.target.files?.[0]; if (file) uploadVideo(file); e.target.value = ''; }} />
+          {uploading && <Box className="upload-progress" role="status"><Typography variant="caption">{uploadProgress < 100 ? 'Uploading clip · ' + uploadProgress + '%' : 'Upload received · preparing analysis…'}</Typography><LinearProgress sx={{ mt: 1 }} variant={uploadProgress < 100 ? 'determinate' : 'indeterminate'} value={uploadProgress} /></Box>}
+        </section>
+        {error && <Alert severity="error" sx={{ mt: 2 }} onClose={() => setError('')}>{error}</Alert>}
+        <section id="deliveries" className="delivery-library" aria-labelledby="library-heading">
           <div className="library-heading">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><h2 id="library-heading">Your deliveries</h2><span className="library-count">{loading ? '—' : readyCount + ' ready / ' + videos.length + ' total'}</span></div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}><h2 id="library-heading">Your deliveries</h2><span className="library-count">{loading || libraryError ? '—' : readyCount + ' ready / ' + videos.length + ' total'}</span></div>
             <div className="library-tools"><TextField size="small" placeholder="Find a delivery" value={query} onChange={e => setQuery(e.target.value)} inputProps={{ 'aria-label': 'Search deliveries' }} InputProps={{ startAdornment: <InputAdornment position="start"><Search fontSize="small" /></InputAdornment> }} /><Tooltip title="Refresh deliveries"><span><IconButton onClick={() => loadVideos()} aria-label="Refresh deliveries" disabled={loading}><Refresh fontSize="small" /></IconButton></span></Tooltip></div>
           </div>
-          {loading ? <Box aria-label="Loading deliveries" role="status">{[0, 1, 2].map(i => <Skeleton key={i} variant="rounded" height={72} sx={{ mb: 1 }} />)}</Box> : visibleVideos.length === 0 ? (
-            <div className="empty-library"><VideoLibrary sx={{ color: 'var(--accent)', fontSize: 30 }} /><h3>{query ? 'No matching deliveries.' : 'Your first delivery starts here.'}</h3><p>{query ? 'Try another filename or clear your search.' : 'Upload a clip to build your library, or take a look around the simulation lab first.'}</p><Button variant="outlined" onClick={() => query ? setQuery('') : fileInputRef.current.click()}>{query ? 'Clear search' : 'Choose your first clip'}</Button></div>
+          {loading ? <Box aria-label="Loading deliveries" role="status">{[0, 1, 2].map(i => <Skeleton key={i} variant="rounded" height={72} sx={{ mb: 1 }} />)}</Box> : libraryError ? (
+            <Alert severity="warning" action={<Button size="small" color="inherit" onClick={() => loadVideos()}>Retry</Button>}>
+              Could not load the delivery library. Check the analysis server connection.
+            </Alert>
+          ) : visibleVideos.length === 0 ? (
+            <div className="empty-library"><VideoLibrary sx={{ color: 'var(--accent)', fontSize: 30 }} /><h3>{query ? 'No matching deliveries.' : 'No deliveries yet'}</h3><p>{query ? 'Try another filename or clear your search.' : 'Your clips and analysis appear here after upload.'}</p><Button variant="outlined" onClick={() => query ? setQuery('') : fileInputRef.current.click()}>{query ? 'Clear search' : 'Choose your first clip'}</Button></div>
           ) : <div className="library-list">{visibleVideos.map(video => {
             const name = video.original_filename || video.filename;
             const busy = video.status === 'processing' || reprocessingId === video.id;
@@ -433,13 +407,12 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             </article>;
           })}</div>}
         </section>
-        <footer className="studio-footer"><span>CREASE / LAB · COMPUTER VISION & GRAPHICS</span><span>Measured footage. Clearly labelled simulation.</span></footer>
       </main>
       <VideoRecorder open={showRecorder} onClose={() => setShowRecorder(false)} onRecorded={blob => uploadVideo(new File([blob], 'delivery-' + Date.now() + '.webm', { type: 'video/webm' }))} />
       <Dialog open={!!deleteTarget} onClose={() => { if (!deleting) setDeleteTarget(null); }} aria-labelledby="delete-delivery-title" maxWidth="xs" fullWidth>
         <DialogTitle id="delete-delivery-title">Delete this delivery?</DialogTitle><DialogContent><Typography variant="body2" color="text.secondary">{deleteTarget?.original_filename || deleteTarget?.filename} and its analysis will be permanently removed.</Typography></DialogContent><DialogActions sx={{ p: 2 }}><Button onClick={() => setDeleteTarget(null)} disabled={deleting} color="inherit">Keep delivery</Button><Button onClick={handleDelete} color="error" variant="contained" disabled={deleting}>{deleting ? 'Deleting…' : 'Delete delivery'}</Button></DialogActions>
       </Dialog>
-    </Box>
+    </div>
   );
 }
 

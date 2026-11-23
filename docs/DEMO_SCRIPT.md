@@ -1,83 +1,29 @@
-# Live Demonstration Script: Cricket DRS & 3D Hawk-Eye
+# Five-minute Crease / Lab demo
 
-This five-minute script walks through the system for an evaluation or viva presentation.
+## Before the demo
 
----
+Run the frontend and API using the commands in the [README](../README.md). On the computer you will present from, upload the rehearsal clip ahead of time and wait for **Processed**. Open the saved review and check that it opens on its first detection. Keep the source file locally for the live upload.
 
-## 1. Introduction (0:00 – 0:45)
-- **Goal**: Present a paired Computer Vision tracking pipeline and an interactive 3D Decision Review System (DRS) renderer.
-- **Key Duality**:
-  - *Simulation Engine*: Demonstrates full aerodynamic physics, camera transformations, and DRS boundary geometry.
-  - *Video CV Pipeline*: Real OpenCV detection on uploaded/recorded footage, honestly reporting measured vs predicted points.
-- **State Clearly**: *"We don't claim broadcast commercial Hawkeye accuracy with a single uncalibrated consumer camera. We demonstrate the underlying CV and graphics algorithms."*
+For a new clip, use one delivery filmed without cuts from a fixed camera behind or slightly offset from the bowler. Keep the ball, both wicket lines and the striker in frame from release to contact. Use H.264 MP4. Use the 1.48-second WhatsApp clip to illustrate **No verdict**. Its seven candidate detections failed the hand-labeled spot check, so label the overlay as unverified. [Footage validation](../demo_videos/CREDITS.md)
 
----
+## 0:00–0:45 · Open the workspace
 
-## 2. Interactive 3D Simulator (0:45 – 2:00)
-1. From the Dashboard, click **Launch Interactive 3D Simulator**.
-2. Select **Fast Inswinger – LBW Out (142 km/h)**:
-   - Notice the green **SIMULATION** chip in the Ball Telemetry sidebar.
-   - Show the 3 distinct trajectory ribbons:
-     - **Cyan Ribbon**: Pre-bounce incoming delivery arc.
-     - **Amber Ribbon**: Post-bounce deviation arc.
-     - **Magenta Dashed Ribbon**: Extrapolated path through the pad impact towards the stumps.
-   - Show the **Pulsing Pitching Spot Marker** where the ball bounces on the pitch.
-   - Show the **Stump Target Plane**: Visualizing where the ball center passes through the wicket volume.
-3. Switch camera perspectives using the bottom controls:
-   - **Batsman POV**: View the ball swinging inwards toward the right-hander's pads.
-   - **Umpire POV**: View the line from the bowler's end towards the batting crease.
-   - **Chase Cam**: Smooth camera following the delivery trajectory down the pitch.
-4. Show decision readout: **OUT** (`Pitching: IN LINE`, `Impact: IN LINE`, `Wickets: HITTING`).
-5. Switch to **Sharp Bouncer – Missing Stumps (148 km/h)**:
-   - Point out the higher bounce trajectory clearing the stump height ($0.711\text{ m}$).
-   - Decision updates to **NOT OUT** (`Wickets: MISSING`).
+Open the dashboard and select **Launch simulation**. The four standard deliveries use the bundled physics engine output and work when the analysis server is unavailable. Custom pitch and spin settings, clip uploads, and saved reviews use the server.
 
----
+## 0:45–2:15 · Show the decision forming
 
-## 3. Video CV Pipeline & Upload Flow (2:00 – 3:30)
-1. Return to Dashboard via **Back to Dashboard**.
-2. Show the video list:
-   - Point out the **Refresh/Reprocess button** on existing video cards.
-   - Point out the capture instruction note: stationary camera, good ball-to-background contrast, max 300 frames.
-3. Select an existing processed video or upload a short bowling clip:
-   - Watch the upload progress and in-flight tracking processing.
-4. In the **Split View**:
-   - The synchronized 2D video appears on the left with an **interactive SVG Ball Tracking Overlay** (showing real-time detected crosshairs, confidence scores, and Kalman predictions).
-   - Show the **Observable CV Diagnostics panel** below the video:
-     - Frames analyzed and measured vs predicted point breakdown.
-     - Pitch and stumps boundary detection source (`detected` vs `assumed`).
-     - Video metadata (source FPS, dimensions, frame count).
-     - "Show Tracking Overlay" toggle to inspect raw footage vs CV tracking annotations.
-   - Drag the timeline scrubber to view simultaneous frame progression and 3D ball location.
-   - Point out the amber **ILLUSTRATIVE** chip in the Ball Telemetry sidebar.
-   - Highlight: *"Speed from single-camera video is an uncalibrated estimate, so we report illustrative pixel velocity without fabricating metric certitude."*
+1. Start with **Fast inswinger** and press **Play delivery**. Watch the path build through release, bounce, impact and projected flight. The evidence panel reveals each check as the replay reaches it.
+2. Switch the camera to **Broadcast** for the line to the wickets. Use the timeline to inspect the bounce.
+3. Select **Leg break** and play it to show **Umpire’s call**. If time allows, show **Sharp bouncer** for **Not out**.
+4. For a presentation where the API is running, open **Delivery settings & presentation tools** to change pitch surface or spin, then replay.
 
----
+## 2:15–4:15 · Show tracking on footage
 
-## 4. Code & Algorithmic Highlights (3:30 – 4:30)
-- **Pixel-Space Gating**: Show `ball_tracking_service.py` lines where candidate distance and velocity gating are performed in 2D image pixel space before lifting to 3D.
-- **dt-Coupled Kalman Filter**: Show the variable-$\Delta t$ transition matrix in `_apply_kalman_filter` that preserves point metadata (`is_predicted`, `pixel_x`, `pixel_y`, `frame_idx`).
-- **Resilience & Fallback**: Show `WebGLErrorBoundary` in `HawkEyeViewer.js` protecting the UI from Canvas context failures.
-- **Transactional Reprocessing**: Show how the backend executes replacement in a single atomic transaction and rolls back to preserve existing trajectories if tracking or persistence fails.
-- **Access Boundary & Secure Media Streaming**: Show that `GET /videos/{id}/stream` enforces user ownership (supporting both Bearer tokens and `?token=` query parameters for standard HTML5 `<video>` tags), preventing unauthorized access to private clips.
+1. Return to the dashboard and open the prepared delivery or select **Choose file**. The upload opens the review as tracking begins. The original clip can play while analysis runs.
+2. Click **Replay detections at ¼ speed**, then use **Previous detection** and **Next detection** to inspect individual candidates. The review starts in Video view for 2D results. On desktop, a successful 3D fit opens in Split view.
+3. Show **No verdict** on the rehearsed WhatsApp clip. On a suitable uncut clip, use **Mark pitch corners** if the camera fit fails and **Refit ball flight** after placing the four marks. If a calibrated review shows **Wicket projection**, explain that it estimates the ball's position at the stumps. The tracker cannot verify pad contact for an LBW ruling.
+4. Open **Measurements** or the diagnostics only if you need to show the recorded evidence for the clip. If live analysis is still running, open the already processed copy from the delivery library.
 
----
+## 4:15–5:00 · Explain how it works
 
-## 5. Evaluation Harness & Metrics (4:30 – 5:00)
-1. Open terminal:
-   ```bash
-   cd backend
-   .venv\Scripts\python.exe scripts/evaluate_tracking.py --demo
-   ```
-2. Display the printed benchmark report:
-   - **Section 1: Raw CV Detector Performance**: Evaluates strictly measured detections against ground-truth frames (Precision, Recall, F1, RMSE).
-   - **Section 2: Tracking Continuity & Gap Filling**: Evaluates combined pipeline performance (Gap filling fraction, max consecutive predictions, combined track recall).
-   - Run evaluation on sample clip annotations:
-     ```bash
-     .venv\Scripts\python.exe scripts/evaluate_tracking.py --ground-truth scripts/data/sample_ground_truth.csv --tracking-result scripts/data/sample_tracking_result.json
-     ```
-3. Conclude:
-   ```bash
-   .venv\Scripts\python.exe -m pytest tests/ -v
-   ```
-   - Show all **48 passed regression, security, and integration tests**.
+Explain the pipeline from frame detection to track reconstruction, trajectory fitting, and synchronized rendering. For a quick evaluation example, run `python scripts/evaluate_tracking.py --demo` from the backend directory. The simulation demonstrates the physics and review sequence. Footage analysis depends on the quality of the clip and calibration.

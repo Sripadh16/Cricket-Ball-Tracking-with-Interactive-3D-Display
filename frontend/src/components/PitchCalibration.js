@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Button, TextField, Typography, Alert } from '@mui/material';
 import api from '../api/client';
 
-export default function PitchCalibration({ videoId, trajectory, onApply, onPick, pickedPoint, defaultOpen = false }) {
+export default function PitchCalibration({ videoId, trajectory, onApply, onPick, pickedPoint, open, onOpenChange }) {
   const [corners, setCorners] = useState(trajectory.calibration?.corners || Array.from({ length: 4 }, () => ['', '']));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -24,11 +24,11 @@ export default function PitchCalibration({ videoId, trajectory, onApply, onPick,
       if (alive.current) setError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not save pitch landmarks. Try again.');
     } finally { if (alive.current) setSaving(false); }
   };
-  return <Box component="details" open={defaultOpen || undefined} sx={{ mt: 1 }}>
-    <summary>Correct pitch landmarks</summary>
+  return <Box id="pitch-landmarks" component="details" open={open} onToggle={event => onOpenChange(event.currentTarget.open)} sx={{ mt: 1 }}>
+    <summary>Pitch landmarks ({corners.filter(pair => pair.every(value => value !== '')).length}/4)</summary>
     <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
-      Enter the four pitch corners at the wicket lines in source pixels ({width || '—'} × {height || '—'}), looking from bowler to batter.
-      The camera is then solved from these corners (plus any detected stumps) and the ball flight is refitted in 3D.
+      Mark where the two pitch edges meet the wicket lines in the first video frame. Left and right are viewed from bowler to batter.
+      {trajectory.can_refit_camera ? ' The app uses the four marks to refit the camera and ball flight.' : ' Reprocess this clip to enable a 3D refit.'}
     </Typography>
     {labels.map((label, i) => <Box key={label} sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, my: 1 }}>
       <Button onClick={() => onPick(i, label)} disabled={saving || !width || !height}>Pick {label} in video</Button>
@@ -39,7 +39,7 @@ export default function PitchCalibration({ videoId, trajectory, onApply, onPick,
     </Box>)}
     {error && <Alert severity="error">{error}</Alert>}
     <Button onClick={save} disabled={saving || !width || !height || corners.some(pair => pair.some(value => value === '' || !Number.isFinite(Number(value))))}>
-      {saving ? 'Saving landmarks…' : 'Apply pitch landmarks'}
+      {saving ? 'Refitting flight…' : trajectory.can_refit_camera ? 'Refit ball flight' : 'Save pitch landmarks'}
     </Button>
     <Typography variant="caption" display="block" color="text.secondary">Reprocessing replaces manual landmarks. Inferred events are cleared when geometry changes; your review notes are retained.</Typography>
   </Box>;

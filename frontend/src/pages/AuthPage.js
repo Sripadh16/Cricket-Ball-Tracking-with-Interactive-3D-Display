@@ -72,7 +72,7 @@ export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
           <div className="auth-demo">
             <span className="muted" style={{ fontSize: 13 }}>Explore simulated deliveries. No account needed.</span>
             <Button onClick={onExploreDemo} startIcon={<PlayArrow />} sx={{ mt: 1.5 }} fullWidth>Continue without account</Button>
-            <Button onClick={handleGuest} disabled={loading} variant="outlined" fullWidth>Open shared guest workspace</Button>
+            <Button onClick={handleGuest} disabled={loading} variant="outlined" fullWidth>Open guest workspace</Button>
           </div>
         </div>
       </section>
