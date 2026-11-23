@@ -4,11 +4,12 @@ from sqlalchemy.orm import Session
 from database import get_db, SessionLocal
 from services.video_service import VideoService
 from services.ball_tracking_service import BallTrackingService
+from services.delivery_tracker import DeliveryTracker
 from services.auth_service import AuthService
 from models.trajectory import Trajectory
 from api.auth import get_current_user, get_current_user_optional
 from models.user import User
-from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS
+from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS, MAX_PROCESSING_FRAMES
 from services.sample_generator import DeliveryPhysicsSimulator
 from services.ball_physics_engine import BallPhysicsEngine
 from services.pitch_calibration import calibrate_pitch
@@ -29,27 +30,73 @@ router = APIRouter()
 _TRACKING_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tracking_worker")
 
 
-async def _run_tracking_async(file_path: str) -> dict:
+async def _run_tracking_async(file_path: str, progress_callback=None) -> dict:
     """Run CPU-intensive OpenCV ball tracking in the shared thread pool."""
     loop = asyncio.get_running_loop()
     def _do_track():
-        service = BallTrackingService()
-        return service.track_ball(str(file_path))
+        detector = BallTrackingService().yolo_detector
+        tracker = DeliveryTracker(yolo=detector, progress_callback=progress_callback, max_frames=MAX_PROCESSING_FRAMES)
+        result = tracker.analyse(file_path)
+        if result is None:
+            raise ValueError("The clip could not be decoded or contains fewer than four frames.")
+
+        scan = result["scan"]
+        chain = result.get("chain", [])
+        pixel_track = [
+            {"t": scan["times"][p["frame"]], "frame_idx": p["frame"], "pixel_x": p["px"],
+             "pixel_y": p["py"], "confidence": float(p["conf"])} for p in chain
+        ]
+        reconstruction = _upload_reconstruction(result)
+        points = result.get("points", [])
+        return {
+            **reconstruction, "points": points, "timestamps": [p["t"] for p in points or pixel_track],
+            "geometry_inputs": result.get("geometry_inputs"), "pixel_track": pixel_track,
+            "ball_detected": bool(pixel_track),
+            "confidence_score": sum(p["confidence"] for p in pixel_track) / len(pixel_track) if pixel_track else 0,
+            "tracking_start_s": pixel_track[0]["t"] if pixel_track else None,
+            "tracking_end_s": pixel_track[-1]["t"] if pixel_track else None,
+            "video_info": {"fps": scan["fps"], "width": scan["W"], "height": scan["H"],
+                           "frame_count": scan["frame_count"]},
+            "source_duration_s": scan["source_duration_s"], "timing_source": scan["timing_source"],
+            "fps_source": scan["fps_source"],
+            "debug_info": {"frames_processed": scan["n"], "ball_detections": len(pixel_track),
+                           "camera_source": result.get("camera_source"), "fit_rms_px": result.get("fit_rms_px"),
+                           "line_sigma_m": result.get("line_sigma_m"),
+                           "camera_cut_before_track_end": bool(chain and any(scan["cuts"][1:chain[-1]["frame"] + 1]))},
+        }
     return await loop.run_in_executor(_TRACKING_EXECUTOR, _do_track)
 
+
+def _upload_reconstruction(result: dict, *, manual: bool = False) -> dict:
+    """Return measured flight and a gated projection. The tracker cannot verify pad contact."""
+    drs = result.get("drs") or {}
+    has_fit = result.get("status") == "reconstructed"
+    camera_fit = result.get("method") == "camera_ballistic_fit"
+    projection = drs.get("wicket_projection") if camera_fit else None
+    return {
+        "reconstruction_method": "camera_ballistic_fit" if camera_fit else "stump_plane_fit" if has_fit else "2d_track_only",
+        "calibration_status": "manual_landmarks" if manual else "auto_camera" if camera_fit else "stump_scaled" if has_fit else "unverified",
+        "coordinate_space": "pitch_metric_xyz" if has_fit else "source_pixels",
+        "camera": result.get("camera"), "wicket_projection": projection,
+        "drs_evaluation": None, "impact_point": None,
+        "extrapolated_points": drs.get("extrapolated_points") if projection else None,
+        "stump_plane_target": drs.get("stump_plane_target") if projection else None,
+        **{key: drs.get(key) for key in ("pre_bounce_points", "post_bounce_points", "bounce_point", "release_speed_kmh",
+                                       "bounce_speed_kmh", "release_speed_px_per_sec", "length_zone")},
+    }
 
 
 # In-memory progress tracking: video_id -> { progress, current_frame, total_frames, status, stage }
 video_progress = {}
 
 
-def process_video_background(video_id: str, file_path: str):
-    """Background worker to run BallTrackingService without holding HTTP request open."""
+async def process_video_background(video_id: str, file_path: str):
+    """Run delivery analysis without holding the upload request open."""
     db = SessionLocal()
     video_service = VideoService(db)
     try:
         def on_progress(frame_idx, total_frames, stage="Tracking ball trajectory"):
-            pct = int((frame_idx / max(1, total_frames)) * 100)
+            pct = min(99, int((frame_idx / max(1, total_frames)) * 100))
             video_progress[video_id] = {
                 "progress": pct,
                 "current_frame": frame_idx,
@@ -58,8 +105,7 @@ def process_video_background(video_id: str, file_path: str):
                 "stage": stage
             }
 
-        tracking_service = BallTrackingService(progress_callback=on_progress)
-        trajectory_data = tracking_service.track_ball(str(file_path))
+        trajectory_data = await _run_tracking_async(file_path, on_progress)
 
         additional_data = _build_additional_data(trajectory_data)
 
@@ -79,14 +125,15 @@ def process_video_background(video_id: str, file_path: str):
         video_service.update_video_status(video_id, "processed")
         video_progress[video_id] = {
             "progress": 100,
-            "current_frame": len(trajectory_data.get("points", [])),
-            "total_frames": len(trajectory_data.get("points", [])),
+            "current_frame": trajectory_data.get("debug_info", {}).get("frames_processed", 0),
+            "total_frames": trajectory_data.get("debug_info", {}).get("frames_processed", 0),
             "status": "processed",
             "stage": "Tracking Complete"
         }
         logger.info(f"Video {video_id} background tracking completed successfully.")
     except Exception as e:
         logger.error(f"Error processing video {video_id} in background: {e}")
+        db.rollback()
         try:
             video_service.update_video_status(video_id, "error")
         except Exception:
@@ -117,6 +164,7 @@ def _build_additional_data(trajectory_data: dict) -> dict:
         "impact_point": trajectory_data.get("impact_point"),
         "stump_plane_target": trajectory_data.get("stump_plane_target"),
         "drs_evaluation": trajectory_data.get("drs_evaluation"),
+        "wicket_projection": trajectory_data.get("wicket_projection"),
         "release_speed_kmh": trajectory_data.get("release_speed_kmh"),
         "bounce_speed_kmh": trajectory_data.get("bounce_speed_kmh"),
         "release_speed_px_per_sec": trajectory_data.get("release_speed_px_per_sec"),
@@ -222,8 +270,8 @@ async def list_videos(
 
 @router.post("/upload")
 async def upload_video(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
     sync: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -290,41 +338,11 @@ async def upload_video(
         "stage": "Queued for tracking"
     }
 
-    try:
-        trajectory_data = await _run_tracking_async(str(file_path))
-
-        additional_data = _build_additional_data(trajectory_data)
-        trajectory = Trajectory(
-            video_id=video.id,
-            points=trajectory_data.get("points", []),
-            confidence_score=trajectory_data.get("confidence_score", 0),
-            ball_detected=trajectory_data.get("ball_detected", False),
-            timestamps=trajectory_data.get("timestamps", []),
-            additional_data=additional_data
-        )
-        db.add(trajectory)
-        db.commit()
-
-        video_service.update_video_status(video.id, "processed")
-        video_progress[video.id] = {
-            "progress": 100,
-            "current_frame": len(trajectory_data.get("points", [])),
-            "total_frames": len(trajectory_data.get("points", [])),
-            "status": "processed",
-            "stage": "Tracking Complete"
-        }
-        logger.info(f"Video processed successfully: {video.id}")
-
-    except Exception as e:
-        logger.error(f"Error processing video {video.id}: {e}")
-        db.rollback()
-        video_service.update_video_status(video.id, "error")
-        video_progress[video.id] = {
-            "progress": 100,
-            "status": "error",
-            "error": str(e),
-            "stage": "Failed"
-        }
+    if sync:
+        await process_video_background(video.id, str(file_path))
+        db.refresh(video)
+    else:
+        background_tasks.add_task(process_video_background, video.id, str(file_path))
 
     return {
         "id": video.id,
@@ -339,6 +357,7 @@ async def upload_video(
 @router.get("/{video_id}/progress")
 async def get_video_progress(
     video_id: str,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """Retrieve real-time processing progress for an uploaded video."""
@@ -346,6 +365,9 @@ async def get_video_progress(
     video = video_service.get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
 
     prog = video_progress.get(video_id, {
         "progress": 100 if video.status == "processed" else 0,
@@ -421,7 +443,7 @@ async def reprocess_video(
             "message": "Video reprocessed successfully",
             "video_id": video_id,
             "ball_detected": trajectory_data.get('ball_detected', False),
-            "points_detected": len(trajectory_data.get('points', []))
+            "points_detected": len(trajectory_data.get('pixel_track') or trajectory_data.get('points', []))
         }
 
     except HTTPException:
@@ -520,22 +542,24 @@ async def correct_pitch_calibration(video_id: str, payload: PitchCalibrationRequ
     info = data.get("video_info") or {}
     inputs = data.get("geometry_inputs")
     if inputs:
+        if data.get("debug_info", {}).get("camera_cut_before_track_end"):
+            raise HTTPException(status_code=422, detail="Use an uncut clip so the first-frame landmarks match the tracked delivery.")
         # Full re-solve: the clicked pitch corners join the stumps/pitch edges in the camera solve,
         # and the ball flight is refitted through the corrected camera.
-        from services.delivery_tracker import DeliveryTracker
         corners = [[float(v) for v in pair] for pair in payload.corners]
-        rebuilt = DeliveryTracker.reconstruct(inputs, corners=corners)
+        try:
+            calibrate_pitch([], corners, info.get("width"), info.get("height"))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        rebuilt = await asyncio.get_running_loop().run_in_executor(
+            _TRACKING_EXECUTOR, lambda: DeliveryTracker.reconstruct(inputs, corners=corners))
         if rebuilt is None:
             raise HTTPException(status_code=422, detail="These landmarks do not give a consistent camera for the tracked ball. Check the corner order and positions.")
-        drs = rebuilt["drs"]
         trajectory.points = rebuilt["points"]
         trajectory.timestamps = [p["t"] for p in rebuilt["points"]]
-        for key in ("pre_bounce_points", "post_bounce_points", "extrapolated_points", "bounce_point", "impact_point",
-                    "stump_plane_target", "drs_evaluation", "release_speed_kmh", "bounce_speed_kmh", "length_zone"):
-            data[key] = drs.get(key)
+        data.update(_upload_reconstruction(rebuilt, manual=True))
         calibration = {"corners": corners, "status": "manual_landmarks", "camera": rebuilt["camera"]}
-        data.update(calibration=calibration, calibration_status="manual_landmarks", camera=rebuilt["camera"],
-                    reconstruction_method="camera_ballistic_fit")
+        data["calibration"] = calibration
         trajectory.additional_data = data
         db.commit()
         return calibration
@@ -597,6 +621,9 @@ async def get_trajectory(
     tracking_start_s = additional_data.get("tracking_start_s")
     tracking_end_s = additional_data.get("tracking_end_s")
     video_info = additional_data.get("video_info", {})
+    method = additional_data.get("reconstruction_method", "legacy_unknown")
+    has_fit = method in ("camera_ballistic_fit", "stump_plane_fit")
+    projection = additional_data.get("wicket_projection") if has_fit else None
 
     return {
         "video_id": video_id,
@@ -618,28 +645,30 @@ async def get_trajectory(
         "stumps_position": additional_data.get("stumps_position"),
         "bowler_position": additional_data.get("bowler_position"),
         "batter_position": additional_data.get("batter_position"),
-        "lbw_analysis": additional_data.get("lbw_analysis", []),
+        "lbw_analysis": [],
         "pitch_info": additional_data.get("pitch_info"),
         # Hawk-Eye 3D Segmentation and Physics Telemetry
-        "pre_bounce_points": additional_data.get("pre_bounce_points"),
-        "post_bounce_points": additional_data.get("post_bounce_points"),
-        "extrapolated_points": additional_data.get("extrapolated_points"),
-        "bounce_point": additional_data.get("bounce_point"),
-        "impact_point": additional_data.get("impact_point"),
-        "stump_plane_target": additional_data.get("stump_plane_target"),
-        "drs_evaluation": additional_data.get("drs_evaluation"),
-        "release_speed_kmh": additional_data.get("release_speed_kmh"),
-        "bounce_speed_kmh": additional_data.get("bounce_speed_kmh"),
+        "pre_bounce_points": additional_data.get("pre_bounce_points") if has_fit else None,
+        "post_bounce_points": additional_data.get("post_bounce_points") if has_fit else None,
+        "extrapolated_points": additional_data.get("extrapolated_points") if projection else None,
+        "bounce_point": additional_data.get("bounce_point") if has_fit else None,
+        "impact_point": None,
+        "stump_plane_target": additional_data.get("stump_plane_target") if projection else None,
+        "drs_evaluation": None,
+        "wicket_projection": projection,
+        "release_speed_kmh": additional_data.get("release_speed_kmh") if has_fit else None,
+        "bounce_speed_kmh": additional_data.get("bounce_speed_kmh") if has_fit else None,
         "release_speed_px_per_sec": additional_data.get("release_speed_px_per_sec"),
-        "length_zone": additional_data.get("length_zone"),
+        "length_zone": additional_data.get("length_zone") if has_fit else None,
         "tracking_start_s": tracking_start_s,
         "tracking_end_s": tracking_end_s,
         "timing_source": additional_data.get("timing_source"),
         "coordinate_space": additional_data.get("coordinate_space"),
         "fps_source": additional_data.get("fps_source"),
-        "reconstruction_method": additional_data.get("reconstruction_method", "legacy_unknown"),
+        "reconstruction_method": method,
         "calibration_status": additional_data.get("calibration_status", "unverified"),
         "calibration": additional_data.get("calibration"),
+        "can_refit_camera": bool(additional_data.get("geometry_inputs")) and not additional_data.get("debug_info", {}).get("camera_cut_before_track_end"),
         "pixel_track": additional_data.get("pixel_track"),
         "camera": additional_data.get("camera"),
         "delivery_name": additional_data.get("delivery_name"),
@@ -676,7 +705,7 @@ async def get_video_diagnostics(
     additional_data = trajectory.additional_data if isinstance(trajectory.additional_data, dict) else {}
     debug_info = additional_data.get("debug_info", {})
     video_info = additional_data.get("video_info", {})
-    points = trajectory.points or []
+    points = trajectory.points or additional_data.get("pixel_track") or []
 
     measured = [p for p in points if not p.get("is_predicted", False)]
     predicted = [p for p in points if p.get("is_predicted", False)]
@@ -739,13 +768,8 @@ async def stream_video(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    # Verify ownership; allow guest evaluator sessions to seamlessly access demonstration uploads
-    is_owner = video.user_id == user.id
-    is_guest = getattr(user, "email", "") == "guest@cricket.drs"
-    if not is_owner and not is_guest:
-        owner_user = db.query(User).filter(User.id == video.user_id).first()
-        if not owner_user or owner_user.email != "guest@cricket.drs":
-            raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+    if video.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
 
     if not video.file_path or not os.path.exists(video.file_path):
         raise HTTPException(status_code=404, detail="Video media file missing on disk")

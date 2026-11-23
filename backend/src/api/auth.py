@@ -7,6 +7,8 @@ from models.user import User
 from pydantic import BaseModel
 from typing import Optional
 import logging
+from secrets import token_urlsafe
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -88,22 +90,17 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
 
 @router.post("/guest", response_model=Token)
 async def guest_login(db: Session = Depends(get_db)):
-    """Authenticate or auto-provision a guest/demo account for frictionless trial"""
+    """Create an isolated workspace for a new guest session."""
     auth_service = AuthService(db)
-    guest_email = "guest@cricket.drs"
-    user = db.query(User).filter(User.email == guest_email).first()
-    if not user:
-        user = User(
-            email=guest_email,
-            name="Guest Evaluator",
-            hashed_password=auth_service.get_password_hash("guest_evaluation_pass_2026")
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-
-    access_token = auth_service.create_access_token(data={"sub": user.email})
-    logger.info(f"Guest user signed in: {guest_email}")
+    guest_email = f"guest-{uuid4().hex}@cricket.drs"
+    user = User(
+        email=guest_email,
+        name="Guest Evaluator",
+        hashed_password=auth_service.get_password_hash(token_urlsafe(32)),
+    )
+    db.add(user)
+    db.commit()
+    access_token = auth_service.create_access_token(data={"sub": guest_email})
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.post("/token", response_model=Token)

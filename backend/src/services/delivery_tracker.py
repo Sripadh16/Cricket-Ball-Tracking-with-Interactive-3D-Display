@@ -139,7 +139,8 @@ class DeliveryTracker:
         if not cap.isOpened():
             return None
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or not np.isfinite(fps) or fps <= 0 or fps > 1000:
+        fps_source = "metadata" if np.isfinite(fps) and 0 < fps <= 1000 else "fallback"
+        if fps_source == "fallback":
             fps = 30.0
         n_meta = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         total = min(n_meta if 0 < n_meta < 10 ** 7 else self.max_frames, self.max_frames)
@@ -153,6 +154,7 @@ class DeliveryTracker:
         kernel = np.ones((3, 3), np.uint8)
         W = H = None
         idx = 0
+        timing_source = "decoder_pts"
         while idx < self.max_frames:
             ok, frame = cap.read()
             if not ok:
@@ -168,6 +170,7 @@ class DeliveryTracker:
                 band_lo, band_hi = 0.05 * H, 0.95 * H  # broadcast banners / scorebugs live at the edges
             t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
             if not np.isfinite(t) or (times and t <= times[-1]) or t < 0:
+                timing_source = "approximate_fps_fallback"
                 t = (times[-1] + 1.0 / fps) if times else idx / fps
             times.append(float(t))
 
@@ -257,7 +260,9 @@ class DeliveryTracker:
         Tinv = np.linalg.inv(T)
         t_capture = _capture_times(times, dups, cuts)
         return {"t_capture": t_capture, "dups": dups,"fps": fps, "W": W, "H": H, "diag": diag, "times": times, "samples": samples,
-                "T": T, "Tinv": Tinv, "cuts": cuts, "cum": T[:, :2, 2], "cands": cands, "stumps": stumps, "n": idx}
+                "T": T, "Tinv": Tinv, "cuts": cuts, "cum": T[:, :2, 2], "cands": cands, "stumps": stumps, "n": idx,
+                "frame_count": n_meta or None, "source_duration_s": n_meta / fps if n_meta > 0 and fps_source == "metadata" else None,
+                "timing_source": timing_source, "fps_source": fps_source}
 
     def select_delivery_chain(self, scan: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Pick the delivery: search each camera shot that shows stumps (broadcast clips also contain
@@ -623,10 +628,10 @@ class DeliveryTracker:
         result: Dict[str, Any] = {"status": "chain", "scan": scan, "chain": chain,
                                   "video_info": {"fps": scan["fps"], "width": scan["W"], "height": scan["H"]}}
 
-        inputs = self.geometry_inputs(scan, chain)
-        result["geometry_inputs"] = inputs
         general = None
         try:
+            inputs = self.geometry_inputs(scan, chain)
+            result["geometry_inputs"] = inputs
             general = self.reconstruct(inputs, corners=getattr(self, "manual_corners", None))
         except Exception as exc:  # never lose the delivery because the general solver failed
             logger.warning("General reconstruction failed: %s", exc)
@@ -854,9 +859,10 @@ class DeliveryTracker:
 # =============================================================================== general camera reconstruction
 
 def _flight_window(track: List[Dict[str, Any]]) -> Tuple[int, int]:
-    """Drop implausibly fast jumps at either end (arm swing, re-acquisition); everything else is left to the
-    physical fit, whose residuals trim pre-release and post-contact points. Image-space reversals are NOT cut:
-    seen from behind the bowler the ball's image legitimately turns as it dips and bounces."""
+    """Trim fast pre-release jumps and leave the tail to the physical fit.
+
+    A real bounce can produce a sudden, sustained increase in image speed.
+    """
     n = len(track)
     if n < 4:
         return 0, n - 1
@@ -868,8 +874,6 @@ def _flight_window(track: List[Dict[str, Any]]) -> Tuple[int, int]:
     i0, i1 = 0, n - 1
     while i0 < i1 - 4 and speed[i0] > 3.0 * ref:
         i0 += 1
-    while i1 > i0 + 4 and speed[i1 - 1] > 3.0 * ref:
-        i1 -= 1
     return i0, i1
 
 
@@ -877,11 +881,11 @@ def _drs_from_fit(cam, fit, t_first: float, t_last: float, sigma_x: Optional[flo
     """Pitching / impact / wickets from a fitted 3D flight (x = off side for a right-hander)."""
     from services.ballistic_fit import state_at
     half_w, r = STUMP_HALF_W, BALL_R
-    line_ok = sigma_x is None or sigma_x <= 0.08
+    line_ok = sigma_x is not None and sigma_x <= 0.08
     out: Dict[str, Any] = {}
     # impact = the last tracked flight point (the ball's path was interrupted there) unless it reached the stumps
     X_imp, V_imp = state_at(fit, t_last)
-    reached = X_imp[1] >= STUMP_Y - 0.05
+    reached = X_imp[1] >= STUMP_Y
     # predicted path from impact to the stump plane (real-time integration with bounce physics)
     path = []
     X, V = X_imp.copy(), V_imp.copy()
@@ -909,11 +913,12 @@ def _drs_from_fit(cam, fit, t_first: float, t_last: float, sigma_x: Optional[flo
                 target = state_at(fit, t1_)[0]
                 break
     else:
-        for (ta, Xa, _), (tb_, Xb, _) in zip(path, path[1:]):
+        for (_, Xa, _), (_, Xb, _) in zip([(t_last, X_imp, V_imp)] + path, path):
             if Xa[1] < STUMP_Y <= Xb[1]:
                 fr = (STUMP_Y - Xa[1]) / max(1e-9, Xb[1] - Xa[1])
                 target = Xa + fr * (Xb - Xa)
                 break
+    crossed_stump_plane = target is not None
     if target is None:
         target = path[-1][1] if path else X_imp
 
@@ -961,6 +966,7 @@ def _drs_from_fit(cam, fit, t_first: float, t_last: float, sigma_x: Optional[flo
         hit = "Missing Leg" if tx < 0 else "Missing Off"
     out.update({
         "impact_X": X_imp, "impact_t": t_last, "target": target, "path": path, "bounce_pt": bounce_pt,
+        "crossed_stump_plane": crossed_stump_plane,
         "bounce_t": (fit["tb"] if fit["bounce"] and fit["tb"] <= t_last + 1e-6 else
                      (bounced_in_prediction[1] if bounced_in_prediction else None)),
         "evaluation": {"decision": decision, "pitching": pitching, "impact": impact, "wickets": wickets,
@@ -1254,6 +1260,12 @@ def _reconstruct(inputs: Dict[str, Any], corners=None) -> Optional[Dict[str, Any
     except Exception as exc:  # the swing figure is an extra; never lose the reconstruction over it
         logger.info("Air swing measurement failed: %s", exc)
     drs["swing_measurement"] = swing
+    # A stable fit must reach the batting crease before it can support a short wicket projection.
+    bounce_observed = tb is None or (fit["bounce"] and t[1] < tb < t[-2])
+    if (len(flight) >= 8 and t_last - t_first >= 0.16 and X0[1] < 0 and drs_geo["impact_X"][1] >= STUMP_Y - 2
+            and drs_geo["crossed_stump_plane"] and ev["line_observable"] and bounce_observed):
+        drs["wicket_projection"] = {"wickets": ev["wickets"], "hit_stump": ev["hit_stump"],
+                                    "height_at_stumps_m": ev["height_at_stumps_m"]}
     return {"status": "reconstructed", "points": points, "drs": drs, "camera": cam.to_dict(),
             "time_scale": fit["s"], "fit_rms_m": None, "fit_rms_px": round(fit["rms_px"], 2),
             "measured_points": len(flight), "frames": (f_first, f_last), "method": "camera_ballistic_fit",

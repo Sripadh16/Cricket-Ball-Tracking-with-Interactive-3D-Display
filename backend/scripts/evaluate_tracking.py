@@ -33,7 +33,9 @@ def parse_tracking_data(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):
         return data
     elif isinstance(data, dict):
-        if "points" in data and isinstance(data["points"], list):
+        if isinstance(data.get("pixel_track"), list):
+            return data["pixel_track"]
+        elif "points" in data and isinstance(data["points"], list):
             return data["points"]
         elif "ball_trajectory" in data and isinstance(data["ball_trajectory"], list):
             return data["ball_trajectory"]
@@ -332,6 +334,8 @@ def main():
     parser.add_argument("--tracking-result", type=str, help="Path to tracking result JSON (dict or list)")
     parser.add_argument("--video", type=str, help="Path to video file to track and evaluate")
     parser.add_argument("--threshold-px", type=float, default=15.0, help="Pixel distance match threshold")
+    parser.add_argument("--annotated-frames-only", action="store_true",
+                        help="Score only the frames in a sparse positive-label CSV. Other frames remain unscored.")
     parser.add_argument("--output-json", type=str, help="Optional path to write metrics JSON")
     parser.add_argument("--output-markdown", type=str, help="Optional path to write markdown report")
 
@@ -357,10 +361,9 @@ def main():
 
     if args.video:
         print(f"Tracking ball on video: {args.video}...")
-        from services.ball_tracking_service import BallTrackingService
-        service = BallTrackingService()
-        result = service.track_ball(args.video)
-        tracked_points = result.get('points', [])
+        import asyncio
+        from api.videos import _run_tracking_async
+        tracked_points = parse_tracking_data(asyncio.run(_run_tracking_async(args.video)))
     elif args.tracking_result:
         with open(args.tracking_result, 'r') as f:
             raw_data = json.load(f)
@@ -369,7 +372,11 @@ def main():
         print("Error: Either --tracking-result or --video must be specified.")
         sys.exit(1)
 
+    if args.annotated_frames_only:
+        print("Scoring annotated frames only. These results do not measure false positives on unlabelled frames.")
+        tracked_points = [p for p in tracked_points if p.get('frame_idx') in gt]
     metrics = evaluate_trajectory(tracked_points, gt, match_threshold_px=args.threshold_px)
+    metrics["scope"] = "annotated_frames_only" if args.annotated_frames_only else "full_clip"
     print(format_report(metrics))
 
     if args.output_json:

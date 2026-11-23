@@ -77,6 +77,8 @@ class AuthService:
 
     def authenticate_user(self, email: str, password: str) -> Optional[User]:
         """Authenticate a user with email and password, transparently upgrading legacy hashes"""
+        if email.strip().lower() == "guest@cricket.drs":
+            return None  # The retired shared account had a public password.
         user = self.db.query(User).filter(User.email == email).first()
         if not user:
             logger.warning(f"Authentication failed: user not found - {email}")

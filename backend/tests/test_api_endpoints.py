@@ -107,7 +107,7 @@ def test_api_root(client):
 
 
 def test_guest_auth_endpoint(client):
-    """Guest authentication provisions or returns a guest access token seamlessly."""
+    """Guest sessions get distinct owners and cannot list each other's clips."""
     response = client.post("/auth/guest")
     assert response.status_code == 200
     data = response.json()
@@ -119,6 +119,22 @@ def test_guest_auth_endpoint(client):
     resp = client.get("/videos/", headers=headers)
     assert resp.status_code == 200
     assert "videos" in resp.json()
+    guest_id = client.get("/auth/me", headers=headers).json()["id"]
+    other_token = client.post("/auth/guest").json()["access_token"]
+    other_headers = {"Authorization": f"Bearer {other_token}"}
+    assert client.get("/auth/me", headers=other_headers).json()["id"] != guest_id
+
+    with _TestingSessionLocal() as db:
+        video = Video(filename="guest-delivery.mp4", file_path="guest-delivery.mp4", user_id=guest_id)
+        db.add(video)
+        db.commit()
+        video_id = video.id
+    assert [clip["id"] for clip in client.get("/videos/", headers=headers).json()["videos"]] == [video_id]
+    assert client.get("/videos/", headers=other_headers).json()["videos"] == []
+    assert client.get(f"/videos/{video_id}/trajectory", headers=other_headers).status_code == 403
+    assert client.get(f"/videos/{video_id}/progress").status_code == 401
+    assert client.get(f"/videos/{video_id}/progress", headers=other_headers).status_code == 403
+    assert client.get(f"/videos/{video_id}/stream", headers=other_headers).status_code == 403
 
 
 def test_get_preset_deliveries(client):
@@ -446,7 +462,7 @@ def test_reprocess_atomic_rollback_on_failure(client, test_users):
     db.commit()
     db.close()
 
-    # Mock BallTrackingService.track_ball to succeed, but simulate DB persistence failure
+    # Supply a successful tracking result before simulating a persistence failure.
     dummy_track_result = {
         "points": [{"x": 9.0, "y": 9.0, "z": 9.0, "t": 0.5}],
         "timestamps": [0.5],
@@ -456,7 +472,7 @@ def test_reprocess_atomic_rollback_on_failure(client, test_users):
     }
 
     try:
-        with patch.object(BallTrackingService, "track_ball", return_value=dummy_track_result):
+        with patch("api.videos._run_tracking_async", return_value=dummy_track_result):
             # Patch _build_additional_data to raise an exception during replacement preparation
             with patch("api.videos._build_additional_data", side_effect=RuntimeError("Simulated DB persistence failure")):
                 resp = client.post(f"/videos/{video.id}/reprocess", headers=user_a["headers"])
@@ -547,9 +563,9 @@ def test_unverified_events_suppression_on_horizontal_track():
 
 # ─── Progress & DRS Lifecycle Tests ──────────────────────────────────────────
 
-def test_get_video_progress_not_found(client):
+def test_get_video_progress_not_found(client, test_users):
     """GET /videos/{id}/progress for non-existent video returns 404."""
-    resp = client.get("/videos/nonexistent-id-9999/progress")
+    resp = client.get("/videos/nonexistent-id-9999/progress", headers=test_users["user_a"]["headers"])
     assert resp.status_code == 404
 
 
@@ -614,6 +630,7 @@ def test_manual_calibration_ownership_and_roundtrip(client, test_users):
     assert client.put(route, json=payload).status_code == 401
     assert client.put(route, json=payload, headers=test_users['user_b']['headers']).status_code == 403
     assert client.put(route, json={'corners': [[0, 0]] * 4}, headers=test_users['user_a']['headers']).status_code == 422
+    assert client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()['drs_evaluation'] is None
     assert client.put(route, json=payload, headers=test_users['user_a']['headers']).status_code == 200
     data = client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()
     assert data['calibration_status'] == 'manual_pitch_plane'

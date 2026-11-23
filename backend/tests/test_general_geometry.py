@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from services.camera_geometry import Camera, look_at, solve_camera, HALF_L, PITCH_HALF_W, STUMP_H  # noqa: E402
 from services.ballistic_fit import fit_flight, state_at, time_at_y, physical_score, choose_reconstruction, BALL_R  # noqa: E402
+from services.delivery_tracker import DeliveryTracker  # noqa: E402
 
 W, H = 1280, 720
 
@@ -147,6 +148,23 @@ def test_slow_motion_is_detected():
     est, fit = pick(solve_camera(W, H, stumps, edges), ts, uv)
     assert abs(fit["s"] - 0.25) < 0.08, fit["s"]
     assert abs(fit["speed_kmh"] - 130) < 20, fit["speed_kmh"]
+
+
+def test_wicket_projection_requires_tracked_flight_near_the_striker():
+    cam = make_cam(*CAMERAS["broadcast_behind_bowler"])
+    ts, positions, truth = delivery()
+    pixels = cam.project(positions)
+    corners = cam.project([[-PITCH_HALF_W, -HALF_L, 0], [PITCH_HALF_W, -HALF_L, 0],
+                           [PITCH_HALF_W, HALF_L, 0], [-PITCH_HALF_W, HALF_L, 0]]).tolist()
+    track = [{"f": i, "t": float(t), "sx": float(x), "sy": float(y), "px": float(x), "py": float(y), "conf": 1.0}
+             for i, (t, (x, y)) in enumerate(zip(ts, pixels))]
+    inputs = {"W": W, "H": H, "track": track,
+              "frames": {"lo": 0, "hi": len(ts) - 1, "times": ts.tolist(), "T": [np.eye(3).tolist()] * len(ts)}}
+    full = DeliveryTracker.reconstruct(inputs, corners=corners)
+    assert full["drs"]["wicket_projection"]["height_at_stumps_m"] == pytest.approx(truth_at_stumps(truth)[1], abs=0.12)
+    short = DeliveryTracker.reconstruct({**inputs, "track": track[:-3]}, corners=corners)
+    assert short["points"]
+    assert "wicket_projection" not in short["drs"]
 
 
 @pytest.mark.parametrize("name", ["broadcast_behind_bowler", "net_session_low_behind_bowler", "oblique_point"])
