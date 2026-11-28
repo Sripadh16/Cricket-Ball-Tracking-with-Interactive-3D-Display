@@ -15,7 +15,7 @@ class ReviewService:
             notes=notes
         )
         self.db.add(review)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(review)
         return review
 

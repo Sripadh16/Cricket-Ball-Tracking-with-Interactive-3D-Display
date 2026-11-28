@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 from database import get_db
 from services.review_service import ReviewService
+from services.analysis_jobs import analysis_transaction
 from services.video_service import VideoService
 from api.auth import get_current_user, get_current_user_optional
 from models.user import User
@@ -57,20 +58,17 @@ async def create_review(
     db: Session = Depends(get_db)
 ):
     """Create a new review for a video with authenticated ownership verification"""
-    # Verify the video exists and belongs to the authenticated user
-    video = VideoService(db).get_video(request.video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    if video.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+    with analysis_transaction(db):
+        video = VideoService(db).get_video(request.video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail="Video not found")
+        if video.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
 
-    review_service = ReviewService(db)
-
-    try:
-        review = review_service.create_review(
+        review = ReviewService(db).create_review(
             video_id=request.video_id,
             user_id=current_user.id,
-            decisions=[(d.model_dump() if hasattr(d, 'model_dump') else d.dict()) for d in request.decisions],
+            decisions=[decision.model_dump() for decision in request.decisions],
             notes=request.notes
         )
 
@@ -81,9 +79,6 @@ async def create_review(
             "video_id": review.video_id,
             "created_at": review.created_at.isoformat() if review.created_at else None
         }
-    except Exception as e:
-        logger.error(f"Failed to create review: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create review: {str(e)}")
 
 @router.get("/{review_id}")
 async def get_review(

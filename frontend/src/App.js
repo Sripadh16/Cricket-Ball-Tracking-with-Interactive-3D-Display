@@ -77,6 +77,8 @@ function App() {
   // trajectoryError: 'not_processed' | 'load_error' | null
   const [trajectoryError, setTrajectoryError] = useState(null);
   const [trackingProgress, setTrackingProgress] = useState(null);
+  const [analysisStatus, setAnalysisStatus] = useState(null);
+  const [watchAnalysis, setWatchAnalysis] = useState(false);
 
   // Ref to cancel/ignore stale async trajectory fetches when user rapidly switches videos
   const activeVideoFetchId = useRef(0);
@@ -89,6 +91,8 @@ function App() {
     setTrajectoryLoading(true);
     setTrajectoryError(null);
     setTrackingProgress(null);
+    setAnalysisStatus(null);
+    setWatchAnalysis(['processing', 'uploaded'].includes(video.status));
     setCurrentView('review');
 
     try {
@@ -101,6 +105,7 @@ function App() {
       setTrajectoryData(null);
       // 404 = video not yet processed; anything else = real error
       setTrajectoryError(err.response?.status === 404 ? 'not_processed' : 'load_error');
+      if (err.response?.status === 404) setWatchAnalysis(true);
     } finally {
       if (fetchId === activeVideoFetchId.current) {
         setTrajectoryLoading(false);
@@ -109,7 +114,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedVideo || trajectoryError !== 'not_processed') return;
+    if (!selectedVideo || !watchAnalysis) return;
     const fetchId = activeVideoFetchId.current;
     let cancelled = false;
     let timer;
@@ -118,8 +123,10 @@ function App() {
         const progress = await api.get(`/videos/${selectedVideo.id}/progress`);
         if (cancelled || fetchId !== activeVideoFetchId.current) return;
         setTrackingProgress(progress.data.progress);
-        if (['error', 'failed'].includes(progress.data.status)) {
-          setTrajectoryError('processing_failed');
+        setAnalysisStatus(progress.data);
+        if (progress.data.job_state === 'failed' || ['error', 'failed'].includes(progress.data.status)) {
+          if (!progress.data.has_previous_result) setTrajectoryError('processing_failed');
+          setWatchAnalysis(false);
           return;
         }
         if (progress.data.status === 'processed') {
@@ -127,16 +134,20 @@ function App() {
           if (cancelled || fetchId !== activeVideoFetchId.current) return;
           setTrajectoryData(response.data);
           setTrajectoryError(null);
+          setWatchAnalysis(false);
           return;
         }
         timer = setTimeout(poll, 2500);
       } catch {
-        if (!cancelled && fetchId === activeVideoFetchId.current) setTrajectoryError('load_error');
+        if (!cancelled && fetchId === activeVideoFetchId.current) {
+          setAnalysisStatus({ connection_error: true });
+          timer = setTimeout(poll, 5000);
+        }
       }
     };
     timer = setTimeout(poll, 2500);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [selectedVideo, trajectoryError]);
+  }, [selectedVideo, watchAnalysis]);
 
   const handleLaunchDemo = useCallback(() => {
     activeVideoFetchId.current++;
@@ -144,6 +155,8 @@ function App() {
     setTrajectoryData(null);
     setTrajectoryLoading(false);
     setTrajectoryError(null);
+    setWatchAnalysis(false);
+    setAnalysisStatus(null);
     setCurrentView('review');
   }, []);
 
@@ -154,6 +167,8 @@ function App() {
     setTrajectoryData(null);
     setTrajectoryLoading(false);
     setTrajectoryError(null);
+    setWatchAnalysis(false);
+    setAnalysisStatus(null);
   }, []);
 
   return (
@@ -173,6 +188,8 @@ function App() {
           trajectoryLoading={trajectoryLoading}
           trajectoryError={trajectoryError}
           trackingProgress={trackingProgress}
+          analysisStatus={analysisStatus}
+          analysisPending={watchAnalysis}
           onBack={handleBackToDashboard}
         />
         </Suspense>

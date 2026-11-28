@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from database import Base
 from models.user import User
 from models.review_session import ReviewSession
+from models.video import Video
+from models.analysis_job import AnalysisJob
 from schema import upgrade_database, versions
 
 
@@ -19,12 +21,14 @@ def test_upgrade_preserves_current_sqlite_data(tmp_path):
     with engine.begin() as connection:
         Base.metadata.create_all(connection)
         connection.execute(User.__table__.insert().values(email='reviewer@example.com', name='Reviewer', hashed_password='fixture'))
+        connection.execute(Video.__table__.insert().values(id='old-job', user_id='owner', filename='clip.webm', file_path='clip.webm', status='processing'))
 
     upgrade_database(engine)
     upgrade_database(engine)
     with engine.connect() as connection:
         assert connection.scalar(select(User.email)) == 'reviewer@example.com'
-        assert connection.scalars(select(versions.c.version).order_by(versions.c.version)).all()
+        assert connection.scalars(select(versions.c.version).order_by(versions.c.version)).all() == [1, 2]
+        assert connection.scalar(select(AnalysisJob.state).where(AnalysisJob.video_id == 'old-job')) == 'queued'
     engine.dispose()
 
 

@@ -310,7 +310,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
     setReprocessingId(video.id);
     setError('');
     try {
-      await api.post('/videos/' + video.id + '/reprocess');
+      await api.post('/videos/' + video.id + '/reprocess', null, { params: { sync: false } });
       await loadVideos(false);
     } catch (err) {
       setError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not reprocess this delivery. Please try again.');

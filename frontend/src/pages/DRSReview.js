@@ -61,6 +61,8 @@ export default function DRSReview({
   trajectoryLoading = false,
   trajectoryError = null,
   trackingProgress = null,
+  analysisStatus = null,
+  analysisPending = false,
   onBack
 }) {
   const smallScreen = useMediaQuery('(max-width:767px)');
@@ -1068,6 +1070,30 @@ export default function DRSReview({
               <Typography variant="body2" sx={{ color: 'var(--muted)' }}>
                 Loading trajectory analysis…
               </Typography>
+            </div>
+          )}
+
+          {isVideoMode && initialTrajectory && analysisPending && (
+            <div className="inspector-card" role="status">
+              <Typography variant="body2" fontWeight={700}>Reanalysing delivery</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Previous analysis remains visible until the replacement is ready.
+              </Typography>
+              <LinearProgress aria-label="Reanalysis progress"
+                variant={trackingProgress > 0 ? 'determinate' : 'indeterminate'}
+                value={trackingProgress ?? 0} />
+            </div>
+          )}
+          {isVideoMode && analysisStatus?.job_state === 'failed' && analysisStatus.has_previous_result && (
+            <div className="inspector-card" role="status">
+              <Typography variant="body2" color="warning.main">
+                Reanalysis failed. Showing the previous saved analysis.
+              </Typography>
+            </div>
+          )}
+          {isVideoMode && analysisStatus?.connection_error && (
+            <div className="inspector-card" role="status">
+              Connection interrupted. Retrying status automatically.
             </div>
           )}
 

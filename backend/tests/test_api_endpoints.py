@@ -59,7 +59,7 @@ _main_module.app.dependency_overrides[get_db] = _override_get_db
 def client():
     """FastAPI test client backed by an isolated temp-file SQLite database."""
     with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr('api.videos.SessionLocal', _TestingSessionLocal)
+        patcher.setattr('services.analysis_jobs.SessionLocal', _TestingSessionLocal)
         patcher.setattr(_main_module, 'upgrade_database', lambda: upgrade_database(_test_engine))
         patcher.setattr(_main_module, 'schema_ready', lambda: schema_ready(_test_engine))
         with TestClient(_main_module.app) as test_client:
@@ -126,7 +126,7 @@ def test_uploaded_fixture_completes_review_lifecycle(client, tmp_path, monkeypat
     assert not list(tmp_path.iterdir())
 
     with fixture.open('rb') as source:
-        upload = client.post('/videos/upload', headers=headers, files={'file': (f'../private/{fixture.name}', source, 'video/webm')})
+        upload = client.post('/videos/upload?sync=true', headers=headers, files={'file': (f'../private/{fixture.name}', source, 'video/webm')})
     assert upload.status_code == 200
     assert upload.json()['original_filename'] == fixture.name
     assert uuid.UUID(Path(upload.json()['filename']).stem)
@@ -526,6 +526,11 @@ def test_reprocess_atomic_rollback_on_failure(client, test_users):
                 resp = client.post(f"/videos/{video.id}/reprocess", headers=user_a["headers"])
                 assert resp.status_code == 500
 
+        progress = client.get(f"/videos/{video.id}/progress", headers=user_a["headers"]).json()
+        assert progress["job_state"] == "failed"
+        assert progress["has_previous_result"] is True
+        assert client.get(f"/videos/{video.id}/trajectory", headers=user_a["headers"]).status_code == 200
+
         # Verify old trajectory survived and video status is still 'processed'
         verify_db = _TestingSessionLocal()
         persisted_traj = verify_db.query(Trajectory).filter(Trajectory.video_id == video.id).first()
@@ -688,3 +693,43 @@ def test_manual_calibration_ownership_and_roundtrip(client, test_users):
     assert data['timing_source'] == 'decoder_pts'
     assert data['video_duration'] == 8
     assert data['tracking_start_s'] == data['tracking_end_s'] == 2
+
+
+def test_active_reanalysis_blocks_mutations_but_preserves_read_access(client, test_users, tmp_path):
+    import time
+    from models.analysis_job import AnalysisJob
+    from services.analysis_jobs import analysis_transaction, enqueue
+
+    owner = test_users["user_a"]
+    media = tmp_path / "active-retry.webm"
+    media.write_bytes(b"fixture")
+    video_id = str(uuid.uuid4())
+    with _TestingSessionLocal() as db, analysis_transaction(db):
+        video = Video(id=video_id, user_id=owner["id"], filename=media.name,
+                      file_path=str(media), status="processed")
+        db.add(video)
+        db.flush()
+        db.add(Trajectory(video_id=video_id, points=[{"t": 0.2, "x": 0, "y": 0, "z": 1}]))
+        enqueue(db, video)
+        db.flush()
+        job = db.get(AnalysisJob, video_id)
+        job.state = "running"
+        job.claim_id = str(uuid.uuid4())
+        job.lease_until = time.time() + 600
+        job.attempts = 1
+    url = f"/videos/{video_id}"
+    try:
+        progress = client.get(f"{url}/progress", headers=owner["headers"]).json()
+        assert progress["job_state"] == "running"
+        assert progress["has_previous_result"] is True
+        assert client.get(f"{url}/trajectory", headers=owner["headers"]).status_code == 200
+        assert client.post(f"{url}/reprocess?sync=false", headers=owner["headers"]).status_code == 409
+        assert client.put(f"{url}/calibration", headers=owner["headers"],
+                          json={"corners": [[0, 0], [10, 0], [10, 10], [0, 10]]}).status_code == 409
+        assert client.delete(url, headers=owner["headers"]).status_code == 409
+        assert media.exists()
+    finally:
+        with _TestingSessionLocal() as db, analysis_transaction(db):
+            db.query(AnalysisJob).filter_by(video_id=video_id).delete()
+            db.query(Trajectory).filter_by(video_id=video_id).delete()
+            db.query(Video).filter_by(id=video_id).delete()

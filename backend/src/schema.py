@@ -1,7 +1,11 @@
 """Versioned schema upgrades executed before the API accepts traffic."""
+import time
+import uuid
+
 from sqlalchemy import Column, Integer, MetaData, Table, func, inspect, select, text
 
 from database import Base, engine
+from models.analysis_job import AnalysisJob, MediaDeletion
 from models.review_session import ReviewSession
 from models.trajectory import Trajectory
 from models.user import User
@@ -38,7 +42,7 @@ def _upgrade_initial_schema(connection):
             ):
                 connection.execute(text(statement))
 
-    Base.metadata.create_all(connection)
+    Base.metadata.create_all(connection, tables=APP_TABLES)
     inspector = inspect(connection)
     for table in APP_TABLES:
         actual = {column['name'] for column in inspector.get_columns(table.name)}
@@ -47,7 +51,16 @@ def _upgrade_initial_schema(connection):
             raise RuntimeError(f'Schema upgrade could not resolve {table.name} columns: {", ".join(sorted(missing))}')
 
 
-MIGRATIONS = (_upgrade_initial_schema,)
+def _add_durable_analysis(connection):
+    jobs = AnalysisJob.__table__
+    Base.metadata.create_all(connection, tables=[jobs, MediaDeletion.__table__])
+    video_ids = connection.scalars(select(Video.id).where(Video.status == 'processing')).all()
+    for video_id in video_ids:
+        connection.execute(jobs.insert().values(video_id=video_id, state='queued',
+                                                generation=str(uuid.uuid4()), queued_at=time.time()))
+
+
+MIGRATIONS = (_upgrade_initial_schema, _add_durable_analysis)
 
 
 def upgrade_database(db_engine=engine):

@@ -33,3 +33,10 @@ Real-clip accuracy and participant outcomes depend on access to consented footag
 - Workspace bearer tokens were removed from media URLs. The API issues 30-minute, clip-scoped tickets, checks ownership, uses standard Range and HEAD handling, and sets media cache controls. Library rows use lightweight icons. Native playback can request a replacement ticket from the review.
 - Upload probes reject corrupt, oversized or over-resolution inputs and known clips over the duration limit. File names on disk use generated IDs. Source audio inspection caps downloaded media at 25 MB. Quota checks, upload admission and job scheduling will be made atomic in Phase 2.
 - The playback regression failed before implementation and passed after. The local API and schema run reported 20 passed and one PostgreSQL skip. During the self-audit I fixed an import-order issue that sent the test worker to a different database than its API requests. Frontend verification passed 29 tests and built successfully. Compose configuration and the production-secret rejection check passed. The local Docker engine was unavailable, so the container build and proxy workflow still need a packaged run.
+
+## Phase 2 audit
+
+- Persistent queue, lease recovery, bounded claims, atomic publication and recoverable media deletion are implemented. Expired workers cannot renew or publish. Failed replacement analysis retains the previous trajectory.
+- Review polling preserves saved evidence during retry, displays failure without discarding the saved result, and retries temporary connection failures.
+- Local targeted backend verification: 26 passed, one PostgreSQL skip. Earlier full backend run: 114 passed, five skipped (before the final regression additions). Frontend: 31 tests across ten suites passed; production build succeeded with existing dependency source-map and Browserslist warnings.
+- Active-job mutation regression covers duplicate reprocessing, calibration and deletion rejection while previous analysis remains readable. PostgreSQL concurrency and packaged deployment remain unverified.

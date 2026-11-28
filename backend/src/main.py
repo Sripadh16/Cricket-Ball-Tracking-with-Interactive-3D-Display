@@ -1,14 +1,17 @@
 from contextlib import asynccontextmanager
+import asyncio
 from tempfile import TemporaryFile
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from api.videos import router as videos_router
+from api.videos import run_analysis_worker
 from api.reviews import router as reviews_router
 from api.auth import router as auth_router
 from schema import schema_ready, upgrade_database
 from logging_config import setup_logging
 from config import CORS_ORIGINS, HOST, PORT, UPLOAD_DIR
+from services.analysis_jobs import WORKER_COUNT
 
 # Setup logging
 logger = setup_logging()
@@ -18,7 +21,13 @@ async def lifespan(app):
     upgrade_database()
     with TemporaryFile(dir=UPLOAD_DIR):
         pass
-    yield
+    workers = [asyncio.create_task(run_analysis_worker()) for _ in range(WORKER_COUNT)]
+    try:
+        yield
+    finally:
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
 app = FastAPI(
     title="DRS Ball Tracking API",
