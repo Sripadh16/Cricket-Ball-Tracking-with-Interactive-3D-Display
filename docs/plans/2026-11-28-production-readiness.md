@@ -45,3 +45,30 @@ Real-clip accuracy and participant outcomes depend on access to consented footag
 
 - Evidence classification, candidate coverage, retry while retaining prior evidence, event navigation, audio-marker controls and evidence-aware exports implemented.
 - Frontend: 35 tests in ten suites passed; production build passed. Existing Chrome fixture audit passed offline simulation, library, review, camera toolbar, mobile overflow and explicit reviewer outcome, with no uncaught exceptions. Maximum timestamp error 3 ms across 32 fixture samples at 1x, 0.5x, 0.25x and 0.1x. This does not measure real-world detector accuracy or establish full accessibility compliance.
+
+## Handoff audit
+
+- Phases 0–3 were already committed. The incoming Phase 4 changes added private-link routing, assessment history and coalesced library polling. A fresh run passed 51 frontend tests, the production build, the Chrome fixture audit and 26 backend tests. The PostgreSQL check was skipped.
+- Private links fetched the capped library before opening a clip, so an owned clip could become unreachable from its link. Saved assessments identified the clip but lacked an analysis revision. The guest workspace had no conversion flow. Phase 3 showed candidate coverage, while the decoded time window was absent.
+
+## Phase 4 audit
+
+- Private links now request a single clip. A link opened without a valid session can resume after sign-in. Other workspaces receive the same missing response as a deleted clip. History loads on demand. New assessments record the displayed analysis revision and reject a stale revision after calibration or reprocessing. Migration 3 preserves older assessments without assigning them a revision.
+- **Workspace account → Keep workspace** sets credentials on the existing guest account. Its videos and reviews retain their owner ID. Converting invalidates the previous workspace token. New guest sessions expire after seven days. Stored data is retained. The operational rollback instructions cover reverting after a schema upgrade.
+- The review identifies the decoded time interval separately from candidate coverage. JSON exports include the same interval and analysis revision. Library polling waits for the current request to finish and resumes after the interval while analysis runs.
+- The synthetic 640×360 WebM took 42.339 and 36.766 seconds over two local runs. Both decoded 240 frames and selected ball candidates in 145 frames, yielding 2D evidence. This fixture has no independent ball-location labels for measuring accuracy.
+- All 53 frontend tests passed. Backend verification passed 28 tests, including the real upload fixture and migration from schema version 2. Chrome passed the private-link reload, unauthenticated sign-in entry, and existing replay checks, with a maximum timing difference of 3 ms across 32 samples. The production frontend build and Compose configuration validation passed.
+- The local Docker engine was unavailable, so the packaged PostgreSQL deployment and legacy migration still require verification. The pilot also needs consented footage, independent labels and participant feedback. Guest storage retention and account recovery remain launch decisions.
+
+### Reproduce the tracking benchmark
+
+Run with the backend dependencies installed from the repository root. The evaluator calls the same analysis function as an uploaded delivery. It reports per-run wall time, decoded frames, selected detections, reconstruction method and input SHA-256. This measures decode through reconstruction and includes model initialization. It excludes uploading, queue wait and playback.
+
+```powershell
+New-Item -ItemType Directory -Force tmp
+$env:OPENBLAS_NUM_THREADS = '1'
+$env:OMP_NUM_THREADS = '1'
+python backend/scripts/evaluate_tracking.py --video docs/ui-audit/timing.webm --benchmark-runs 2 --output-json tmp/tracker-benchmark.json
+```
+
+For a consented clip, supply independently labeled source-frame indices and ball centers with `--ground-truth clip.csv`. Use `--annotated-frames-only` for sparse positive labels. Only score whole-clip precision if every visible ball frame is labeled and the unlabeled frames have been checked for absence. Compare runs on the same clip hash, hardware, configuration and weights. Export the scores and timings alongside those conditions. The selected upload track measures end-to-end performance. A per-frame detector benchmark requires evaluating detector output before track selection.

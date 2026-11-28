@@ -7,12 +7,21 @@ from services.video_service import VideoService
 from api.auth import get_current_user, get_current_user_optional
 from models.user import User
 from models.review_session import ReviewSession
+from models.trajectory import Trajectory
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
+from datetime import timezone
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _review_date(review):
+    value = review.created_at
+    if value is None:
+        return None
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 class DecisionModel(BaseModel):
     type: str
@@ -24,6 +33,7 @@ class CreateReviewRequest(BaseModel):
     video_id: str
     decisions: List[DecisionModel]
     notes: Optional[str] = None
+    analysis_revision: Optional[str] = None
 
 @router.get("/")
 async def list_reviews(
@@ -38,7 +48,7 @@ async def list_reviews(
     query = db.query(ReviewSession).filter(ReviewSession.user_id == current_user.id)
     if video_id:
         query = query.filter(ReviewSession.video_id == video_id)
-    reviews = query.all()
+    reviews = query.order_by(ReviewSession.created_at.desc(), ReviewSession.id.desc()).all()
 
     return [
         {
@@ -46,7 +56,8 @@ async def list_reviews(
             "video_id": r.video_id,
             "decisions": r.decisions,
             "notes": r.notes,
-            "created_at": r.created_at.isoformat() if r.created_at else None
+            "analysis_revision": r.analysis_revision,
+            "created_at": _review_date(r),
         }
         for r in reviews
     ]
@@ -64,12 +75,17 @@ async def create_review(
             raise HTTPException(status_code=404, detail="Video not found")
         if video.user_id != current_user.id:
             raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+        if request.analysis_revision is not None:
+            trajectory = db.query(Trajectory).filter_by(video_id=video.id).first()
+            if trajectory is None or trajectory.revision != request.analysis_revision:
+                raise HTTPException(status_code=409, detail="The analysis changed. Reopen the delivery before saving this assessment.")
 
         review = ReviewService(db).create_review(
             video_id=request.video_id,
             user_id=current_user.id,
             decisions=[decision.model_dump() for decision in request.decisions],
-            notes=request.notes
+            notes=request.notes,
+            analysis_revision=request.analysis_revision,
         )
 
         logger.info(f"Review created: {review.id} for video: {request.video_id} by user: {current_user.id}")
@@ -77,7 +93,7 @@ async def create_review(
         return {
             "id": review.id,
             "video_id": review.video_id,
-            "created_at": review.created_at.isoformat() if review.created_at else None
+            "created_at": _review_date(review),
         }
 
 @router.get("/{review_id}")
@@ -101,5 +117,6 @@ async def get_review(
         "video_id": review.video_id,
         "decisions": review.decisions,
         "notes": review.notes,
-        "created_at": review.created_at.isoformat() if review.created_at else None
+        "analysis_revision": review.analysis_revision,
+        "created_at": _review_date(review),
     }

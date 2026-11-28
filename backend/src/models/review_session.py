@@ -12,6 +12,7 @@ class ReviewSession(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     decisions = Column(JSON)  # Array of decisions
     notes = Column(Text)
+    analysis_revision = Column(String)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

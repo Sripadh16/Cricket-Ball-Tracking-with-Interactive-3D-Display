@@ -7,12 +7,14 @@ class ReviewService:
         self.db = db
 
     def create_review(self, video_id: str, user_id: str,
-                     decisions: List[Dict], notes: Optional[str] = None) -> ReviewSession:
+                     decisions: List[Dict], notes: Optional[str] = None,
+                     analysis_revision: Optional[str] = None) -> ReviewSession:
         review = ReviewSession(
             video_id=video_id,
             user_id=user_id,
             decisions=decisions,
-            notes=notes
+            notes=notes,
+            analysis_revision=analysis_revision,
         )
         self.db.add(review)
         self.db.flush()

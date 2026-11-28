@@ -231,13 +231,14 @@ function VideoRecorder({ open, onClose, onRecorded }) {
 }
 
 
-function Dashboard({ onVideoSelect, onLaunchDemo }) {
+function Dashboard({ onVideoSelect, onLaunchDemo, onOpenAccount }) {
   const [videos, setVideos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [error, setError] = useState('');
   const [libraryError, setLibraryError] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
   const [showRecorder, setShowRecorder] = useState(false);
   const [reprocessingId, setReprocessingId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
@@ -245,36 +246,111 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const [query, setQuery] = useState('');
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef(null);
+  const mountedRef = useRef(true);
+  const inFlightLoadRef = useRef(null);
+  const loadGenerationRef = useRef(0);
+  const spinnerWaitersRef = useRef(0);
+  const uploadingRef = useRef(false);
 
-  const loadVideos = useCallback(async (showSpinner = true) => {
-    if (showSpinner) setLoading(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const executeLoad = useCallback(async () => {
     try {
       await ensureGuestSession();
       const requestVideos = () => api.get('/videos/', { timeout: 8000 });
       const response = await requestVideos().catch(async err => {
-        if (err.response?.status !== 401) throw err;
+        if (err.response?.status !== 401 || !mountedRef.current) throw err;
+        setSessionExpired(true);
         await ensureGuestSession();
         return requestVideos();
       });
+      if (!mountedRef.current) return;
       setVideos(response.data.videos || []);
       setLibraryError(false);
     } catch {
-      setLibraryError(true);
-    } finally {
-      if (showSpinner) setLoading(false);
+      if (mountedRef.current) {
+        setLibraryError(true);
+      }
     }
   }, []);
+
+  const loadVideos = useCallback(async (showSpinner = true, { force = false } = {}) => {
+    if (showSpinner) {
+      spinnerWaitersRef.current += 1;
+      if (mountedRef.current) setLoading(true);
+    }
+    const requiredGeneration = force ? loadGenerationRef.current + 1 : 0;
+
+    try {
+      while (mountedRef.current) {
+        if (inFlightLoadRef.current) {
+          await inFlightLoadRef.current;
+          if (force && loadGenerationRef.current < requiredGeneration) {
+            continue;
+          }
+          break;
+        }
+
+        loadGenerationRef.current += 1;
+        let currentPromise;
+        currentPromise = executeLoad().finally(() => {
+          if (inFlightLoadRef.current === currentPromise) {
+            inFlightLoadRef.current = null;
+          }
+        });
+        inFlightLoadRef.current = currentPromise;
+        await currentPromise;
+
+        if (!force || loadGenerationRef.current >= requiredGeneration) {
+          break;
+        }
+      }
+    } finally {
+      if (showSpinner) {
+        spinnerWaitersRef.current = Math.max(0, spinnerWaitersRef.current - 1);
+        if (spinnerWaitersRef.current === 0 && mountedRef.current) {
+          setLoading(false);
+        }
+      }
+    }
+  }, [executeLoad]);
 
   useEffect(() => { loadVideos(); }, [loadVideos]);
   const hasProcessing = videos.some(v => v.status === 'processing' || v.status === 'uploaded') || reprocessingId !== null;
   useEffect(() => {
-    if (!hasProcessing) return;
-    const timer = setInterval(() => loadVideos(false), 2500);
-    return () => clearInterval(timer);
+    if (!hasProcessing) return undefined;
+
+    let cancelled = false;
+    let timerId = null;
+
+    const scheduleNext = () => {
+      if (cancelled || !mountedRef.current) return;
+      timerId = setTimeout(async () => {
+        timerId = null;
+        if (cancelled || !mountedRef.current) return;
+        await loadVideos(false);
+        scheduleNext();
+      }, 2500);
+    };
+
+    scheduleNext();
+
+    return () => {
+      cancelled = true;
+      if (timerId !== null) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
+    };
   }, [hasProcessing, loadVideos]);
 
   const uploadVideo = async (file) => {
-    if (uploading) return;
+    if (uploading || uploadingRef.current) return;
     if (!/\.(mp4|mov|avi|mkv|webm)$/i.test(file.name)) {
       setError('Choose an MP4, MOV, AVI, MKV or WebM video.');
       return;
@@ -283,6 +359,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
       setError('This clip exceeds the ' + MAX_UPLOAD_SIZE_MB + ' MB limit. Choose a smaller file.');
       return;
     }
+    uploadingRef.current = true;
     setUploading(true);
     setUploadProgress(0);
     setError('');
@@ -291,40 +368,64 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
     try {
       await ensureGuestSession();
       const res = await api.post('/videos/upload', formData, { onUploadProgress: e => {
-        if (e.total) setUploadProgress(Math.min(100, Math.round(e.loaded * 100 / e.total)));
+        if (mountedRef.current && e.total) {
+          setUploadProgress(Math.min(100, Math.round(e.loaded * 100 / e.total)));
+        }
       }});
+      if (!mountedRef.current) return;
       if (res.data?.id) {
         onVideoSelect(res.data);
       } else {
-        await loadVideos(false);
+        await loadVideos(false, { force: true });
       }
     } catch (err) {
+      if (!mountedRef.current) return;
       const detail = err.response?.data?.detail;
       setError(typeof detail === 'string' ? detail : 'Upload failed. Your clip was not added. Please try again.');
     } finally {
-      setUploading(false);
+      uploadingRef.current = false;
+      if (mountedRef.current) {
+        setUploading(false);
+      }
     }
   };
 
   const handleReprocess = async (video) => {
+    if (reprocessingId !== null) return;
     setReprocessingId(video.id);
     setError('');
     try {
       await api.post('/videos/' + video.id + '/reprocess', null, { params: { sync: false } });
-      await loadVideos(false);
+      if (!mountedRef.current) return;
+      await loadVideos(false, { force: true });
     } catch (err) {
-      setError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not reprocess this delivery. Please try again.');
-    } finally { setReprocessingId(null); }
+      if (mountedRef.current) {
+        setError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not reprocess this delivery. Please try again.');
+      }
+    } finally {
+      if (mountedRef.current) {
+        setReprocessingId(null);
+      }
+    }
   };
 
   const handleDelete = async () => {
+    if (!deleteTarget || deleting) return;
     setDeleting(true);
     try {
       await api.delete('/videos/' + deleteTarget.id);
+      if (!mountedRef.current) return;
       setDeleteTarget(null);
-      await loadVideos(false);
-    } catch (err) { setError('Could not delete this delivery. Please try again.'); }
-    finally { setDeleting(false); }
+      await loadVideos(false, { force: true });
+    } catch (err) {
+      if (mountedRef.current) {
+        setError('Could not delete this delivery. Please try again.');
+      }
+    } finally {
+      if (mountedRef.current) {
+        setDeleting(false);
+      }
+    }
   };
 
   const visibleVideos = videos.filter(v => (v.original_filename || v.filename || '').toLowerCase().includes(query.toLowerCase()));
@@ -340,11 +441,16 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
         </a>
         <div className="nav-links">
           <a href="#deliveries">Delivery library</a>
+          <Button color="inherit" onClick={onOpenAccount}>Workspace account</Button>
           <Button variant="outlined" color="inherit" onClick={() => fileInputRef.current?.click()}
             disabled={uploading} startIcon={<CloudUpload fontSize="small" />}>Upload clip</Button>
         </div>
       </nav>
       <main id="main-content" className="studio-main" tabIndex={-1}>
+        {sessionExpired && <Alert severity="info" onClose={() => setSessionExpired(false)}
+          action={<Button color="inherit" size="small" onClick={onOpenAccount}>Sign in</Button>}>
+          Your previous session expired. Sign in to return to a workspace you kept.
+        </Alert>}
         <header className="studio-hero">
           <div className="studio-hero-copy">
             <span className="eyebrow">Cricket ball tracking &amp; DRS</span>

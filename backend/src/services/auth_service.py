@@ -82,6 +82,8 @@ class AuthService:
         if email.strip().lower() == "guest@cricket.drs":
             return None  # The retired shared account had a public password.
         user = self.db.query(User).filter(User.email == email).first()
+        if user is None and email != email.strip().lower():
+            user = self.db.query(User).filter(User.email == email.strip().lower()).first()
         if not user or not user.is_active:
             logger.warning("Authentication failed: unknown or inactive user")
             return None

@@ -10,6 +10,7 @@ import os
 import tempfile
 import uuid
 import bcrypt
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -162,7 +163,6 @@ def test_guest_auth_endpoint(client):
     other_token = client.post("/auth/guest").json()["access_token"]
     other_headers = {"Authorization": f"Bearer {other_token}"}
     assert client.get("/auth/me", headers=other_headers).json()["id"] != guest_id
-
     with _TestingSessionLocal() as db:
         video = Video(filename="guest-delivery.mp4", file_path="guest-delivery.mp4", user_id=guest_id)
         db.add(video)
@@ -175,6 +175,46 @@ def test_guest_auth_endpoint(client):
     assert client.get(f"/videos/{video_id}/progress", headers=other_headers).status_code == 403
     assert client.get(f"/videos/{video_id}/stream", headers=other_headers).status_code == 403
 
+
+def test_guest_promotion_keeps_clip_and_revisioned_history(client, test_users):
+    guest_token = client.post('/auth/guest').json()['access_token']
+    headers = {'Authorization': f'Bearer {guest_token}'}
+    guest = client.get('/auth/me', headers=headers).json()
+    assert guest['is_guest'] is True
+    clip_id = str(uuid.uuid4())
+    with _TestingSessionLocal() as db:
+        db.add(Video(id=clip_id, user_id=guest['id'], filename='delivery.webm', file_path='fixture.webm', status='processed'))
+        db.flush()
+        db.add(Trajectory(id='initial-' + clip_id, video_id=clip_id, points=[], ball_detected=False))
+        db.commit()
+        expired = AuthService(db).create_access_token({'sub': guest['email']}, timedelta(seconds=-1))
+
+    assert client.get(f'/videos/{clip_id}').status_code == 401
+    other = test_users['user_a']['headers']
+    assert client.get(f'/videos/{clip_id}', headers=other).status_code == 404
+    assert client.get(f'/videos/{clip_id}', headers=headers).json()['id'] == clip_id
+    assert client.get(f'/videos/{clip_id}/trajectory', headers=headers).json()['analysis_revision'] == 'initial-' + clip_id
+    payload = {'video_id': clip_id, 'decisions': [], 'analysis_revision': 'initial-' + clip_id}
+    assert client.post('/reviews/', json=payload, headers=headers).status_code == 200
+    assert client.post('/reviews/', json={**payload, 'analysis_revision': 'stale'}, headers=headers).status_code == 409
+
+    credentials = {'email': f'Reviewer-{clip_id}@test.com', 'name': 'Reviewer', 'password': 'valid-password123'}
+    assert client.post('/auth/promote', json=credentials, headers={'Authorization': f'Bearer {expired}'}).status_code == 401
+    assert client.post('/auth/promote', json={**credentials, 'email': 'USERA@test.com'}, headers=headers).status_code == 409
+    assert client.get('/auth/me', headers=headers).status_code == 200
+    promoted = client.post('/auth/promote', json=credentials, headers=headers)
+    assert promoted.status_code == 200, promoted.text
+    assert client.get('/auth/me', headers=headers).status_code == 401
+    login = client.post('/auth/login', json={'email': credentials['email'], 'password': credentials['password']})
+    assert login.status_code == 200, login.text
+    account = {'Authorization': f'Bearer {login.json()["access_token"]}'}
+    account_user = client.get('/auth/me', headers=account).json()
+    assert account_user['id'] == guest['id'] and account_user['is_guest'] is False
+    assert client.get(f'/videos/{clip_id}', headers=account).status_code == 200
+    history = client.get('/reviews/', params={'video_id': clip_id}, headers=account).json()
+    assert history[0]['analysis_revision'] == payload['analysis_revision']
+    assert history[0]['created_at'].endswith('+00:00')
+    assert client.post('/auth/promote', json=credentials, headers=account).status_code == 409
 
 def test_get_preset_deliveries(client):
     """Presets remain accessible without authentication."""
@@ -683,9 +723,11 @@ def test_manual_calibration_ownership_and_roundtrip(client, test_users):
     assert client.put(route, json=payload).status_code == 401
     assert client.put(route, json=payload, headers=test_users['user_b']['headers']).status_code == 403
     assert client.put(route, json={'corners': [[0, 0]] * 4}, headers=test_users['user_a']['headers']).status_code == 422
-    assert client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()['drs_evaluation'] is None
+    original = client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()
+    assert original['drs_evaluation'] is None
     assert client.put(route, json=payload, headers=test_users['user_a']['headers']).status_code == 200
     data = client.get(f'/videos/{video_id}/trajectory', headers=test_users['user_a']['headers']).json()
+    assert data['analysis_revision'] != original['analysis_revision']
     assert data['calibration_status'] == 'manual_pitch_plane'
     assert data['points'][0]['y'] == pytest.approx(-10.06, abs=1e-5)
     assert data['points'][0]['z'] == 1

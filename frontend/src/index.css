@@ -279,7 +279,7 @@ details > summary:hover { color: var(--text); }
 }
 @media (max-width: 767px) {
   .studio-nav { min-height: 62px; padding: 10px 16px; gap: 8px; }
-  .nav-links { gap: 8px; }
+  .nav-links { justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
   .nav-links > a { display: none; }
   .studio-main { padding: 16px 16px 30px; }
   .studio-hero { grid-template-columns: 1fr; min-height: 0; }

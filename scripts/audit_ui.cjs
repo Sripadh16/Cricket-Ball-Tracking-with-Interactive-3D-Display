@@ -65,6 +65,7 @@ async function main() {
     };
     let backendAvailable = false;
     let offlinePresetRequests = 0;
+    let libraryRequests = 0;
     socket.onmessage = event => {
       const message = JSON.parse(event.data);
       if (message.id) {
@@ -84,6 +85,7 @@ async function main() {
           return;
         }
         const stream = url.pathname.endsWith('/stream');
+        if (url.pathname === '/videos/' && request.method === 'GET') libraryRequests++;
         let bytes;
         let range;
         let start = 0;
@@ -97,7 +99,9 @@ async function main() {
         const body = url.pathname.startsWith('/videos/presets/') ? (fixture.presets?.[url.pathname.split('/').pop()] || fixture.trajectory)
           : url.pathname.endsWith('/trajectory') ? fixture.uploadTrajectory
           : url.pathname.endsWith('/playback') ? { stream_url: url.pathname.replace(/\/playback$/, '/stream') + '?ticket=fixture' }
-          : url.pathname === '/videos/' ? { videos: fixture.videos } : {};
+          : url.pathname === '/videos/' ? { videos: fixture.videos }
+          : url.pathname === '/auth/me' ? { is_guest: true }
+          : fixture.videos.find(video => url.pathname === `/videos/${video.id}`) || {};
         send('Fetch.fulfillRequest', { requestId, responseCode: stream && range ? 206 : 200, responseHeaders: [
           { name: 'Content-Type', value: stream ? (recordedClip ? 'video/mp4' : 'video/webm') : 'application/json' },
           ...(stream ? [{ name: 'Accept-Ranges', value: 'bytes' }, { name: 'Content-Length', value: String(end - start + 1) },
@@ -347,13 +351,25 @@ async function main() {
     await waitFor('document.querySelector("[role=dialog]")');
     assert.equal(await evaluate('Array.from(document.querySelectorAll("[role=dialog] button")).find(button => button.textContent === "Save Decision").disabled'), true, 'Unknown automated outcome defaults to a saveable verdict');
     await screenshot('review-dialog');
+    assert.ok(await evaluate('new URLSearchParams(location.search).has("delivery")'), 'Opening review did not create a private URL');
+    const libraryRequestsBeforeReload = libraryRequests;
+    const originalDocumentTime = await evaluate('performance.timeOrigin');
+    await send('Page.reload');
+    await waitFor(`performance.timeOrigin > ${originalDocumentTime} && document.querySelector("video")?.readyState >= 2`);
+    assert.equal(libraryRequests, libraryRequestsBeforeReload, 'Private URL reload requested the whole library');
+    await evaluate('localStorage.removeItem("token")');
+    await send('Page.reload');
+    await waitFor('document.querySelector("main h1")?.textContent.includes("Sign in to open this private delivery")');
+    await click('Sign in');
+    await waitFor('document.querySelector(".auth-form-panel input[type=email]")');
+    assert.equal(libraryRequests, libraryRequestsBeforeReload, 'Unauthenticated private URL opened the library');
     assert.deepEqual(errors, [], 'Uncaught browser exceptions');
     const timingPassed = timing.every(measurement => measurement.maxErrorSeconds <= 1 / 30 + 0.005);
     fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify({ passed: timingPassed, functionalChecksPassed: true,
       timingPassed, timingToleranceSeconds: 1 / 30 + 0.005,
       viewportChecks: [375, 768, 1024, 1200, 1279, 1440, 1920], layoutChecks: ['scroll reset', 'split panel boundaries', 'visible toolbar and playback', 'wide recorded video'], motionChecks: ['bowled replay capture', 'stops at end', 'paused canvas stable', 'reduced motion render'], errors, timing,
       media: 'Synthetic 30fps WebM source and API fixtures; real cricket accuracy not measured' }, null, 2));
-    console.log('PASS: offline simulation, library, review, camera toolbar, mobile overflow, explicit reviewer outcome, no uncaught exceptions');
+    console.log('PASS: offline simulation, library, review, private link refresh and sign-in, camera toolbar, mobile overflow, explicit reviewer outcome, no uncaught exceptions');
     console.log(JSON.stringify({ timingPassed, timing }));
     if (!timingPassed) process.exitCode = 1;
   } finally {

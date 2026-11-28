@@ -16,5 +16,10 @@ class Trajectory(Base):
     additional_data = Column(JSON)  # Additional DRS data (stumps, players, LBW analysis)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    @property
+    def revision(self):
+        data = self.additional_data
+        return (data.get('analysis_revision') or self.id) if isinstance(data, dict) else self.id
+
     def __repr__(self):
         return f"<Trajectory(id={self.id}, video_id={self.video_id}, confidence={self.confidence_score})>"

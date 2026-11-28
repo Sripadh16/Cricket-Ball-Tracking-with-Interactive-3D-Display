@@ -47,6 +47,8 @@ def _upgrade_initial_schema(connection):
     for table in APP_TABLES:
         actual = {column['name'] for column in inspector.get_columns(table.name)}
         missing = set(table.columns.keys()) - actual
+        if table is ReviewSession.__table__:
+            missing.discard('analysis_revision')  # Added by migration 3.
         if missing:
             raise RuntimeError(f'Schema upgrade could not resolve {table.name} columns: {", ".join(sorted(missing))}')
 
@@ -60,7 +62,13 @@ def _add_durable_analysis(connection):
                                                 generation=str(uuid.uuid4()), queued_at=time.time()))
 
 
-MIGRATIONS = (_upgrade_initial_schema, _add_durable_analysis)
+def _add_assessment_revision(connection):
+    columns = {column['name'] for column in inspect(connection).get_columns('review_sessions')}
+    if 'analysis_revision' not in columns:
+        connection.execute(text('ALTER TABLE review_sessions ADD COLUMN analysis_revision VARCHAR'))
+
+
+MIGRATIONS = (_upgrade_initial_schema, _add_durable_analysis, _add_assessment_revision)
 
 
 def upgrade_database(db_engine=engine):

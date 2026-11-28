@@ -1,10 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, TextField, Button, Alert, Tab, Tabs, CircularProgress, InputAdornment, IconButton } from '@mui/material';
 import { ArrowForward, SportsCricket, Visibility, VisibilityOff, PlayArrow } from '@mui/icons-material';
 import PitchDiagram from '../components/PitchDiagram';
 import api from '../api/client';
 
-export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
+export default function AuthPage({ onAuthSuccess, onExploreDemo, onCancel, privateDelivery = false }) {
   const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -12,19 +12,34 @@ export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [workspace, setWorkspace] = useState(null);
+
+  useEffect(() => {
+    if (!onCancel || privateDelivery || !localStorage.getItem('token')) return undefined;
+    const controller = new AbortController();
+    api.get('/auth/me', { signal: controller.signal, timeout: 8000 }).then(({ data }) => {
+      if (!controller.signal.aborted) setWorkspace(data);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [onCancel, privateDelivery]);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
     setLoading(true);
     setError('');
     try {
-      const response = await api.post(mode === 'login' ? '/auth/login' : '/auth/register',
-        mode === 'login' ? { email: email.trim(), password } : { email: email.trim(), password, name: name.trim() });
+      const credentials = { email: email.trim(), password };
+      const response = mode === 'login'
+        ? await api.post('/auth/login', credentials, { timeout: 8000 })
+        : await api.post(mode === 'keep' ? '/auth/promote' : '/auth/register',
+          { ...credentials, name: name.trim() }, { timeout: 8000 });
       localStorage.setItem('token', response.data.access_token);
       onAuthSuccess();
     } catch (err) {
       const detail = err.response?.data?.detail;
-      setError(typeof detail === 'string' ? detail : 'We could not connect to your account. Check your details and try again.');
+      setError(err.response?.status === 401 && mode === 'keep'
+        ? 'This guest session expired. Sign in if you already kept this workspace.'
+        : typeof detail === 'string' ? detail : 'We could not connect to your account. Check your details and try again.');
     } finally {
       setLoading(false);
     }
@@ -57,22 +72,32 @@ export default function AuthPage({ onAuthSuccess, onExploreDemo }) {
       </section>
       <section className="auth-form-panel" aria-label="Account access">
         <div className="auth-form-inner">
-          <h2>{mode === 'login' ? 'Sign in to your workspace' : 'Create your account'}</h2>
-          <p>{mode === 'login' ? 'Sign in to upload deliveries and revisit your reviews.' : 'Create an account to keep your clips and analysis together.'}</p>
-          <Tabs value={mode} onChange={(_, value) => { setMode(value); setError(''); }} variant="fullWidth" aria-label="Account action">
-            <Tab value="login" label="Sign in" disabled={loading} /><Tab value="register" label="Create account" disabled={loading} />
-          </Tabs>
+          <h2>{mode === 'keep' ? 'Keep your workspace' : mode === 'login' ? 'Sign in to your workspace' : 'Create your account'}</h2>
+          {workspace?.is_guest && (
+            <p>Create sign-in details to keep your existing clips and assessments. New guest sessions expire after seven days.</p>
+          )}
+          {workspace && !workspace.is_guest && <p>Signed in as {workspace.email}.</p>}
+          {!privateDelivery && (workspace?.is_guest || !onCancel) && (
+            <Tabs value={mode} onChange={(_, value) => { setMode(value); setError(''); }} variant="fullWidth" aria-label="Account action">
+              <Tab value="login" label="Sign in" disabled={loading} />
+              {workspace?.is_guest
+                ? <Tab value="keep" label="Keep workspace" disabled={loading} />
+                : <Tab value="register" label="Create account" disabled={loading} />}
+            </Tabs>
+          )}
           <Box component="form" onSubmit={handleSubmit}>
             {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
-            {mode === 'register' && <TextField label="Full name" required value={name} onChange={e => setName(e.target.value)} autoComplete="name" disabled={loading} fullWidth />}
+            {mode !== 'login' && <TextField label="Full name" required value={name} onChange={e => setName(e.target.value)} autoComplete="name" disabled={loading} fullWidth />}
             <TextField label="Email address" type="email" required value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" disabled={loading} fullWidth />
-            <TextField label="Password" type={showPassword ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} disabled={loading} fullWidth InputProps={{ endAdornment: <InputAdornment position="end"><IconButton aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)} edge="end">{showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}</IconButton></InputAdornment> }} />
-            <Button type="submit" variant="contained" disabled={loading} endIcon={loading ? <CircularProgress size={17} color="inherit" /> : <ArrowForward />} fullWidth>{loading ? 'Connecting…' : mode === 'login' ? 'Open workspace' : 'Create account'}</Button>
+            <TextField label="Password" type={showPassword ? 'text' : 'password'} required value={password} onChange={e => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} inputProps={mode === 'keep' ? { minLength: 12, maxLength: 128 } : undefined} helperText={mode === 'keep' ? 'Use at least 12 characters.' : undefined} disabled={loading} fullWidth InputProps={{ endAdornment: <InputAdornment position="end"><IconButton aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)} edge="end">{showPassword ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}</IconButton></InputAdornment> }} />
+            <Button type="submit" variant="contained" disabled={loading} endIcon={loading ? <CircularProgress size={17} color="inherit" /> : <ArrowForward />} fullWidth>{loading ? 'Connecting…' : mode === 'login' ? 'Open workspace' : mode === 'keep' ? 'Keep workspace' : 'Create account'}</Button>
           </Box>
           <div className="auth-demo">
             <span className="muted" style={{ fontSize: 13 }}>Explore simulated deliveries. No account needed.</span>
-            <Button onClick={onExploreDemo} startIcon={<PlayArrow />} sx={{ mt: 1.5 }} fullWidth>Continue without account</Button>
-            <Button onClick={handleGuest} disabled={loading} variant="outlined" fullWidth>Open guest workspace</Button>
+            <Button onClick={onExploreDemo} disabled={loading} startIcon={<PlayArrow />} sx={{ mt: 1.5 }} fullWidth>Continue without account</Button>
+            {!onCancel && <Button onClick={handleGuest} disabled={loading} variant="outlined" fullWidth>Open guest workspace</Button>}
+            {workspace && !workspace.is_guest && <Button color="inherit" onClick={() => { localStorage.removeItem('token'); onCancel(); }} disabled={loading} fullWidth>Sign out</Button>}
+            {onCancel && <Button onClick={onCancel} disabled={loading} fullWidth>Back</Button>}
           </div>
         </div>
       </section>

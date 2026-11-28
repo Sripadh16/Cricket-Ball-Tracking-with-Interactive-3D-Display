@@ -82,6 +82,7 @@ async def _run_tracking_async(file_path: str, progress_callback=None) -> dict:
             "source_duration_s": scan["source_duration_s"], "timing_source": scan["timing_source"],
             "fps_source": scan["fps_source"],
             "debug_info": {"frames_processed": scan["n"], "ball_detections": len(pixel_track),
+                           "processed_start_s": scan["times"][0], "processed_end_s": scan["times"][-1],
                            "camera_source": result.get("camera_source"), "fit_rms_px": result.get("fit_rms_px"),
                            "line_sigma_m": result.get("line_sigma_m"),
                            "camera_cut_before_track_end": bool(chain and any(scan["cuts"][1:chain[-1]["frame"] + 1]))},
@@ -237,6 +238,20 @@ async def get_preset_delivery_trajectory(
 
 # ── Private Video Operations (Authentication & Ownership Enforced) ──────────
 
+def _video_summary(video, ball_detected=None):
+    return {
+        "id": video.id,
+        "filename": Path(video.file_path).name if video.file_path else video.filename,
+        "original_filename": video.filename,
+        "stream_url": f"/videos/{video.id}/stream",
+        "status": video.status,
+        "created_at": video.upload_date.isoformat() if video.upload_date else None,
+        "processed_at": video.processing_completed_at.isoformat() if video.processing_completed_at else None,
+        "duration": video.duration,
+        "file_size": video.file_size,
+        "ball_detected": ball_detected,
+    }
+
 @router.get("/")
 async def list_videos(
     db: Session = Depends(get_db),
@@ -253,28 +268,21 @@ async def list_videos(
             .all()
         ) if videos else {}
 
-        return {
-            "videos": [
-                {
-                    "id": video.id,
-                    "filename": Path(video.file_path).name if video.file_path else video.filename,
-                    "original_filename": video.filename,
-                    "stream_url": f"/videos/{video.id}/stream",
-                    "status": video.status,
-                    "created_at": video.upload_date.isoformat() if video.upload_date else None,
-                    "processed_at": video.processing_completed_at.isoformat() if video.processing_completed_at else None,
-                    "duration": video.duration,
-                    "file_size": video.file_size,
-                    "ball_detected": detected.get(video.id),
-                }
-                for video in videos
-            ]
-        }
+        return {"videos": [_video_summary(video, detected.get(video.id)) for video in videos]}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error listing videos for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{video_id}")
+def get_video(video_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    video = db.query(Video).filter_by(id=video_id, user_id=current_user.id).first()
+    if video is None:
+        raise HTTPException(status_code=404, detail="Video not found")
+    detected = db.query(Trajectory.ball_detected).filter_by(video_id=video.id).scalar()
+    return _video_summary(video, detected)
 
 
 @router.post("/upload")
@@ -428,7 +436,7 @@ async def correct_pitch_calibration(video_id: str, payload: PitchCalibrationRequ
         raise HTTPException(status_code=404, detail="Process this video before correcting landmarks.")
     data = dict(trajectory.additional_data or {})
     trajectory_id = trajectory.id
-    previous_calibration = data.get("calibration")
+    previous_revision = trajectory.revision
     info = data.get("video_info") or {}
     inputs = data.get("geometry_inputs")
     if inputs:
@@ -465,11 +473,12 @@ async def correct_pitch_calibration(video_id: str, payload: PitchCalibrationRequ
         video = _owned_video(db, video_id, current_user.id)
         trajectory = db.query(Trajectory).filter(Trajectory.id == trajectory_id).first()
         if (video.status != "processed" or trajectory is None
-                or (trajectory.additional_data or {}).get("calibration") != previous_calibration):
+                or trajectory.revision != previous_revision):
             raise HTTPException(status_code=409, detail="Analysis changed before calibration could be saved. Refresh and try again.")
         trajectory.points = points
         if inputs:
             trajectory.timestamps = [p["t"] for p in points]
+        data["analysis_revision"] = str(uuid.uuid4())
         trajectory.additional_data = data
     return calibration
 
@@ -522,6 +531,7 @@ async def get_trajectory(
 
     return {
         "video_id": video_id,
+        "analysis_revision": trajectory.revision,
         "points": trajectory.points,
         "timestamps": trajectory.timestamps,
         "confidence_score": trajectory.confidence_score,

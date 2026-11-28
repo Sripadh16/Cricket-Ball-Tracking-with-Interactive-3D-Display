@@ -2,6 +2,8 @@
 
 28 November 2026 · Baseline `200b9f7` on `codex/demo-studio`
 
+This audit describes the original baseline. For completed changes, verification results, and remaining release checks, see the [production readiness plan](plans/2026-11-28-production-readiness.md).
+
 Crease / Lab is an educational cricket replay studio. Its clearest value today is helping students and coaches see how ball flight, bounce, and wicket geometry affect a decision. A second workflow lets someone inspect a delivery from their own footage, see where the software found candidate ball positions, and explore a modeled flight when the camera and track support it. Treat the simulator as the dependable first experience. Pilot uploaded footage with a defined capture setup and judge it by the quality of evidence a reviewer can inspect. Keep the present educational scope for decisions from video.
 
 ## What a user can do today

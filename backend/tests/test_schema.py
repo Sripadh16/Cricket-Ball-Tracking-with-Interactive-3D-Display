@@ -27,8 +27,21 @@ def test_upgrade_preserves_current_sqlite_data(tmp_path):
     upgrade_database(engine)
     with engine.connect() as connection:
         assert connection.scalar(select(User.email)) == 'reviewer@example.com'
-        assert connection.scalars(select(versions.c.version).order_by(versions.c.version)).all() == [1, 2]
+        assert connection.scalars(select(versions.c.version).order_by(versions.c.version)).all() == [1, 2, 3]
         assert connection.scalar(select(AnalysisJob.state).where(AnalysisJob.video_id == 'old-job')) == 'queued'
+    engine.dispose()
+
+
+def test_v2_review_upgrade_preserves_history_without_attributing_a_revision(tmp_path):
+    engine = create_engine(f'sqlite:///{tmp_path / "version2.db"}')
+    upgrade_database(engine)
+    with engine.begin() as connection:
+        connection.execute(text('ALTER TABLE review_sessions DROP COLUMN analysis_revision'))
+        connection.execute(text('DELETE FROM schema_versions WHERE version = 3'))
+        connection.execute(text("INSERT INTO review_sessions (id, video_id, user_id, notes) VALUES ('saved', 'clip', 'owner', 'original')"))
+    upgrade_database(engine)
+    with engine.connect() as connection:
+        assert connection.execute(select(ReviewSession.notes, ReviewSession.analysis_revision)).one() == ('original', None)
     engine.dispose()
 
 

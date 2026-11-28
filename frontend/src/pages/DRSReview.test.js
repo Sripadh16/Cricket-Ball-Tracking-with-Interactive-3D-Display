@@ -175,3 +175,155 @@ test('candidate coverage counts distinct source frames and event jump seeks sour
   fireEvent.click(screen.getByRole('button', { name: 'Last candidate · 0.40s' }));
   expect(container.querySelector('video').currentTime).toBe(0.4);
 });
+
+test('lazy-loads clip-scoped human assessment history when expanded while keeping automated evidence distinct', async () => {
+  api.get.mockReset();
+  render(<DRSReview video={{ id: 'clip-42', filename: 'delivery.mp4' }} trajectoryData={{ ball_detected: true, points: [], drs_evaluation: {} }} onBack={() => {}} />);
+
+  expect(api.get).not.toHaveBeenCalled();
+  expect(screen.getByText('NO VERDICT')).toBeInTheDocument();
+  const toggle = screen.getByRole('button', { name: 'Saved reviewer assessments' });
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+  api.get.mockResolvedValueOnce({
+    data: [
+      {
+        id: 'rev-1',
+        video_id: 'clip-42',
+        created_at: '2026-05-10T12:00:00Z',
+        decisions: [{ type: 'LBW', outcome: 'OUT', timestamp: 0.92 }],
+        notes: 'Pitched in line on replay'
+      },
+      {
+        id: 'rev-other',
+        video_id: 'other-clip',
+        created_at: '2026-05-09T12:00:00Z',
+        decisions: [{ type: 'LBW', outcome: 'NOT OUT', timestamp: 0.5 }],
+        notes: 'Other clip note'
+      }
+    ]
+  });
+
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  expect(api.get).toHaveBeenCalledWith('/reviews/', expect.objectContaining({ params: { video_id: 'clip-42' } }));
+
+  await waitFor(() => expect(screen.getByText('Pitched in line on replay')).toBeInTheDocument());
+  expect(screen.getByText('OUT')).toBeInTheDocument();
+  expect(screen.getByText('LBW')).toBeInTheDocument();
+  expect(screen.getByText(/May.*10.*2026|10.*May.*2026/)).toBeInTheDocument();
+  expect(screen.queryByText('Other clip note')).not.toBeInTheDocument();
+  expect(screen.getByText('NO VERDICT')).toBeInTheDocument();
+});
+
+test('shows loading, empty, and recoverable error states in saved assessment history', async () => {
+  api.get.mockReset();
+  let resolveFirst;
+  api.get.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }));
+
+  render(<DRSReview video={{ id: 'clip-empty', filename: 'delivery.mp4' }} onBack={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Saved reviewer assessments' }));
+  expect(screen.getByText('Loading saved assessments…')).toBeInTheDocument();
+
+  await act(async () => { resolveFirst({ data: [] }); });
+  await waitFor(() => expect(screen.getByText('No reviewer assessments saved for this clip yet.')).toBeInTheDocument());
+
+  api.get.mockRejectedValueOnce(new Error('Network error'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  await waitFor(() => expect(screen.getByText('Could not load saved reviewer assessments.')).toBeInTheDocument());
+
+  api.get.mockResolvedValueOnce({
+    data: [{
+      id: 'rev-2',
+      video_id: 'clip-empty',
+      created_at: null,
+      decisions: [{ type: 'Bowled', outcome: 'OUT', timestamp: 1.1 }],
+      notes: 'Clipped off stump'
+    }]
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+  await waitFor(() => expect(screen.getByText('Clipped off stump')).toBeInTheDocument());
+  expect(screen.getByText('Date unavailable')).toBeInTheDocument();
+});
+
+test('ignores stale assessment history responses when switching clips', async () => {
+  api.get.mockReset();
+  let resolveClip1;
+  api.get.mockReturnValueOnce(new Promise((resolve) => { resolveClip1 = resolve; }));
+
+  const { rerender } = render(<DRSReview video={{ id: 'clip-1', filename: 'clip1.mp4' }} onBack={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Saved reviewer assessments' }));
+
+  rerender(<DRSReview video={{ id: 'clip-2', filename: 'clip2.mp4' }} onBack={() => {}} />);
+  const toggle = screen.getByRole('button', { name: 'Saved reviewer assessments' });
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+  api.get.mockResolvedValueOnce({
+    data: [{
+      id: 'rev-c2',
+      video_id: 'clip-2',
+      created_at: '2026-05-11T12:00:00Z',
+      decisions: [{ type: 'LBW', outcome: 'NOT OUT', timestamp: 0.4 }],
+      notes: 'Clip 2 fresh note'
+    }]
+  });
+  fireEvent.click(toggle);
+  await waitFor(() => expect(screen.getByText('Clip 2 fresh note')).toBeInTheDocument());
+
+  await act(async () => {
+    resolveClip1({
+      data: [{
+        id: 'rev-c1',
+        video_id: 'clip-1',
+        created_at: '2026-05-10T12:00:00Z',
+        decisions: [{ type: 'LBW', outcome: 'OUT', timestamp: 0.8 }],
+        notes: 'Stale clip 1 note'
+      }]
+    });
+  });
+
+  expect(screen.queryByText('Stale clip 1 note')).not.toBeInTheDocument();
+  expect(screen.getByText('Clip 2 fresh note')).toBeInTheDocument();
+});
+
+test('refreshes saved assessment history after saving a decision while the panel is open', async () => {
+  api.get.mockReset();
+  api.post.mockImplementation((url) => (
+    url === '/reviews/'
+      ? Promise.resolve({ data: { id: 'rev-new-1234', video_id: 'clip-9' } })
+      : new Promise(() => {})
+  ));
+  api.get
+    .mockResolvedValueOnce({ data: [] })
+    .mockResolvedValueOnce({
+      data: [{
+        id: 'rev-new-1234',
+        video_id: 'clip-9',
+        created_at: '2026-05-12T12:00:00Z',
+        decisions: [{ type: 'LBW', outcome: 'NOT OUT', timestamp: 0 }],
+        notes: 'Bat involved first',
+        analysis_revision: 'first-analysis',
+      }]
+    });
+
+  render(<DRSReview video={{ id: 'clip-9', filename: 'clip9.mp4' }}
+    trajectoryData={{ points: [], analysis_revision: 'first-analysis' }} onBack={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Saved reviewer assessments' }));
+  await waitFor(() => expect(screen.getByText('No reviewer assessments saved for this clip yet.')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save reviewer assessment' }));
+  fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Decision outcome' }));
+  fireEvent.click(screen.getByRole('option', { name: 'NOT OUT' }));
+  fireEvent.change(screen.getByLabelText('Review notes'), { target: { value: 'Bat involved first' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save Decision' }));
+
+  const revisionLabel = await screen.findByText('Current analysis');
+  expect(revisionLabel.closest('li')).toHaveTextContent('Bat involved first');
+  expect(api.post).toHaveBeenCalledWith('/reviews/', expect.objectContaining({
+    video_id: 'clip-9',
+    notes: 'Bat involved first',
+    analysis_revision: 'first-analysis',
+  }));
+  expect(api.get).toHaveBeenCalledTimes(2);
+  expect(api.get).toHaveBeenNthCalledWith(2, '/reviews/', expect.objectContaining({ params: { video_id: 'clip-9' } }));
+});

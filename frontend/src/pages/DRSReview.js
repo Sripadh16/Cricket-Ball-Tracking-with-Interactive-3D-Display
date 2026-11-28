@@ -9,7 +9,7 @@ import {
 } from '@mui/material';
 import {
   ArrowBack, PlayArrow, Pause, Replay, Speed, Gavel, SkipPrevious, SkipNext,
-  Assessment,
+  Assessment, History, ExpandMore, ExpandLess, Refresh,
   DataObject, TableChart, CameraAlt, Visibility, VisibilityOff,
   TrendingUp, Timeline, AccountTree, Article
 } from '@mui/icons-material';
@@ -53,6 +53,26 @@ function decisionTone(decision) {
   if (text.includes('NOT OUT')) return 'notout';
   if (text.includes('UMPIRE')) return 'umpire';
   return text.includes('OUT') ? 'out' : 'neutral';
+}
+
+const HISTORY_OUTCOME_STYLES = {
+  out: { bgcolor: 'rgba(239, 68, 68, 0.16)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.4)' },
+  notout: { bgcolor: 'rgba(34, 197, 94, 0.16)', color: '#4ade80', border: '1px solid rgba(34, 197, 94, 0.4)' },
+  umpire: { bgcolor: 'rgba(245, 158, 11, 0.16)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.4)' },
+  neutral: { bgcolor: 'rgba(148, 163, 184, 0.16)', color: '#cbd5e1', border: '1px solid rgba(148, 163, 184, 0.35)' },
+};
+
+function formatReviewDate(value) {
+  if (!value) return 'Date unavailable';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Date unavailable';
+  return parsed.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 }
 
 export default function DRSReview({
@@ -119,9 +139,78 @@ export default function DRSReview({
   const [reviewOutcome, setReviewOutcome] = useState('');
   const [reviewType, setReviewType] = useState('LBW');
   const [reviewNotes, setReviewNotes] = useState('');
+  const [reviewEvidence, setReviewEvidence] = useState(null);
   const [savingReview, setSavingReview] = useState(false);
   const [savedReviewId, setSavedReviewId] = useState(null);
   const [reviewSuccessMsg, setReviewSuccessMsg] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyItems, setHistoryItems] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const historyOpenRef = useRef(false);
+  historyOpenRef.current = historyOpen;
+  const latestVideoIdRef = useRef(videoId);
+  latestVideoIdRef.current = videoId;
+  const historyAbortRef = useRef(null);
+
+  const fetchReviewHistory = useCallback(async (targetVideoId) => {
+    if (!targetVideoId) return;
+    historyAbortRef.current?.abort();
+    const controller = new AbortController();
+    historyAbortRef.current = controller;
+
+    setHistoryLoading(true);
+    setHistoryError('');
+    try {
+      const res = await api.get('/reviews/', {
+        params: { video_id: targetVideoId },
+        signal: controller.signal,
+        timeout: 8000,
+      });
+      if (controller.signal.aborted || targetVideoId !== latestVideoIdRef.current) {
+        return;
+      }
+      const rows = Array.isArray(res?.data) ? res.data : [];
+      setHistoryItems(rows.filter(item => item?.video_id === targetVideoId));
+    } catch (err) {
+      if (controller.signal.aborted || targetVideoId !== latestVideoIdRef.current) {
+        return;
+      }
+      setHistoryError(typeof err.response?.data?.detail === 'string'
+        ? err.response.data.detail
+        : 'Could not load saved reviewer assessments.');
+    } finally {
+      if (!controller.signal.aborted && targetVideoId === latestVideoIdRef.current) {
+        setHistoryLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    latestVideoIdRef.current = videoId;
+    historyAbortRef.current?.abort();
+    historyAbortRef.current = null;
+    setHistoryOpen(false);
+    setHistoryItems([]);
+    setHistoryLoading(false);
+    setHistoryError('');
+  }, [videoId]);
+
+  useEffect(() => () => {
+    historyAbortRef.current?.abort();
+  }, []);
+
+  const handleToggleHistory = () => {
+    if (historyOpen) {
+      historyAbortRef.current?.abort();
+      historyAbortRef.current = null;
+      setHistoryLoading(false);
+      setHistoryOpen(false);
+      return;
+    }
+    setHistoryOpen(true);
+    fetchReviewHistory(videoId);
+  };
 
   // 2D Video Tracking Reticle & Broadcast HUD Controls
   const [mediaError, setMediaError] = useState('');
@@ -147,16 +236,21 @@ export default function DRSReview({
           {
             type: reviewType,
             outcome: reviewOutcome,
-            timestamp: currentTime,
-            confidence: activeTrajectory?.confidence_score ?? null
+            timestamp: reviewEvidence?.time ?? currentTime,
+            confidence: reviewEvidence?.confidence ?? null
           }
         ],
-        notes: reviewNotes || `Reviewer assessment: ${reviewOutcome} (${reviewType})`
+        notes: reviewNotes || `Reviewer assessment: ${reviewOutcome} (${reviewType})`,
+        analysis_revision: reviewEvidence?.revision,
       };
+      const targetVideoId = video.id;
       const res = await api.post('/reviews/', payload);
       setSavedReviewId(res.data.id);
       setReviewSuccessMsg(`Review session #${res.data.id.substring(0, 8)} saved successfully!`);
       setReviewDialogOpen(false);
+      if (historyOpenRef.current && targetVideoId === latestVideoIdRef.current) {
+        fetchReviewHistory(targetVideoId);
+      }
     } catch (err) {
       console.error('Failed to save review session:', err);
       setActionError(typeof err.response?.data?.detail === 'string' ? err.response.data.detail : 'Could not save this review. Please try again.');
@@ -591,6 +685,9 @@ export default function DRSReview({
         evidence_kind: evidenceKind,
         coordinate_space: has3DFlight ? 'pitch_metric_xyz' : 'source_pixels',
         timing_source: activeTrajectory.timing_source ?? null,
+        analysis_revision: activeTrajectory.analysis_revision ?? null,
+        processed_start_s: debugInfo?.processed_start_s ?? null,
+        processed_end_s: debugInfo?.processed_end_s ?? null,
         calibration_status: activeTrajectory.calibration_status ?? null,
         reconstruction_method: activeTrajectory.reconstruction_method ?? null,
         video_duration_seconds: duration,
@@ -1101,6 +1198,11 @@ export default function DRSReview({
             {coverage !== null && <Typography variant="caption" color="text.secondary">
               {candidateFrames.size} of {sourceFrameCount} source frames have candidates ({coverage.toFixed(1)}%). This is coverage, not accuracy.
             </Typography>}
+            {Number.isFinite(debugInfo?.processed_start_s) && Number.isFinite(debugInfo?.processed_end_s) && (
+              <Typography variant="caption" color="text.secondary">
+                Frames analysed from {formatTime(debugInfo.processed_start_s)} to {formatTime(debugInfo.processed_end_s)}.
+              </Typography>
+            )}
             {onRetryAnalysis && <Button fullWidth variant="outlined" sx={{ mt: 1.5 }}
               disabled={analysisPending || retrySubmitting || trajectoryLoading} onClick={onRetryAnalysis}>
               {retrySubmitting ? 'Starting analysis…' : 'Retry analysis'}
@@ -1549,6 +1651,7 @@ export default function DRSReview({
               startIcon={<Gavel />}
               disabled={!video || !localStorage.getItem('token')}
               onClick={() => {
+                setReviewEvidence({ time: currentTime, confidence: activeTrajectory?.confidence_score, revision: activeTrajectory?.analysis_revision });
                 const dec = drs?.decision || '';
                 if (dec.includes('OUT') && !dec.includes('NOT OUT')) setReviewOutcome('OUT');
                 else if (dec.includes("UMPIRE'S CALL")) setReviewOutcome("UMPIRE'S CALL");
@@ -1593,6 +1696,169 @@ export default function DRSReview({
               />
             )}
           </Box>
+
+          {isVideoMode && videoId && (
+            <section className="inspector-card" aria-label="Saved human assessments">
+              <Button
+                type="button"
+                variant="text"
+                fullWidth
+                size="small"
+                startIcon={<History sx={{ fontSize: 17 }} />}
+                endIcon={historyOpen ? <ExpandLess /> : <ExpandMore />}
+                aria-expanded={historyOpen}
+                aria-controls="saved-assessments-panel"
+                onClick={handleToggleHistory}
+                sx={{
+                  justifyContent: 'space-between',
+                  color: 'text.primary',
+                  fontWeight: 700,
+                  textTransform: 'none',
+                  px: 0.5,
+                  py: 0.4,
+                  '& .MuiButton-startIcon': { mr: 1 },
+                  '& .MuiButton-endIcon': { ml: 'auto' },
+                }}
+              >
+                Saved reviewer assessments
+              </Button>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.4 }}>
+                Human decisions saved for this clip, separate from automated tracking evidence.
+              </Typography>
+
+              {historyOpen && (
+                <Box
+                  id="saved-assessments-panel"
+                  role="region"
+                  aria-label="Reviewer assessment history"
+                  sx={{ mt: 1.25, pt: 1.25, borderTop: '1px solid var(--line)', display: 'flex', flexDirection: 'column', gap: 1 }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                    <Typography variant="caption" sx={{ color: 'var(--muted)', fontWeight: 600 }}>
+                      Clip history
+                    </Typography>
+                    <Button
+                      type="button"
+                      size="small"
+                      variant="text"
+                      startIcon={<Refresh sx={{ fontSize: 14 }} />}
+                      disabled={historyLoading}
+                      onClick={() => fetchReviewHistory(videoId)}
+                      sx={{ fontSize: '0.72rem', minWidth: 'auto', py: 0.2, px: 0.75 }}
+                    >
+                      Refresh
+                    </Button>
+                  </Box>
+
+                  {historyLoading && (
+                    <Box role="status" sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
+                      <CircularProgress size={14} sx={{ color: 'var(--accent)' }} />
+                      <Typography variant="caption" color="text.secondary">
+                        Loading saved assessments…
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {!historyLoading && historyError && (
+                    <Alert
+                      severity="error"
+                      sx={{ py: 0.4, fontSize: '0.75rem' }}
+                      action={
+                        <Button size="small" color="inherit" onClick={() => fetchReviewHistory(videoId)}>
+                          Retry
+                        </Button>
+                      }
+                    >
+                      {historyError}
+                    </Alert>
+                  )}
+
+                  {!historyLoading && !historyError && historyItems.length === 0 && (
+                    <Typography variant="body2" color="text.secondary">
+                      No reviewer assessments saved for this clip yet.
+                    </Typography>
+                  )}
+
+                  {!historyError && historyItems.length > 0 && (
+                    <Box
+                      component="ul"
+                      aria-label="Saved assessment entries"
+                      sx={{ listStyle: 'none', m: 0, p: 0, display: 'flex', flexDirection: 'column', gap: 1 }}
+                    >
+                      {historyItems.map((review, index) => {
+                        const decisions = Array.isArray(review.decisions) ? review.decisions : [];
+                        return (
+                          <Box
+                            component="li"
+                            key={review.id || `${review.created_at || 'review'}-${index}`}
+                            sx={{
+                              p: 1,
+                              borderRadius: 1.5,
+                              bgcolor: 'rgba(255, 255, 255, 0.03)',
+                              border: '1px solid var(--line)',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 0.5,
+                            }}
+                          >
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+                              <Typography variant="caption" sx={{ color: 'var(--muted)', fontWeight: 600 }}>
+                                {formatReviewDate(review.created_at)}
+                              </Typography>
+                              <Typography variant="caption" sx={{ color: 'var(--muted)' }}>
+                                {!review.analysis_revision ? 'Analysis version unrecorded'
+                                  : !activeTrajectory?.analysis_revision ? 'Saved analysis'
+                                    : review.analysis_revision === activeTrajectory.analysis_revision
+                                      ? 'Current analysis' : 'Earlier analysis'}
+                              </Typography>
+                            </Box>
+
+                            {decisions.length > 0 ? (
+                              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.6, alignItems: 'center' }}>
+                                {decisions.map((decision, dIdx) => {
+                                  const tone = decisionTone(decision.outcome);
+                                  const style = HISTORY_OUTCOME_STYLES[tone] || HISTORY_OUTCOME_STYLES.neutral;
+                                  return (
+                                    <Box key={`${review.id || index}-d-${dIdx}`} sx={{ display: 'flex', alignItems: 'center', gap: 0.6, flexWrap: 'wrap' }}>
+                                      <Chip
+                                        label={decision.outcome || 'Recorded'}
+                                        size="small"
+                                        sx={{ ...style, fontWeight: 800, fontSize: '0.68rem', height: 20 }}
+                                      />
+                                      {decision.type && (
+                                        <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary' }}>
+                                          {decision.type}
+                                        </Typography>
+                                      )}
+                                      {Number.isFinite(decision.timestamp) && (
+                                        <Typography variant="caption" sx={{ color: 'var(--muted)' }}>
+                                          at {formatTime(decision.timestamp)}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                  );
+                                })}
+                              </Box>
+                            ) : (
+                              <Typography variant="caption" color="text.secondary">
+                                Assessment recorded
+                              </Typography>
+                            )}
+
+                            {review.notes && (
+                              <Typography variant="body2" sx={{ color: '#e2e8f0', fontSize: '0.78rem', wordBreak: 'break-word' }}>
+                                {review.notes}
+                              </Typography>
+                            )}
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  )}
+                </Box>
+              )}
+            </section>
+          )}
 
           <details className="inspector-details review-export"><summary>Export data & capture view</summary>
           {/* Trajectory Telemetry Export Section (Category E.2) */}

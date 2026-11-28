@@ -25,7 +25,7 @@ export function ensureGuestSession() {
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
-  if (token) {
+  if (token && !['/auth/login', '/auth/register', '/auth/guest'].includes(config.url)) {
     config.headers.Authorization = `Bearer ${token}`;
   }
   if (config.data instanceof FormData) {

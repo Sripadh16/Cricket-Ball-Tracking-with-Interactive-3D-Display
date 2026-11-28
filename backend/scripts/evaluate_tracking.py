@@ -20,6 +20,11 @@ import json
 import csv
 import argparse
 import math
+import hashlib
+import platform
+import time
+from pathlib import Path
+from statistics import median
 from typing import List, Dict, Any, Tuple, Optional
 
 # Ensure backend src is on import path
@@ -245,6 +250,9 @@ def format_report(metrics: Dict[str, Any]) -> str:
 
 
 def format_markdown_report(metrics: Dict[str, Any]) -> str:
+    def error_px(key):
+        value = metrics.get(key)
+        return "Unavailable" if value is None else f"{value:.2f} px"
     """Format evaluation metrics as a structured GitHub Flavored Markdown report."""
     lines = [
         "# Cricket Ball Tracking & Computer Vision Evaluation Report",
@@ -265,8 +273,8 @@ def format_markdown_report(metrics: Dict[str, Any]) -> str:
         f"| Detector Precision | {metrics.get('detector_precision', 0.0)*100:.1f}% |",
         f"| Detector Recall | {metrics.get('detector_recall', 0.0)*100:.1f}% |",
         f"| Detector F1 Score | {metrics.get('detector_f1', 0.0)*100:.1f}% |",
-        f"| Mean Centre Error | {metrics.get('detector_mean_error_px', 0.0):.2f} px |",
-        f"| RMSE Error | {metrics.get('detector_rmse_px', 0.0):.2f} px |",
+        f"| Mean Centre Error | {error_px('detector_mean_error_px')} |",
+        f"| RMSE Error | {error_px('detector_rmse_px')} |",
         "",
         "## Section 2: Tracking Continuity & Gap Filling (Combined Pipeline)",
         "",
@@ -277,7 +285,7 @@ def format_markdown_report(metrics: Dict[str, Any]) -> str:
         f"| Combined Track Precision | {metrics.get('combined_precision', 0.0)*100:.1f}% |",
         f"| Combined Track Recall | {metrics.get('combined_recall', 0.0)*100:.1f}% |",
         f"| Combined Track F1 Score | {metrics.get('combined_f1', 0.0)*100:.1f}% |",
-        f"| Combined Track RMSE | {metrics.get('combined_rmse_px', 0.0):.2f} px |",
+        f"| Combined Track RMSE | {error_px('combined_rmse_px')} |",
         ""
     ]
     return "\n".join(lines)
@@ -327,6 +335,36 @@ def run_demo():
     return metrics
 
 
+async def benchmark_upload(video, count):
+    from api.videos import _run_tracking_async
+    from config import MAX_PROCESSING_FRAMES
+
+    runs = []
+    for _ in range(count):
+        start = time.perf_counter()
+        result = await _run_tracking_async(video)
+        elapsed = time.perf_counter() - start
+        runs.append({
+            "wall_seconds": round(elapsed, 3),
+            "decoded_frames": result["debug_info"]["frames_processed"],
+            "selected_ball_frames": len(result["pixel_track"]),
+            "reconstruction_method": result.get("reconstruction_method"),
+        })
+    with Path(video).open('rb') as clip:
+        clip_hash = hashlib.file_digest(clip, 'sha256').hexdigest()
+    return result, {
+        "pipeline": "upload analysis (decode through reconstruction)",
+        "clip_sha256": clip_hash,
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "cpu": platform.processor(),
+        "max_processing_frames": MAX_PROCESSING_FRAMES,
+        "video_info": result["video_info"],
+        "runs": runs,
+        "median_wall_seconds": median(run["wall_seconds"] for run in runs),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate Cricket Ball Tracking & Detector Performance")
     parser.add_argument("--demo", action="store_true", help="Run synthetic demonstration")
@@ -338,8 +376,13 @@ def main():
                         help="Score only the frames in a sparse positive-label CSV. Other frames remain unscored.")
     parser.add_argument("--output-json", type=str, help="Optional path to write metrics JSON")
     parser.add_argument("--output-markdown", type=str, help="Optional path to write markdown report")
+    parser.add_argument("--benchmark-runs", type=int, help="Time the active upload pipeline on --video for this many runs")
 
     args = parser.parse_args()
+    if args.benchmark_runs is not None and (args.benchmark_runs < 1 or not args.video or args.demo):
+        parser.error("--benchmark-runs needs a positive count and --video")
+    if args.benchmark_runs and not args.ground_truth and args.output_markdown:
+        parser.error("--output-markdown requires ground truth; use --output-json for timings")
 
     if args.demo or (not args.ground_truth and not args.tracking_result and not args.video):
         metrics = run_demo()
@@ -353,17 +396,15 @@ def main():
             print(f"Markdown report written to: {args.output_markdown}")
         return
 
-    if not args.ground_truth:
-        print("Error: --ground-truth is required when not running in --demo mode.")
-        sys.exit(1)
+    if not args.ground_truth and not args.benchmark_runs:
+        parser.error("--ground-truth is required to score tracking accuracy")
 
-    gt = load_ground_truth_csv(args.ground_truth)
-
+    benchmark = None
     if args.video:
         print(f"Tracking ball on video: {args.video}...")
         import asyncio
-        from api.videos import _run_tracking_async
-        tracked_points = parse_tracking_data(asyncio.run(_run_tracking_async(args.video)))
+        result, benchmark = asyncio.run(benchmark_upload(args.video, args.benchmark_runs or 1))
+        tracked_points = parse_tracking_data(result)
     elif args.tracking_result:
         with open(args.tracking_result, 'r') as f:
             raw_data = json.load(f)
@@ -372,12 +413,20 @@ def main():
         print("Error: Either --tracking-result or --video must be specified.")
         sys.exit(1)
 
-    if args.annotated_frames_only:
-        print("Scoring annotated frames only. These results do not measure false positives on unlabelled frames.")
-        tracked_points = [p for p in tracked_points if p.get('frame_idx') in gt]
-    metrics = evaluate_trajectory(tracked_points, gt, match_threshold_px=args.threshold_px)
-    metrics["scope"] = "annotated_frames_only" if args.annotated_frames_only else "full_clip"
-    print(format_report(metrics))
+    metrics = {}
+    if args.ground_truth:
+        gt = load_ground_truth_csv(args.ground_truth)
+        if not gt:
+            parser.error("ground truth CSV contains no labeled positions")
+        if args.annotated_frames_only:
+            print("Scoring annotated frames only. These results do not measure false positives on unlabelled frames.")
+            tracked_points = [p for p in tracked_points if p.get('frame_idx') in gt]
+        metrics = evaluate_trajectory(tracked_points, gt, match_threshold_px=args.threshold_px)
+        metrics["scope"] = "annotated_frames_only" if args.annotated_frames_only else "full_clip"
+        print(format_report(metrics))
+    if benchmark:
+        metrics["benchmark"] = benchmark
+        print(json.dumps(benchmark, indent=2))
 
     if args.output_json:
         with open(args.output_json, 'w') as f:
