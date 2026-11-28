@@ -1,5 +1,7 @@
 # Cricket Ball Tracking — CV + 3D Graphics Demo
 
+For the current application architecture, user workflows, and development priorities, start with the [Crease / Lab project context and roadmap](docs/PROJECT_CONTEXT_AND_ROADMAP.md).
+
 A computer vision and interactive 3D graphics course project demonstrating:
 
 - **OpenCV ball detection** — HSV colour masks, motion differencing, contour scoring
