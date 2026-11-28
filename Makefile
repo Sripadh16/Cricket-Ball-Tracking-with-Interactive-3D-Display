@@ -43,20 +43,16 @@ test-e2e: ## Run the fixture browser audit (set CHROMIUM to the executable path)
 
 # Docker commands
 docker-build: ## Build Docker images
-	docker-compose build
+	docker compose build
 
 docker-up: ## Start all Docker services
-	docker-compose up -d
-	@echo "DRS is running at:"
-	@echo "  Frontend: http://localhost:3000"
-	@echo "  Backend:  http://localhost:8000"
-	@echo "  API Docs: http://localhost:8000/docs"
+	docker compose up -d --wait
 
 docker-down: ## Stop all Docker services
-	docker-compose down
+	docker compose down
 
 docker-logs: ## Show Docker logs
-	docker-compose logs -f
+	docker compose logs -f
 
 # Code quality
 lint: ## Run linting on both backend and frontend
@@ -82,13 +78,6 @@ db-reset: ## Reset database (development only)
 	docker-compose down -v
 	docker-compose up -d db
 	@echo "Database reset complete"
-
-# Production
-build-prod: ## Build for production
-	docker-compose -f docker-compose.yml --profile production build
-
-deploy-prod: ## Deploy to production
-	docker-compose -f docker-compose.yml --profile production up -d
 
 # Quick setup for new developers
 setup: ## Complete setup for new developers

@@ -4,6 +4,42 @@ import { analyzeAudio, audioExtrema } from '../utils/audio';
 
 // Cache only the last two decoded envelopes, never PCM or another audio transport.
 const sourceCache = new Map();
+const MAX_AUDIO_SOURCE_BYTES = 25 * 1024 * 1024;
+const AUDIO_SIZE_ERROR = 'Source clip exceeds the 25 MB limit for audio inspection.';
+
+async function readAudioSource(response) {
+  if (Number(response.headers?.get('Content-Length')) > MAX_AUDIO_SOURCE_BYTES) throw new Error(AUDIO_SIZE_ERROR);
+  if (!response.body?.getReader) {
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength > MAX_AUDIO_SOURCE_BYTES) throw new Error(AUDIO_SIZE_ERROR);
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_AUDIO_SOURCE_BYTES) {
+        await reader.cancel();
+        throw new Error(AUDIO_SIZE_ERROR);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
+}
+
 export default function UltraEdgeVisualizer({ currentTime = 0, duration = 1.5, trajectoryData,
   onSeek, compact = false, isPlaying = false, isSeeking = false, sourceAudioUrl, isSimulation = false }) {
   const [demo, setDemo] = useState(isSimulation);
@@ -45,7 +81,7 @@ export default function UltraEdgeVisualizer({ currentTime = 0, duration = 1.5, t
       try {
         const response = await fetch(sourceAudioUrl, { signal: controller.signal });
         if (!response.ok) throw new Error('Could not load source audio. Reopen the clip to retry.');
-        const bytes = await response.arrayBuffer();
+        const bytes = await readAudioSource(response);
         if (cancelled) return;
         const AudioContext = window.AudioContext || window.webkitAudioContext;
         if (!AudioContext) throw new Error('Audio decoding is unsupported in this browser.');
@@ -57,7 +93,9 @@ export default function UltraEdgeVisualizer({ currentTime = 0, duration = 1.5, t
         sourceCache.set(sourceAudioUrl, result);
         setAudio(result);
       } catch (err) {
-        if (!cancelled) setError(err.message?.includes('load source') ? err.message : 'No decodable audio track. Try a browser-supported file with audio.');
+        controller.abort();
+        if (!cancelled) setError(err.message === AUDIO_SIZE_ERROR || err.message?.includes('load source')
+          ? err.message : 'No decodable audio track. Try a browser-supported file with audio.');
       } finally {
         if (context && context.state !== 'closed') await context.close().catch(() => {});
         if (!cancelled) setLoading(false);

@@ -70,7 +70,7 @@ async def register(user: UserCreate, db: Session = Depends(get_db)):
 
     # Create token
     access_token = auth_service.create_access_token(data={"sub": user.email})
-    logger.info(f"User registered: {user.email}")
+    logger.info("User registered: %s", db_user.id)
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.post("/login", response_model=Token)
@@ -85,7 +85,7 @@ async def login(user: UserLogin, db: Session = Depends(get_db)):
             headers={"WWW-Authenticate": "Bearer"},
         )
     access_token = auth_service.create_access_token(data={"sub": user.email})
-    logger.info(f"User logged in: {user.email}")
+    logger.info("User logged in: %s", db_user.id)
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.post("/guest", response_model=Token)

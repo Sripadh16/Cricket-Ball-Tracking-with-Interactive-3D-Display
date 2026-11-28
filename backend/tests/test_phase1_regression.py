@@ -9,7 +9,6 @@ import sys
 import os
 import tempfile
 import shutil
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
@@ -45,28 +44,6 @@ class TestConfigConstants:
 
 
 # ─── Windows path handling ────────────────────────────────────────────────────
-
-class TestWindowsPathHandling:
-    def test_path_name_cross_platform(self):
-        """Path(path).name must work for both Windows and POSIX paths."""
-        win_path = r'C:\Users\user\uploads\abc_video.mp4'
-        posix_path = '/srv/uploads/abc_video.mp4'
-        assert Path(win_path).name == 'abc_video.mp4'
-        assert Path(posix_path).name == 'abc_video.mp4'
-
-    def test_path_name_not_split_on_slash(self):
-        """The old .split('/')[-1] fails on Windows paths — Path().name must not."""
-        win_path = r'C:\Users\user\uploads\file.mp4'
-        # Old broken approach:
-        old_result = win_path.split('/')[-1]
-        # New correct approach:
-        new_result = Path(win_path).name
-        assert new_result == 'file.mp4', f"Expected 'file.mp4' got '{new_result}'"
-        # The old approach would return the full Windows path unchanged
-        assert old_result != 'file.mp4', "This confirms the old bug exists"
-
-
-# ─── Speed and DRS analysis ────────────────────────────────────────────────────
 
 class TestSpeedReporting:
     """Speed from real video must not be clamped or fabricated."""

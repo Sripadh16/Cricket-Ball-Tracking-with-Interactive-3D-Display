@@ -1,140 +1,63 @@
-version: '3.8'
-
-# ─────────────────────────────────────────────────────────────────────────────
-# STATUS: Docker path is provided for reference and is NOT verified to work
-# end-to-end. The primary (tested) path is local SQLite — see README.md.
-# If you use Docker, verify the init.sql schema matches the ORM before running.
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Env-var names are aligned with config.py (backend/src/config.py):
-#   DATABASE_URL, UPLOAD_DIR, JWT_SECRET_KEY, JWT_ALGORITHM,
-#   JWT_ACCESS_TOKEN_EXPIRE_MINUTES, CORS_ORIGINS, MAX_UPLOAD_SIZE_MB
-#
-# Redis is NOT used by the application — removed from backend depends_on.
-# Redis service kept only as an optional cache sidecar (profile: optional).
-
 services:
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
   db:
     image: postgres:15-alpine
-    container_name: drs-postgres
     environment:
       POSTGRES_DB: drs_db
       POSTGRES_USER: drs_user
-      POSTGRES_PASSWORD: drs_password
+      POSTGRES_PASSWORD: ${DRS_DB_PASSWORD:?Set DRS_DB_PASSWORD in the environment or root .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
-    ports:
-      - "5432:5432"
-    networks:
-      - drs-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U drs_user -d drs_db"]
-      interval: 10s
+      test: ["CMD", "pg_isready", "-U", "drs_user", "-d", "drs_db"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
 
-  # ── Backend API ────────────────────────────────────────────────────────────
   backend:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: backend-builder
-    container_name: drs-backend
+      target: backend
     environment:
-      # Aligned with config.py env var names
-      - DATABASE_URL=postgresql://drs_user:drs_password@db:5432/drs_db
-      - UPLOAD_DIR=/app/uploads
-      - MAX_UPLOAD_SIZE_MB=500
-      # JWT — config.py reads JWT_SECRET_KEY, JWT_ALGORITHM, JWT_ACCESS_TOKEN_EXPIRE_MINUTES
-      - JWT_SECRET_KEY=change-this-before-any-non-local-use
-      - JWT_ALGORITHM=HS256
-      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
-      # CORS — comma-separated origins
-      - CORS_ORIGINS=http://localhost:3000,http://localhost:80
-      - LOG_LEVEL=INFO
-      - MAX_PROCESSING_FRAMES=300
-      # REDIS_URL is NOT read by config.py — omitted intentionally
+      APP_ENV: production
+      POSTGRES_HOST: db
+      POSTGRES_DB: drs_db
+      POSTGRES_USER: drs_user
+      POSTGRES_PASSWORD: ${DRS_DB_PASSWORD:?Set DRS_DB_PASSWORD in the environment or root .env}
+      JWT_SECRET_KEY: ${DRS_JWT_SECRET:?Set DRS_JWT_SECRET to a deployment-specific random value}
+      UPLOAD_DIR: /app/uploads
+      LOG_FILE: /app/logs/app.log
+      MAX_UPLOAD_SIZE_MB: "100"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
     volumes:
-      - ./backend:/app/backend
       - uploads:/app/uploads
       - logs:/app/logs
-    ports:
-      - "8000:8000"
-    networks:
-      - drs-network
     depends_on:
       db:
         condition: service_healthy
-      # redis removed — not used by application code
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    command: >
-      sh -c "
-        cd /app/backend &&
-        PYTHONPATH=/app/backend/src uvicorn main:app --host 0.0.0.0 --port 8000
-      "
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
-  # ── Frontend ───────────────────────────────────────────────────────────────
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile
-      target: frontend-builder
-    container_name: drs-frontend
-    environment:
-      - REACT_APP_API_URL=http://localhost:8000
+      target: frontend
     ports:
-      - "3000:3000"
-    networks:
-      - drs-network
+      - "127.0.0.1:${DRS_HTTP_PORT:-8080}:80"
     depends_on:
-      - backend
-    command: >
-      sh -c "
-        cd /app/frontend &&
-        npm start
-      "
-
-  # ── Nginx (production profile only) ───────────────────────────────────────
-  nginx:
-    image: nginx:alpine
-    container_name: drs-nginx
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./docker/ssl:/etc/ssl/certs:ro
-      - logs:/var/log/nginx
-    networks:
-      - drs-network
-    depends_on:
-      - backend
-      - frontend
-    profiles:
-      - production
-
-  # ── Redis (optional, not used by application code) ────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: drs-redis
-    ports:
-      - "6379:6379"
-    networks:
-      - drs-network
-    profiles:
-      - optional   # opt-in only; backend does not require it
+      backend:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
 volumes:
   postgres_data:
   uploads:
   logs:
-
-networks:
-  drs-network:
-    driver: bridge

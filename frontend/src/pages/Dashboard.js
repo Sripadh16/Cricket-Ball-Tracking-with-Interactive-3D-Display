@@ -8,7 +8,7 @@ import {
   Close, Stop, PlayArrow,
   FlipCameraIos, SportsCricket, ArrowForward, Search, VideoLibrary
 } from '@mui/icons-material';
-import api, { API_BASE_URL, ensureGuestSession, MAX_UPLOAD_SIZE_MB } from '../api/client';
+import api, { ensureGuestSession, MAX_UPLOAD_SIZE_MB } from '../api/client';
 
 function VideoRecorder({ open, onClose, onRecorded }) {
   const videoRef = useRef(null);
@@ -330,7 +330,6 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
   const visibleVideos = videos.filter(v => (v.original_filename || v.filename || '').toLowerCase().includes(query.toLowerCase()));
   const readyCount = videos.filter(v => v.status === 'processed').length;
   const formatSize = bytes => bytes == null ? 'Size unavailable' : (bytes / 1024 / 1024).toFixed(1) + ' MB';
-  const token = localStorage.getItem('token');
 
   return (
     <div className="studio">
@@ -369,7 +368,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
           <div className="upload-copy">
             <h2 id="upload-heading">Analyse a delivery</h2>
             <p>Drop a clip here or choose a file. Use a fixed camera and keep the ball in view.</p>
-            <span className="upload-formats">MP4, MOV, AVI, MKV or WebM · up to {MAX_UPLOAD_SIZE_MB} MB</span>
+            <span className="upload-formats">H.264 MP4 or WebM recommended · up to {MAX_UPLOAD_SIZE_MB} MB</span>
           </div>
           <div className="upload-actions">
             <Button variant="outlined" color="inherit" startIcon={<Videocam fontSize="small" />} disabled={uploading} onClick={() => setShowRecorder(true)}>
@@ -400,7 +399,7 @@ function Dashboard({ onVideoSelect, onLaunchDemo }) {
             const ready = video.status === 'processed' && !busy;
             const failed = video.status === 'error' || video.status === 'failed';
             return <article key={video.id} className="delivery-row">
-              <div className="delivery-thumb" aria-hidden="true">{ready ? <video src={API_BASE_URL + '/videos/' + video.id + '/stream?token=' + encodeURIComponent(token || '')} preload="metadata" muted playsInline /> : busy ? <CircularProgress size={18} /> : <Videocam fontSize="small" />}</div>
+              <div className="delivery-thumb" aria-hidden="true">{busy ? <CircularProgress size={18} /> : <Videocam fontSize="small" />}</div>
               <div style={{ minWidth: 0 }}><button className="delivery-name" onClick={() => onVideoSelect(video)} disabled={uploading} title={name}>{name}</button><div className="delivery-meta">{formatSize(video.file_size)}{(video.created_at || video.upload_date) ? ' · ' + new Date(video.created_at || video.upload_date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''}</div></div>
               <div className="delivery-status status-label" style={{ color: busy ? 'var(--warn)' : ready ? (video.ball_detected === false ? 'var(--warn)' : 'var(--good)') : failed ? 'var(--bad)' : 'var(--muted)' }}><span className="status-dot" /><span>{busy ? 'Analysing' : ready ? (video.ball_detected === false ? 'No ball detected' : 'Ready to review') : failed ? 'Needs attention' : 'Uploaded'}</span></div>
               <div className="delivery-actions"><Tooltip title="Reprocess clip"><span><IconButton aria-label={'Reprocess ' + name} disabled={busy} onClick={() => handleReprocess(video)}><Refresh fontSize="small" /></IconButton></span></Tooltip><Tooltip title="Delete clip"><span><IconButton aria-label={'Delete ' + name} disabled={busy} onClick={() => setDeleteTarget(video)}><Delete sx={{ fontSize: 18 }} /></IconButton></span></Tooltip><Tooltip title={ready ? 'Open analysis' : 'Open source video'}><IconButton aria-label={'Open analysis for ' + name} onClick={() => onVideoSelect(video)} sx={{ color: 'primary.main' }}><ArrowForward sx={{ fontSize: 18 }} /></IconButton></Tooltip></div>

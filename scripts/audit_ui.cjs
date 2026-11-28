@@ -59,6 +59,10 @@ async function main() {
       socket.send(JSON.stringify({ id: requestId, method, params }));
     });
     const errors = [];
+    const reportInterceptError = error => {
+      // Chromium drops interception IDs when a media seek or route change cancels a request.
+      if (!error.message.includes('Invalid InterceptionId.')) errors.push(error.message);
+    };
     let backendAvailable = false;
     let offlinePresetRequests = 0;
     socket.onmessage = event => {
@@ -76,7 +80,7 @@ async function main() {
         const url = new URL(request.url);
         if (!backendAvailable) {
           if (url.pathname.startsWith('/videos/presets/')) offlinePresetRequests++;
-          send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' }).catch(error => errors.push(error.message));
+          send('Fetch.failRequest', { requestId, errorReason: 'ConnectionRefused' }).catch(reportInterceptError);
           return;
         }
         const stream = url.pathname.endsWith('/stream');
@@ -92,6 +96,7 @@ async function main() {
         }
         const body = url.pathname.startsWith('/videos/presets/') ? (fixture.presets?.[url.pathname.split('/').pop()] || fixture.trajectory)
           : url.pathname.endsWith('/trajectory') ? fixture.uploadTrajectory
+          : url.pathname.endsWith('/playback') ? { stream_url: url.pathname.replace(/\/playback$/, '/stream') + '?ticket=fixture' }
           : url.pathname === '/videos/' ? { videos: fixture.videos } : {};
         send('Fetch.fulfillRequest', { requestId, responseCode: stream && range ? 206 : 200, responseHeaders: [
           { name: 'Content-Type', value: stream ? (recordedClip ? 'video/mp4' : 'video/webm') : 'application/json' },
@@ -101,7 +106,7 @@ async function main() {
           { name: 'Access-Control-Allow-Headers', value: '*' },
           { name: 'Access-Control-Allow-Methods', value: '*' }
         ], body: stream ? bytes.subarray(start, end + 1).toString('base64')
-          : Buffer.from(JSON.stringify(body)).toString('base64') }).catch(error => errors.push(error.message));
+          : Buffer.from(JSON.stringify(body)).toString('base64') }).catch(reportInterceptError);
       }
     };
     await send('Runtime.enable');

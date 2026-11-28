@@ -87,6 +87,25 @@ export default function DRSReview({
   const [pickingCorner, setPickingCorner] = useState(null);
   const [pickedPoint, setPickedPoint] = useState(null);
   const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [playback, setPlayback] = useState(null);
+  const [playbackAttempt, setPlaybackAttempt] = useState(0);
+  const videoId = video?.id;
+  const currentPlayback = playback?.videoId === videoId ? playback : null;
+  useEffect(() => {
+    if (!videoId) return;
+    const controller = new AbortController();
+    async function authorizePlayback() {
+      try {
+        const { data } = await api.post(`/videos/${videoId}/playback`, null, { signal: controller.signal, timeout: 8000 });
+        if (!data.stream_url?.startsWith(`/videos/${videoId}/stream?ticket=`)) throw new Error('Invalid playback URL');
+        if (!controller.signal.aborted) setPlayback({ videoId, url: `${API_BASE_URL}${data.stream_url}` });
+      } catch {
+        if (!controller.signal.aborted) setPlayback({ videoId, error: true });
+      }
+    }
+    authorizePlayback();
+    return () => controller.abort();
+  }, [videoId, playbackAttempt]);
   useEffect(() => { setPickedPoint(null); setPickingCorner(null); }, [video?.id]);
   useEffect(() => { window.scrollTo({ top: 0, left: 0, behavior: 'instant' }); }, [video?.id]);
 
@@ -319,11 +338,7 @@ export default function DRSReview({
     return `${mins}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
   };
 
-  // Authenticated video stream URL with token query parameter for HTML5 video
-  const token = localStorage.getItem('token');
-  const videoUrl = video?.id
-    ? `${API_BASE_URL}/videos/${video.id}/stream${token ? `?token=${encodeURIComponent(token)}` : ''}`
-    : '';
+  const videoUrl = currentPlayback?.url;
 
   const isVideoMode = currentDeliveryType === 'video';
   const isSimulation = !isVideoMode;
@@ -759,7 +774,14 @@ export default function DRSReview({
           </Button>
         }>Custom simulation settings require a connection to the analysis server.</Alert>}
         {loadingPreset && <Box role="status" sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}><CircularProgress size={12} /><Typography variant="caption" color="text.secondary">Preparing the delivery…</Typography></Box>}
-        {mediaError && <Alert severity="error" sx={{ mt: 1 }} onClose={() => setMediaError('')}>{mediaError}</Alert>}
+        {videoId && !currentPlayback && <Typography role="status" variant="body2" sx={{ mt: 1 }}>Opening source video…</Typography>}
+        {(mediaError || currentPlayback?.error) && <Alert severity="error" sx={{ mt: 1 }} action={
+          <Button color="inherit" size="small" onClick={() => {
+            setPlayback(null);
+            setMediaError('');
+            setPlaybackAttempt(attempt => attempt + 1);
+          }}>Retry playback</Button>
+        }>{mediaError || 'Playback could not be authorized. Retry or return to your delivery library.'}</Alert>}
         {actionError && <Alert severity="error" sx={{ mt: 1.5 }} onClose={() => setActionError('')}>{actionError}</Alert>}
       </header>
 

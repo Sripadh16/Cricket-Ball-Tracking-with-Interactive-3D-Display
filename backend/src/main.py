@@ -1,31 +1,30 @@
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from tempfile import TemporaryFile
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from api.videos import router as videos_router
 from api.reviews import router as reviews_router
 from api.auth import router as auth_router
-from database import engine, Base
-# Model imports register every table on Base.metadata before create_all().
-from models.user import User  # noqa: F401
-from models.video import Video  # noqa: F401
-from models.trajectory import Trajectory  # noqa: F401
-from models.review_session import ReviewSession  # noqa: F401
+from schema import schema_ready, upgrade_database
 from logging_config import setup_logging
-from config import CORS_ORIGINS, HOST, PORT
+from config import CORS_ORIGINS, HOST, PORT, UPLOAD_DIR
 
 # Setup logging
 logger = setup_logging()
 
-# Create database tables
-try:
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables created successfully")
-except Exception as e:
-    logger.error(f"Database table creation failed: {e}")
+@asynccontextmanager
+async def lifespan(app):
+    upgrade_database()
+    with TemporaryFile(dir=UPLOAD_DIR):
+        pass
+    yield
 
 app = FastAPI(
     title="DRS Ball Tracking API",
     version="1.0.0",
-    description="Cricket Decision Review System with Ball Tracking"
+    description="Cricket Decision Review System with Ball Tracking",
+    lifespan=lifespan,
 )
 
 # Note: Media files are securely streamed via the authenticated /videos/{video_id}/stream
@@ -55,8 +54,14 @@ async def root():
     }
 
 @app.get("/health")
-async def health():
-    """Health check endpoint"""
+def health():
+    """Report readiness only when the expected schema and storage are available."""
+    try:
+        ready = schema_ready() and UPLOAD_DIR.is_dir()
+    except Exception:
+        ready = False
+    if not ready:
+        raise HTTPException(status_code=503, detail="Application dependencies are unavailable")
     return {"status": "healthy"}
 
 if __name__ == "__main__":

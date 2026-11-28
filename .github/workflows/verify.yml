@@ -11,6 +11,16 @@ jobs:
   backend:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: crease_ci
+          POSTGRES_PASSWORD: crease_ci_local
+          POSTGRES_DB: crease_ci
+        ports:
+          - 5432:5432
+        options: --health-cmd "pg_isready -U crease_ci -d crease_ci" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       OPENBLAS_NUM_THREADS: '1'
       OMP_NUM_THREADS: '1'
@@ -30,6 +40,7 @@ jobs:
           DATABASE_URL: sqlite:///${{ runner.temp }}/crease-lab.db
           UPLOAD_DIR: ${{ runner.temp }}/crease-lab-uploads
           LOG_FILE: ${{ runner.temp }}/crease-lab.log
+          CREASE_TEST_POSTGRES_URL: postgresql://crease_ci:crease_ci_local@localhost:5432/crease_ci
         run: python -m pytest -q tests
       - run: python scripts/generate_standard_deliveries.py --check
   frontend:

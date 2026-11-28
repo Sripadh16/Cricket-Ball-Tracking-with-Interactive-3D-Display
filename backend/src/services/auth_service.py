@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from config import JWT_SECRET_KEY, JWT_ALGORITHM, JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 
 logger = logging.getLogger(__name__)
+MEDIA_AUDIENCE = 'crease-lab-media'
+MEDIA_TICKET_MINUTES = 30
 
 try:
     import bcrypt
@@ -80,11 +82,11 @@ class AuthService:
         if email.strip().lower() == "guest@cricket.drs":
             return None  # The retired shared account had a public password.
         user = self.db.query(User).filter(User.email == email).first()
-        if not user:
-            logger.warning(f"Authentication failed: user not found - {email}")
+        if not user or not user.is_active:
+            logger.warning("Authentication failed: unknown or inactive user")
             return None
         if not self.verify_password(password, user.hashed_password):
-            logger.warning(f"Authentication failed: invalid password - {email}")
+            logger.warning("Authentication failed: invalid password for user %s", user.id)
             return None
 
         # Transparently upgrade legacy direct-bcrypt or PBKDF2 hashes to the pre-hashed scheme
@@ -98,7 +100,7 @@ class AuthService:
                 if not is_prehashed:
                     user.hashed_password = self.get_password_hash(password)
                     self.db.commit()
-                    logger.info(f"Transparently upgraded legacy password hash for user: {email}")
+                    logger.info("Upgraded legacy password hash for user %s", user.id)
         except Exception as e:
             logger.debug(f"Legacy hash upgrade check skipped: {e}")
 
@@ -116,6 +118,22 @@ class AuthService:
         encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
         return encoded_jwt
 
+    def create_media_ticket(self, user_id: str, video_id: str) -> str:
+        return self.create_access_token(
+            {'sub': user_id, 'video_id': video_id, 'aud': MEDIA_AUDIENCE},
+            expires_delta=timedelta(minutes=MEDIA_TICKET_MINUTES),
+        )
+
+    def media_ticket_owner(self, ticket: str, video_id: str) -> str:
+        try:
+            claims = jwt.decode(ticket, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], audience=MEDIA_AUDIENCE,
+                                options={'require': ['exp', 'sub', 'video_id']})
+            if claims['video_id'] == video_id:
+                return claims['sub']
+        except JWTError:
+            pass
+        raise HTTPException(status_code=401, detail='Invalid or expired playback ticket')
+
     def get_current_user(self, token: str) -> User:
         """Get the current user from a JWT token"""
         credentials_exception = HTTPException(
@@ -124,7 +142,7 @@ class AuthService:
             headers={"WWW-Authenticate": "Bearer"},
         )
         try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM], options={'require': ['exp', 'sub']})
             email: str = payload.get("sub")
             if email is None:
                 raise credentials_exception
@@ -133,7 +151,7 @@ class AuthService:
             raise credentials_exception
 
         user = self.db.query(User).filter(User.email == email).first()
-        if user is None:
-            logger.warning(f"User not found for email: {email}")
+        if user is None or not user.is_active:
+            logger.warning("Session validation failed: unknown or inactive user")
             raise credentials_exception
         return user

@@ -7,16 +7,22 @@ from typing import List
 
 # Base directory
 BASE_DIR = Path(__file__).resolve().parent.parent
+PRODUCTION = os.getenv("APP_ENV", "development").lower() == "production"
 
 # Database Configuration
 DB_PATH = BASE_DIR / "drs.db"
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DB_PATH}")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST")
 
 # Upload Configuration
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", str(BASE_DIR.parent / "uploads")))
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+MAX_CLIP_DURATION_S = int(os.getenv("MAX_CLIP_DURATION_S", "30"))
+MAX_CLIP_PIXELS = 3840 * 2160
+MAX_WORKSPACE_CLIPS = int(os.getenv("MAX_WORKSPACE_CLIPS", "40"))
+MAX_WORKSPACE_BYTES = int(os.getenv("MAX_WORKSPACE_SIZE_MB", "1024")) * 1024 * 1024
 
 # Allowed video formats
 ALLOWED_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
@@ -24,7 +30,9 @@ ALLOWED_VIDEO_EXTENSIONS = ['.mp4', '.mov', '.avi', '.mkv', '.webm']
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))  # 7 days for smooth demo & evaluation
+if PRODUCTION and (JWT_SECRET_KEY == "dev-secret-key-change-in-production" or len(JWT_SECRET_KEY) < 32):
+    raise RuntimeError("APP_ENV=production requires a deployment-specific JWT_SECRET_KEY of at least 32 characters")
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440" if PRODUCTION else "10080"))
 
 # CORS Configuration
 CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:3000")

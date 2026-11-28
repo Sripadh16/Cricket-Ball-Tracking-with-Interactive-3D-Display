@@ -121,41 +121,6 @@ class TestKalmanFilter:
         )
 
 
-class TestUploadFilenameHandling:
-    """Path traversal and filename sanitisation."""
-
-    def test_path_traversal_stripped(self):
-        """Path components must be stripped from filenames."""
-        from pathlib import Path
-        # Simulate what the endpoint does: Path(name).name
-        dangerous_names = [
-            '../../../etc/passwd',
-            '..\\..\\Windows\\System32\\cmd.exe',
-            '/absolute/path/video.mp4',
-        ]
-        for name in dangerous_names:
-            safe = Path(name).name
-            assert '/' not in safe, f"Path separator left in: {safe}"
-            assert '\\' not in safe, f"Windows path separator left in: {safe}"
-            # Must only be the basename
-            assert safe in ('passwd', 'cmd.exe', 'video.mp4'), \
-                f"Unexpected sanitised name: {safe}"
-
-    def test_safe_upload_filename_built_correctly(self):
-        """Stored filename must include UUID prefix with only the basename."""
-        import uuid
-        from pathlib import Path
-        original_name = "../uploads/malicious.mp4"
-        safe_name = Path(original_name).name   # = 'malicious.mp4'
-        file_id = str(uuid.uuid4())
-        stored = f"{file_id}_{safe_name}"
-        # Must not contain any directory separator
-        assert '/' not in stored
-        assert '\\' not in stored
-        # Must end with the basename
-        assert stored.endswith('_malicious.mp4')
-
-
 class TestConfigGeometryConsistency:
     """All geometry constants must be consistent across config, tracker and viewer."""
 

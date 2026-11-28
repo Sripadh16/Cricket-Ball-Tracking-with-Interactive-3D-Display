@@ -15,6 +15,7 @@ jest.mock('../api/client', () => ({ __esModule: true, default: { get: jest.fn(),
 
 beforeEach(() => {
   localStorage.setItem('token', 'test-token');
+  api.post.mockImplementation(() => new Promise(() => {}));
   global.ResizeObserver = class { observe() {} disconnect() {} };
   window.scrollTo = jest.fn();
   jest.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
@@ -38,6 +39,12 @@ test('an upload with incomplete analysis remains usable without invented metrics
   fireEvent.click(screen.getByRole('button', { name: 'Save reviewer assessment' }));
   expect(screen.getByRole('button', { name: 'Save Decision' })).toBeDisabled();
   expect(screen.getByRole('combobox', { name: 'Decision outcome' })).toHaveTextContent('Select your assessment');
+});
+
+test('uploaded videos use clip-scoped playback URLs', async () => {
+  api.post.mockResolvedValueOnce({ data: { stream_url: '/videos/clip/stream?ticket=clip-only' } });
+  render(<DRSReview video={{ id: 'clip', filename: 'delivery.mp4' }} onBack={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText('Uploaded delivery video')).toHaveAttribute('src', 'http://localhost:8000/videos/clip/stream?ticket=clip-only'));
 });
 
 test('media decode failure offers a recovery message without removing source controls', () => {

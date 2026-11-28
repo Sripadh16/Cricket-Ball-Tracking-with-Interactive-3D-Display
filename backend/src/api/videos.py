@@ -1,15 +1,18 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query, status, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks, Query, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from database import get_db, SessionLocal
-from services.video_service import VideoService
+from services.video_service import VideoService, probe_video
 from services.ball_tracking_service import BallTrackingService
 from services.delivery_tracker import DeliveryTracker
 from services.auth_service import AuthService
 from models.trajectory import Trajectory
+from models.video import Video
 from api.auth import get_current_user, get_current_user_optional
 from models.user import User
-from config import UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS, MAX_PROCESSING_FRAMES
+from config import (UPLOAD_DIR, MAX_UPLOAD_SIZE_BYTES, ALLOWED_VIDEO_EXTENSIONS, MAX_PROCESSING_FRAMES,
+                    MAX_WORKSPACE_BYTES, MAX_WORKSPACE_CLIPS)
 from services.sample_generator import DeliveryPhysicsSimulator
 from services.ball_physics_engine import BallPhysicsEngine
 from services.pitch_calibration import calibrate_pitch
@@ -279,7 +282,7 @@ async def upload_video(
     """Upload a video file for ball tracking analysis with authenticated ownership.
     Streams upload in 1 MB chunks to reject oversized files without buffering in RAM.
     """
-    safe_name = Path(file.filename or "upload").name
+    safe_name = Path((file.filename or "upload").replace("\\", "/")).name
     file_ext = Path(safe_name).suffix.lower()
     if file_ext not in ALLOWED_VIDEO_EXTENSIONS:
         raise HTTPException(
@@ -287,8 +290,13 @@ async def upload_video(
             detail=f"Invalid file type '{file_ext}'. Allowed: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"
         )
 
+    clip_count, used_bytes = db.query(func.count(Video.id), func.coalesce(func.sum(Video.file_size), 0)).filter(
+        Video.user_id == current_user.id).one()
+    if clip_count >= MAX_WORKSPACE_CLIPS or used_bytes >= MAX_WORKSPACE_BYTES:
+        raise HTTPException(status_code=413, detail="Workspace storage is full. Delete a clip before uploading again.")
+
     file_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{file_id}_{safe_name}"
+    file_path = UPLOAD_DIR / f"{file_id}{file_ext}"
     CHUNK = 1024 * 1024
 
     try:
@@ -300,15 +308,16 @@ async def upload_video(
                     break
                 file_size += len(chunk)
                 if file_size > MAX_UPLOAD_SIZE_BYTES:
-                    out.close()
-                    file_path.unlink(missing_ok=True)
                     raise HTTPException(
                         status_code=400,
                         detail=f"File too large. Maximum size: {MAX_UPLOAD_SIZE_BYTES // (1024*1024)} MB"
                     )
+                if used_bytes + file_size > MAX_WORKSPACE_BYTES:
+                    raise HTTPException(status_code=413, detail="This clip exceeds the remaining workspace storage.")
                 out.write(chunk)
-        logger.info(f"Video uploaded: {file_path} ({file_size:,} bytes) by user {current_user.id}")
+        logger.info("Stored upload %s (%s bytes) for user %s", file_id, file_size, current_user.id)
     except HTTPException:
+        file_path.unlink(missing_ok=True)
         raise
     except Exception as e:
         try:
@@ -318,14 +327,25 @@ async def upload_video(
         logger.error(f"Failed to save video file: {e}")
         raise HTTPException(status_code=500, detail="Failed to save video file")
 
-    # Create video record bound to authenticated user
+    try:
+        duration, resolution = await asyncio.to_thread(probe_video, str(file_path))
+    except ValueError as exc:
+        file_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        file_path.unlink(missing_ok=True)
+        raise
+
+    # Create video record bound to authenticated user.
     video_service = VideoService(db)
-    video = video_service.create_video(
-        user_id=current_user.id,
-        filename=file.filename,
-        file_path=str(file_path),
-        file_size=file_size
-    )
+    try:
+        video = video_service.create_video(user_id=current_user.id, filename=safe_name[:255],
+                                           file_path=str(file_path), file_size=file_size,
+                                           duration=duration, resolution=resolution)
+    except Exception:
+        db.rollback()
+        file_path.unlink(missing_ok=True)
+        raise
 
     # Offload tracking to shared thread pool
     logger.info(f"Starting automatic ball tracking for video: {video.id} (sync={sync})")
@@ -733,103 +753,51 @@ async def get_video_diagnostics(
     }
 
 
-@router.get("/{video_id}/stream")
-async def stream_video(
+@router.post("/{video_id}/playback")
+async def issue_playback_ticket(
     video_id: str,
-    request: Request,
-    token: Optional[str] = Query(None, description="Auth token for HTML5 video tag requests"),
-    current_user_opt: Optional[User] = Depends(get_current_user_optional),
-    db: Session = Depends(get_db)
+    response: Response,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Stream video media file with authenticated ownership verification and HTTP 206 Range support.
-    Accepts Authorization header OR ?token= query parameter (for HTML5 video player).
-    """
-    user = current_user_opt
-    if not user and token:
-        try:
-            auth_service = AuthService(db)
-            user = auth_service.get_current_user(token)
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token for video streaming",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required for video playback",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-
-    video_service = VideoService(db)
-    video = video_service.get_video(video_id)
+    video = VideoService(db).get_video(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-
-    if video.user_id != user.id:
+    if video.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+    ticket = AuthService(db).create_media_ticket(current_user.id, video.id)
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"stream_url": f"/videos/{video.id}/stream?ticket={ticket}"}
 
-    if not video.file_path or not os.path.exists(video.file_path):
+
+@router.api_route("/{video_id}/stream", methods=["GET", "HEAD"])
+async def stream_video(
+    video_id: str,
+    ticket: Optional[str] = Query(None, max_length=2048),
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    """Serve private media with standard Range and HEAD responses."""
+    if current_user is not None:
+        owner_id = current_user.id
+    elif ticket:
+        owner_id = AuthService(db).media_ticket_owner(ticket, video_id)
+    else:
+        raise HTTPException(status_code=401, detail="Authentication required for video playback")
+
+    video = VideoService(db).get_video(video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.user_id != owner_id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this video")
+    if not video.file_path or not Path(video.file_path).is_file():
         raise HTTPException(status_code=404, detail="Video media file missing on disk")
 
-    import mimetypes
-    media_type, _ = mimetypes.guess_type(video.file_path)
-    if not media_type:
-        ext = Path(video.file_path).suffix.lower()
-        if ext == ".webm":
-            media_type = "video/webm"
-        elif ext in [".mov", ".qt"]:
-            media_type = "video/quicktime"
-        elif ext == ".avi":
-            media_type = "video/x-msvideo"
-        elif ext == ".mkv":
-            media_type = "video/x-matroska"
-        else:
-            media_type = "video/mp4"
-
-    # Support HTTP 206 Partial Content Range streaming for frame-accurate HTML5 scrubbing
-    file_size = os.path.getsize(video.file_path)
-    range_header = request.headers.get("range")
-    if range_header:
-        try:
-            bytes_str = range_header.replace("bytes=", "")
-            start_str, end_str = bytes_str.split("-")
-            start = int(start_str) if start_str else 0
-            end = int(end_str) if end_str else min(start + 1024 * 1024 * 2 - 1, file_size - 1)
-            end = min(end, file_size - 1)
-            chunk_length = end - start + 1
-
-            def iterfile():
-                with open(video.file_path, "rb") as f:
-                    f.seek(start)
-                    remaining = chunk_length
-                    while remaining > 0:
-                        chunk_to_read = min(65536, remaining)
-                        data = f.read(chunk_to_read)
-                        if not data:
-                            break
-                        remaining -= len(data)
-                        yield data
-
-            headers = {
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(chunk_length),
-                "Content-Type": media_type,
-            }
-            return StreamingResponse(iterfile(), status_code=206, headers=headers)
-        except Exception as e:
-            logger.warning(f"Error serving video range {range_header}: {e}")
-
-    return FileResponse(
-        video.file_path,
-        media_type=media_type,
-        filename=Path(video.file_path).name,
-        headers={"Accept-Ranges": "bytes"}
-    )
-
+    return FileResponse(video.file_path, headers={
+        "Cache-Control": "private, no-store",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 @router.delete("/{video_id}")
 async def delete_video(

@@ -34,6 +34,7 @@ from models.trajectory import Trajectory   # noqa: E402
 from models.review_session import ReviewSession  # noqa: E402
 from services.auth_service import AuthService  # noqa: E402
 from services.ball_tracking_service import BallTrackingService  # noqa: E402
+from schema import schema_ready, upgrade_database  # noqa: E402
 
 # Re-create engine pointing at the temp file and create tables
 _test_engine = create_engine(
@@ -57,7 +58,12 @@ _main_module.app.dependency_overrides[get_db] = _override_get_db
 @pytest.fixture(scope="session")
 def client():
     """FastAPI test client backed by an isolated temp-file SQLite database."""
-    return TestClient(_main_module.app)
+    with pytest.MonkeyPatch.context() as patcher:
+        patcher.setattr('api.videos.SessionLocal', _TestingSessionLocal)
+        patcher.setattr(_main_module, 'upgrade_database', lambda: upgrade_database(_test_engine))
+        patcher.setattr(_main_module, 'schema_ready', lambda: schema_ready(_test_engine))
+        with TestClient(_main_module.app) as test_client:
+            yield test_client
 
 
 @pytest.fixture(scope="session")
@@ -104,6 +110,7 @@ def test_users(client):
 def test_api_root(client):
     response = client.get("/")
     assert response.status_code == 200
+    assert client.get('/health').json() == {'status': 'healthy'}
     assert response.json()["status"] == "running"
 
 
@@ -114,9 +121,15 @@ def test_uploaded_fixture_completes_review_lifecycle(client, tmp_path, monkeypat
     assert guest.status_code == 200
     headers = {'Authorization': f"Bearer {guest.json()['access_token']}"}
 
+    corrupt = client.post('/videos/upload', headers=headers, files={'file': ('broken.mp4', b'not video', 'video/mp4')})
+    assert corrupt.status_code == 422
+    assert not list(tmp_path.iterdir())
+
     with fixture.open('rb') as source:
-        upload = client.post('/videos/upload', headers=headers, files={'file': (fixture.name, source, 'video/webm')})
+        upload = client.post('/videos/upload', headers=headers, files={'file': (f'../private/{fixture.name}', source, 'video/webm')})
     assert upload.status_code == 200
+    assert upload.json()['original_filename'] == fixture.name
+    assert uuid.UUID(Path(upload.json()['filename']).stem)
     video_url = f"/videos/{upload.json()['id']}"
     assert client.get(f'{video_url}/progress', headers=headers).json()['status'] == 'processed'
     trajectory = client.get(f'{video_url}/trajectory', headers=headers)
@@ -310,7 +323,7 @@ def test_two_user_video_ownership_isolation(client, test_users):
 
 
 def test_video_streaming_endpoint(client, test_users):
-    """GET /videos/{id}/stream verifies ownership via Bearer header or ?token= query param."""
+    """Native playback uses a clip-scoped ticket and standard byte ranges."""
     db = _TestingSessionLocal()
     user_a = test_users["user_a"]
     user_b = test_users["user_b"]
@@ -337,13 +350,22 @@ def test_video_streaming_endpoint(client, test_users):
         assert resp_a.status_code == 200
         assert resp_a.headers["content-type"] == "video/mp4"
 
-        # User A via ?token= query parameter (HTML5 video tag)
-        resp_query = client.get(f"/videos/{video.id}/stream?token={user_a['token']}")
-        assert resp_query.status_code == 200
+        playback = f'/videos/{video.id}/playback'
+        assert client.post(playback, headers=user_b['headers']).status_code == 403
+        issued = client.post(playback, headers=user_a['headers'])
+        assert issued.status_code == 200
+        stream_url = issued.json()['stream_url']
+        ticket = stream_url.split('ticket=', 1)[1]
+        assert client.get('/auth/me', headers={'Authorization': f'Bearer {ticket}'}).status_code == 401
+        assert client.get(f'/videos/{uuid.uuid4()}/stream', params={'ticket': ticket}).status_code == 401
+        assert client.get(f'/videos/{video.id}/stream', params={'token': user_a['token']}).status_code == 401
 
-        # User B via ?token= is forbidden (403)
-        resp_b = client.get(f"/videos/{video.id}/stream?token={user_b['token']}")
-        assert resp_b.status_code == 403
+        partial = client.get(stream_url, headers={'Range': 'bytes=-3'})
+        assert partial.status_code == 206
+        assert partial.content == b'\x00\x00\x00'
+        assert partial.headers['cache-control'] == 'private, no-store'
+        assert client.get(stream_url, headers={'Range': 'bytes=999-'}).status_code == 416
+        assert client.head(stream_url).status_code == 200
 
         # Anonymous stream access rejected (401)
         resp_anon = client.get(f"/videos/{video.id}/stream")

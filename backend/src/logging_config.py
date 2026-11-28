@@ -1,6 +1,6 @@
 import logging
 import logging.config
-import os
+from config import LOG_FILE, LOG_LEVEL
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -24,12 +24,12 @@ LOGGING_CONFIG = {
             "class": "logging.FileHandler",
             "level": "INFO",
             "formatter": "detailed",
-            "filename": "logs/app.log",
+            "filename": LOG_FILE,
             "encoding": "utf8"
         }
     },
     "root": {
-        "level": "INFO",
+        "level": LOG_LEVEL,
         "handlers": ["console", "file"]
     },
     "loggers": {
@@ -52,7 +52,5 @@ LOGGING_CONFIG = {
 }
 
 def setup_logging():
-    # Create logs directory if it doesn't exist
-    os.makedirs("logs", exist_ok=True)
     logging.config.dictConfig(LOGGING_CONFIG)
     return logging.getLogger(__name__)
