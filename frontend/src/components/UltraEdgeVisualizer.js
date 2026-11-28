@@ -173,6 +173,15 @@ export default function UltraEdgeVisualizer({ currentTime = 0, duration = 1.5, t
     ctx.beginPath(); ctx.moveTo(cursor, 0); ctx.lineTo(cursor, height); ctx.stroke();
   }, [audio, loading, error, simulation, eventTime, eventType, noise, gain, mode, start, span, currentTime, offset, size]);
 
+  const canInspect = Boolean(onSeek && (simulation || (audio && !loading && !error)));
+  const seekClamped = value => {
+    if (canInspect && Number.isFinite(value)) onSeek(Math.max(0, Math.min(duration, value)));
+  };
+  const soundEvents = (simulation ? [eventTime] : (audio?.candidates || []).map(t => t + offset))
+    .filter(t => Number.isFinite(t) && t >= 0 && t <= duration).sort((a, b) => a - b);
+  const previousEvent = [...soundEvents].reverse().find(t => t < currentTime - 0.001);
+  const nextEvent = soundEvents.find(t => t > currentTime + 0.001);
+
   return <Paper elevation={0} sx={{ p: 2, bgcolor: 'background.paper', minWidth: 0 }}>
     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', mb: 1 }}>
       <Typography component="h3" variant="subtitle1">{simulation ? 'Simulated audio demonstration' : 'Source audio inspection'}</Typography>
@@ -190,10 +199,20 @@ export default function UltraEdgeVisualizer({ currentTime = 0, duration = 1.5, t
     {!simulation && error && <Alert severity="info">{error}</Alert>}
     {!simulation && audio?.peak < 0.002 && <Alert severity="info">Source audio is silent or too quiet to assess contact.</Alert>}
     <canvas ref={canvasRef} aria-label={simulation ? 'Synthetic waveform' : 'Source audio waveform'}
-      onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); if (rect.width) onSeek?.(start + (e.clientX - rect.left) / rect.width * span); }}
+      onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); if (rect.width) seekClamped(start + (e.clientX - rect.left) / rect.width * span); }}
       style={{ width: '100%', height: compact ? 110 : 160, display: 'block', marginTop: 12 }} />
     <Slider aria-label="Audio inspection timeline" value={Math.min(duration, currentTime)} min={0} max={Math.max(0.01, duration)} step={0.001}
-      onChange={(_, value) => onSeek?.(value)} disabled={!onSeek} valueLabelDisplay="auto" />
+      onChange={(_, value) => seekClamped(value)} disabled={!canInspect}
+      getAriaValueText={value => `${value.toFixed(3)} seconds`} valueLabelDisplay="auto" />
+    <Box role="group" aria-label="Sound event navigation" sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+      <Button variant="outlined" size="small" disabled={!canInspect || previousEvent == null}
+        onClick={() => seekClamped(previousEvent)}>Previous sound marker</Button>
+      <Button variant="outlined" size="small" disabled={!canInspect || nextEvent == null}
+        onClick={() => seekClamped(nextEvent)}>Next sound marker</Button>
+      <Typography variant="caption" sx={{ alignSelf: 'center' }}>
+        {simulation ? 'Synthetic markers' : 'Unverified sound candidates'} · {soundEvents.length}
+      </Typography>
+    </Box>
     <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center' }}>
       <ToggleButtonGroup value={mode} exclusive size="small" aria-label="Waveform appearance" onChange={(_, value) => value && setMode(value)}>
         <ToggleButton value="ultraedge">UltraEdge style</ToggleButton><ToggleButton value="snicko">Snickometer style</ToggleButton>

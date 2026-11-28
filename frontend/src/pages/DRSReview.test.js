@@ -153,3 +153,25 @@ test('an extrapolated line without a stump-plane measurement does not produce a 
   expect(screen.getByText('NO VERDICT')).toBeInTheDocument();
   expect(screen.queryByText('OUT')).not.toBeInTheDocument();
 });
+
+
+test('labels source-only evidence and exposes retry without inventing coverage', () => {
+  const retry = jest.fn();
+  render(<DRSReview video={{ id: 'clip' }} trajectoryData={{ points: [], ball_detected: false }} onRetryAnalysis={retry} />);
+  expect(screen.getByText('Source only')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry analysis' }));
+  expect(retry).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText(/source frames have candidates/)).not.toBeInTheDocument();
+});
+
+test('candidate coverage counts distinct source frames and event jump seeks source media', () => {
+  const { container } = render(<DRSReview video={{ id: 'clip' }} trajectoryData={{
+    ball_detected: true, reconstruction_method: '2d_track_only', video_info: { frame_count: 100 },
+    pixel_track: [{ t: 0.2, frame_idx: 5, pixel_x: 10, pixel_y: 20 },
+      { t: 0.4, frame_idx: 10, pixel_x: 20, pixel_y: 30 }]
+  }} />);
+  expect(screen.getByText('Candidate track')).toBeInTheDocument();
+  expect(screen.getByText(/2 of 100 source frames have candidates/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Last candidate · 0.40s' }));
+  expect(container.querySelector('video').currentTime).toBe(0.4);
+});

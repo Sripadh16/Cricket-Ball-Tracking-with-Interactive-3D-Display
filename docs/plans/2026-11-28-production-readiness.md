@@ -40,3 +40,8 @@ Real-clip accuracy and participant outcomes depend on access to consented footag
 - Review polling preserves saved evidence during retry, displays failure without discarding the saved result, and retries temporary connection failures.
 - Local targeted backend verification: 26 passed, one PostgreSQL skip. Earlier full backend run: 114 passed, five skipped (before the final regression additions). Frontend: 31 tests across ten suites passed; production build succeeded with existing dependency source-map and Browserslist warnings.
 - Active-job mutation regression covers duplicate reprocessing, calibration and deletion rejection while previous analysis remains readable. PostgreSQL concurrency and packaged deployment remain unverified.
+
+## Phase 3 audit
+
+- Evidence classification, candidate coverage, retry while retaining prior evidence, event navigation, audio-marker controls and evidence-aware exports implemented.
+- Frontend: 35 tests in ten suites passed; production build passed. Existing Chrome fixture audit passed offline simulation, library, review, camera toolbar, mobile overflow and explicit reviewer outcome, with no uncaught exceptions. Maximum timestamp error 3 ms across 32 fixture samples at 1x, 0.5x, 0.25x and 0.1x. This does not measure real-world detector accuracy or establish full accessibility compliance.

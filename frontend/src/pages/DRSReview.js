@@ -63,6 +63,9 @@ export default function DRSReview({
   trackingProgress = null,
   analysisStatus = null,
   analysisPending = false,
+  retrySubmitting = false,
+  retryError = '',
+  onRetryAnalysis,
   onBack
 }) {
   const smallScreen = useMediaQuery('(max-width:767px)');
@@ -346,7 +349,7 @@ export default function DRSReview({
   const isSimulation = !isVideoMode;
   const projection = isVideoMode ? activeTrajectory?.wicket_projection : null;
   const has3DFlight = isSimulation || ['camera_ballistic_fit', 'stump_plane_fit'].includes(activeTrajectory?.reconstruction_method);
-  const canMarkPitch = isVideoMode && activeTrajectory?.can_refit_camera && !mediaError;
+  const canMarkPitch = isVideoMode && activeTrajectory?.can_refit_camera && !mediaError && !analysisPending && !retrySubmitting;
   const cutBeforeTrackEnd = activeTrajectory?.debug_info?.camera_cut_before_track_end;
   useEffect(() => {
     if (isVideoMode && !layoutChosen.current) setViewMode(has3DFlight && !smallScreen ? 'split' : 'video');
@@ -515,6 +518,18 @@ export default function DRSReview({
   }, [activeTrajectory, isVideoMode]);
   const firstDetection = preparedPoints[0]?.t;
   const lastDetection = preparedPoints[preparedPoints.length - 1]?.t;
+  const sourceFrameCount = activeTrajectory?.video_info?.frame_count;
+  const candidateFrames = new Set(preparedPoints.filter(p => Number.isInteger(p.frame_idx) && p.frame_idx >= 0 && p.frame_idx < sourceFrameCount).map(p => p.frame_idx));
+  const coverage = Number.isInteger(sourceFrameCount) && sourceFrameCount > 0 && candidateFrames.size > 0
+    ? candidateFrames.size / sourceFrameCount * 100 : null;
+  const evidenceKind = isSimulation ? 'Simulation' : has3DFlight ? 'Fitted 3D flight'
+    : preparedPoints.length ? 'Candidate track' : 'Source only';
+  const eventJumps = [
+    { label: 'First candidate', time: firstDetection, allowed: isVideoMode },
+    { label: isSimulation ? 'Bounce' : 'Fitted bounce', time: activeTrajectory?.bounce_point?.t, allowed: has3DFlight },
+    { label: 'Simulated impact', time: activeTrajectory?.impact_point?.t, allowed: isSimulation },
+    { label: 'Last candidate', time: lastDetection, allowed: isVideoMode }
+  ].filter(event => event.allowed && Number.isFinite(event.time) && event.time >= 0 && event.time <= duration);
   useEffect(() => {
     const media = videoRef.current;
     if (!isVideoMode || !media || !Number.isFinite(firstDetection)) return;
@@ -531,6 +546,7 @@ export default function DRSReview({
   const nextDetection = preparedPoints.find(p => p.t > currentTime + 0.001);
   const seekDetection = (time) => {
     videoRef.current?.pause();
+    setIsPlaying(false);
     handleSeek(null, time);
   };
   const playTrackedFlight = () => {
@@ -551,9 +567,9 @@ export default function DRSReview({
   // The on-video marker exists only while the ball is actually in tracked flight (not parked at either end).
   const ballOnScreen = Boolean(currentTrackPoint && !currentTrackPoint.is_post_delivery && !currentTrackPoint.is_at_release
     && Number.isFinite(currentTrackPoint.pixel_x) && Number.isFinite(currentTrackPoint.pixel_y));
-  const exportPoints = has3DFlight ? activeTrajectory?.points || []
-    : activeTrajectory?.pixel_track || preparedPoints.map(({ t, frame_idx, pixel_x, pixel_y, confidence, is_predicted }) =>
-      ({ t, frame_idx, pixel_x, pixel_y, confidence, is_predicted }));
+  const candidateExport = isVideoMode ? preparedPoints.map(({ t, frame_idx, pixel_x, pixel_y, confidence, is_interpolated, interpolated }) =>
+    ({ t, frame_idx, pixel_x, pixel_y, confidence, is_interpolated, interpolated })) : [];
+  const exportPoints = has3DFlight ? activeTrajectory?.points || [] : candidateExport;
 
   // ---------------------------------------------------------------------------
   // TRAJECTORY EXPORT (JSON & CSV & 3D Screenshot)
@@ -572,6 +588,8 @@ export default function DRSReview({
         delivery_type: currentDeliveryType,
         source_video: video?.filename || null,
         simulation: isSimulation,
+        evidence_kind: evidenceKind,
+        coordinate_space: has3DFlight ? 'pitch_metric_xyz' : 'source_pixels',
         timing_source: activeTrajectory.timing_source ?? null,
         calibration_status: activeTrajectory.calibration_status ?? null,
         reconstruction_method: activeTrajectory.reconstruction_method ?? null,
@@ -598,6 +616,8 @@ export default function DRSReview({
         stump_plane_target: activeTrajectory.stump_plane_target || null
       },
       wicket_projection: projection,
+      projected_points: isSimulation || projection ? activeTrajectory.extrapolated_points || [] : [],
+      candidate_pixel_track: candidateExport,
       points_count: exportPoints.length,
       trajectory_points: exportPoints.map((pt, idx) => ({
         index: pt.frame_idx ?? idx,
@@ -606,7 +626,8 @@ export default function DRSReview({
         y_meters: pt.y != null ? Number(pt.y.toFixed(4)) : null,
         z_meters: pt.z != null ? Number(pt.z.toFixed(4)) : null,
         speed_kmh: pt.speed_kmh != null ? Number(pt.speed_kmh.toFixed(1)) : null,
-        phase: pt.phase || (pt.is_predicted ? 'extrapolated' : 'tracked'),
+        evidence_type: pt.is_predicted ? 'projected' : isSimulation ? 'simulation' : has3DFlight ? 'fitted' : 'candidate',
+        phase: pt.phase || (pt.is_predicted ? 'extrapolated' : isSimulation ? 'simulation' : has3DFlight ? 'fitted' : 'candidate'),
         is_interpolated: Boolean(pt.is_predicted || pt.is_interpolated || pt.interpolated),
         confidence: pt.confidence != null ? Number(pt.confidence.toFixed(3)) : null,
         pixel_x: pt.pixel_x != null ? Number(pt.pixel_x.toFixed(1)) : null,
@@ -664,7 +685,9 @@ export default function DRSReview({
     }
 
     const lines = [];
-    lines.push('# Hawk-Eye DRS 3D Trajectory Telemetry Export');
+    lines.push('# Crease / Lab trajectory evidence export');
+    lines.push(`# Evidence: ${evidenceKind}`);
+    lines.push(`# Coordinate space: ${has3DFlight ? 'pitch_metric_xyz' : 'source_pixels'}`);
     lines.push(`# Export Timestamp: ${new Date().toISOString()}`);
     lines.push(`# Delivery Preset / Video Source: ${currentDeliveryType}`);
     if (video?.filename) lines.push(`# Source Video Filename: ${video.filename}`);
@@ -675,7 +698,7 @@ export default function DRSReview({
     lines.push(`# Seam Deviation: ${deviationAngle != null ? `${deviationAngle}°` : 'N/A'} (${deviationLabel})`);
     lines.push(`# Pitch Length Zone: ${lengthZone || 'N/A'}`);
     lines.push('#');
-    lines.push('frame_index,timestamp_s,x_meters,y_meters,z_meters,speed_kmh,phase,is_interpolated,confidence,pixel_x,pixel_y');
+    lines.push('frame_index,timestamp_s,x_meters,y_meters,z_meters,speed_kmh,phase,is_interpolated,confidence,pixel_x,pixel_y,evidence_type');
 
     exportPoints.forEach((pt, idx) => {
       const frameIdx = pt.frame_idx ?? idx;
@@ -684,13 +707,14 @@ export default function DRSReview({
       const y = pt.y != null ? pt.y.toFixed(4) : '';
       const z = pt.z != null ? pt.z.toFixed(4) : '';
       const speed = pt.speed_kmh != null ? pt.speed_kmh.toFixed(1) : '';
-      const phase = pt.phase || (pt.is_predicted ? 'extrapolated' : 'tracked');
+      const phase = pt.phase || (pt.is_predicted ? 'extrapolated' : isSimulation ? 'simulation' : has3DFlight ? 'fitted' : 'candidate');
       const isInterp = (pt.is_predicted || pt.is_interpolated || pt.interpolated) ? '1' : '0';
       const conf = pt.confidence != null ? pt.confidence.toFixed(3) : '';
       const px = pt.pixel_x != null ? pt.pixel_x.toFixed(1) : '';
       const py = pt.pixel_y != null ? pt.pixel_y.toFixed(1) : '';
 
-      lines.push(`${frameIdx},${t},${x},${y},${z},${speed},${phase},${isInterp},${conf},${px},${py}`);
+      const evidenceType = pt.is_predicted ? 'projected' : isSimulation ? 'simulation' : has3DFlight ? 'fitted' : 'candidate';
+      lines.push(`${frameIdx},${t},${x},${y},${z},${speed},${phase},${isInterp},${conf},${px},${py},${evidenceType}`);
     });
 
     const csvBlob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
@@ -1060,8 +1084,36 @@ export default function DRSReview({
           <div className="inspector-head">
             <Gavel sx={{ color: 'var(--accent)', fontSize: 20 }} />
             <h2 className="inspector-title">Hawk-Eye review</h2>
-            <span className={`pill ${isSimulation ? 'pill-violet' : 'pill-accent'}`}>{isSimulation ? 'Simulation' : 'Tracked footage'}</span>
+            <span className={`pill ${isSimulation ? 'pill-violet' : 'pill-accent'}`}>{evidenceKind}</span>
           </div>
+
+          {isVideoMode && <section className="inspector-card" aria-label="Evidence overview">
+            <Typography component="h3" variant="subtitle1">Available evidence</Typography>
+            <Typography variant="body2" color="text.secondary">
+              {has3DFlight ? 'Physics-fitted 3D flight; not direct 3D measurements.'
+                : preparedPoints.length ? 'Candidate pixels are not verified ball positions.'
+                  : 'Original footage is available even without a usable ball track.'}
+            </Typography>
+            {activeTrajectory && <Typography variant="body2" sx={{ mt: 1 }}>
+              {preparedPoints.length} candidate samples
+              {Number.isFinite(firstDetection) && ` · ${firstDetection.toFixed(2)}–${lastDetection.toFixed(2)} s`}
+            </Typography>}
+            {coverage !== null && <Typography variant="caption" color="text.secondary">
+              {candidateFrames.size} of {sourceFrameCount} source frames have candidates ({coverage.toFixed(1)}%). This is coverage, not accuracy.
+            </Typography>}
+            {onRetryAnalysis && <Button fullWidth variant="outlined" sx={{ mt: 1.5 }}
+              disabled={analysisPending || retrySubmitting || trajectoryLoading} onClick={onRetryAnalysis}>
+              {retrySubmitting ? 'Starting analysis…' : 'Retry analysis'}
+            </Button>}
+            {retryError && <Alert severity="error" sx={{ mt: 1 }}>{retryError}</Alert>}
+          </section>}
+          {eventJumps.length > 0 && <section className="inspector-card" aria-label="Flight event jumps">
+            <Typography component="h3" variant="subtitle2">Jump to event</Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mt: 1 }}>
+              {eventJumps.map(event => <Button key={event.label} size="small" variant="outlined"
+                onClick={() => seekDetection(event.time)}>{event.label} · {event.time.toFixed(2)}s</Button>)}
+            </Box>
+          </section>}
 
           {/* Loading state for uploaded video trajectory */}
           {isVideoMode && trajectoryLoading && (
@@ -1115,7 +1167,7 @@ export default function DRSReview({
             <div className="inspector-card is-centered is-stacked">
               <Typography variant="body2" sx={{ color: 'var(--bad)' }}>
                 {trajectoryError === 'processing_failed'
-                  ? 'Tracking failed. Return to the delivery library to reprocess the clip.'
+                  ? 'Tracking failed. Retry analysis here or try a clearer, fixed-camera clip.'
                   : 'Analysis could not be loaded. Return to your deliveries and try again.'}
               </Typography>
               <Button onClick={onBack} size="small">Back to deliveries</Button>
@@ -1280,7 +1332,7 @@ export default function DRSReview({
                 : activeTrajectory.calibration_status === 'stump_scaled' ? 'scaled from both sets of stumps; gravity-fitted flight'
                 : activeTrajectory.calibration_status === 'manual_pitch_plane' ? 'manual pitch plane; height unverified' : 'unverified'}.
             </Typography>
-            {activeTrajectory.ball_detected && !cutBeforeTrackEnd && !mediaError && <PitchCalibration key={video.id} videoId={video.id} trajectory={activeTrajectory} onApply={(data) => {
+            {activeTrajectory.ball_detected && !cutBeforeTrackEnd && !mediaError && !analysisPending && !retrySubmitting && <PitchCalibration key={video.id} videoId={video.id} trajectory={activeTrajectory} onApply={(data) => {
               setActiveTrajectory(data);
               setCalibrationOpen(false);
               if (!smallScreen && data.reconstruction_method === 'camera_ballistic_fit') setViewMode('split');

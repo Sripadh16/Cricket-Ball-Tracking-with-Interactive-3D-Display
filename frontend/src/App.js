@@ -82,10 +82,16 @@ function App() {
 
   // Ref to cancel/ignore stale async trajectory fetches when user rapidly switches videos
   const activeVideoFetchId = useRef(0);
+  const retryInFlight = useRef(null);
+  const [retrySubmitting, setRetrySubmitting] = useState(false);
+  const [retryError, setRetryError] = useState('');
 
   const handleVideoSelect = useCallback(async (video) => {
     const fetchId = ++activeVideoFetchId.current;
     // Navigate immediately so user sees the video panel while trajectory loads
+    retryInFlight.current = null;
+    setRetrySubmitting(false);
+    setRetryError('');
     setSelectedVideo(video);
     setTrajectoryData(null);
     setTrajectoryLoading(true);
@@ -149,6 +155,32 @@ function App() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [selectedVideo, watchAnalysis]);
 
+  const handleRetryAnalysis = useCallback(async () => {
+    if (!selectedVideo || watchAnalysis || retryInFlight.current !== null) return;
+    const fetchId = activeVideoFetchId.current;
+    retryInFlight.current = fetchId;
+    setRetrySubmitting(true);
+    setRetryError('');
+    try {
+      await api.post(`/videos/${selectedVideo.id}/reprocess?sync=false`);
+      if (fetchId !== activeVideoFetchId.current) return;
+      setAnalysisStatus(null);
+      setTrackingProgress(0);
+      setTrajectoryError(trajectoryData ? null : 'not_processed');
+      setWatchAnalysis(true);
+    } catch (err) {
+      if (fetchId !== activeVideoFetchId.current) return;
+      if (err.response?.status === 409) {
+        setWatchAnalysis(true);
+      } else {
+        setRetryError('Could not start analysis. Check your connection and try again.');
+      }
+    } finally {
+      if (retryInFlight.current === fetchId) retryInFlight.current = null;
+      if (fetchId === activeVideoFetchId.current) setRetrySubmitting(false);
+    }
+  }, [selectedVideo, watchAnalysis, trajectoryData]);
+
   const handleLaunchDemo = useCallback(() => {
     activeVideoFetchId.current++;
     setSelectedVideo(null);
@@ -190,6 +222,9 @@ function App() {
           trackingProgress={trackingProgress}
           analysisStatus={analysisStatus}
           analysisPending={watchAnalysis}
+          retrySubmitting={retrySubmitting}
+          retryError={retryError}
+          onRetryAnalysis={handleRetryAnalysis}
           onBack={handleBackToDashboard}
         />
         </Suspense>
