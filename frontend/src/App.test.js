@@ -6,10 +6,7 @@ import api from './api/client';
 
 jest.mock('./pages/Dashboard', () => props => <button onClick={() => props.onVideoSelect({ id: 'clip', filename: 'clip.webm', status: 'processing' })}>Open clip</button>);
 jest.mock('./pages/AuthPage', () => props => (
-  <button onClick={() => {
-    localStorage.setItem('token', 'signed-in');
-    props.onAuthSuccess();
-  }}>Complete sign-in</button>
+  <button onClick={props.onAuthSuccess}>Complete sign-in</button>
 ));
 jest.mock('./pages/DRSReview', () => props => (
   <div>
@@ -155,7 +152,9 @@ test('resumes a private link after signing in without opening the library', asyn
     .mockResolvedValueOnce({ data: { points: [] } });
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Complete sign-in' }));
+  const completeSignIn = await screen.findByRole('button', { name: 'Complete sign-in' });
+  localStorage.setItem('token', 'signed-in');
+  fireEvent.click(completeSignIn);
   expect(await screen.findByText('Clip:clip-1')).toBeInTheDocument();
   expect(api.get).toHaveBeenNthCalledWith(1, '/videos/clip-1', expect.any(Object));
 });
