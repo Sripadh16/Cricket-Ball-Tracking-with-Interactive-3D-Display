@@ -18,9 +18,13 @@ async function main() {
     const file = path.resolve(build, '.' + new URL(request.url, 'http://local').pathname);
     if (!file.startsWith(build + path.sep) && file !== build) { response.writeHead(403).end(); return; }
     const target = fs.existsSync(file) && fs.statSync(file).isFile() ? file : path.join(build, 'index.html');
-    const types = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png' };
-    response.setHeader('Content-Type', types[path.extname(target)] || 'application/octet-stream');
-    fs.createReadStream(target).pipe(response);
+    const types = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.png': 'image/png', '.webp': 'image/webp' };
+    const stream = fs.createReadStream(target);
+    stream.once('error', () => { response.writeHead(404).end(); });
+    stream.once('open', () => {
+      response.setHeader('Content-Type', types[path.extname(target)] || 'application/octet-stream');
+      stream.pipe(response);
+    });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -34,14 +38,24 @@ async function main() {
     const portFile = path.join(profile, 'DevToolsActivePort');
     for (let i = 0; i < 100 && !fs.existsSync(portFile); i++) await sleep(100);
     const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-    socket = new WebSocket(targets.find(target => target.type === 'page').webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; });
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(10000) })).json();
+    const page = targets.find(target => target.type === 'page');
+    assert(page?.webSocketDebuggerUrl, 'Chromium did not expose a page debugging endpoint');
+    socket = new WebSocket(page.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Chromium debugger connection timed out')), 10000);
+      socket.onopen = () => { clearTimeout(timer); resolve(); };
+      socket.onerror = () => { clearTimeout(timer); reject(new Error('Chromium debugger connection failed')); };
+    });
     const pending = new Map();
     let id = 0;
     const send = (method, params = {}) => new Promise((resolve, reject) => {
       const requestId = ++id;
-      pending.set(requestId, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(requestId);
+        reject(new Error(`Chromium debugger command timed out: ${method}`));
+      }, 30000);
+      pending.set(requestId, { resolve, reject, timer });
       socket.send(JSON.stringify({ id: requestId, method, params }));
     });
     const errors = [];
@@ -52,6 +66,7 @@ async function main() {
       if (message.id) {
         const request = pending.get(message.id);
         pending.delete(message.id);
+        if (request) clearTimeout(request.timer);
         if (message.error) request?.reject(new Error(JSON.stringify(message.error)));
         else request?.resolve(message.result);
       }
@@ -339,6 +354,7 @@ async function main() {
   } finally {
     socket?.close();
     browser.kill();
+    server.closeAllConnections();
     server.close();
   }
 }

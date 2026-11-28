@@ -10,6 +10,7 @@ import os
 import tempfile
 import uuid
 import bcrypt
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
@@ -104,6 +105,31 @@ def test_api_root(client):
     response = client.get("/")
     assert response.status_code == 200
     assert response.json()["status"] == "running"
+
+
+def test_uploaded_fixture_completes_review_lifecycle(client, tmp_path, monkeypatch):
+    fixture = Path(__file__).resolve().parents[2] / 'docs' / 'ui-audit' / 'timing.webm'
+    monkeypatch.setattr('api.videos.UPLOAD_DIR', tmp_path)
+    guest = client.post('/auth/guest')
+    assert guest.status_code == 200
+    headers = {'Authorization': f"Bearer {guest.json()['access_token']}"}
+
+    with fixture.open('rb') as source:
+        upload = client.post('/videos/upload', headers=headers, files={'file': (fixture.name, source, 'video/webm')})
+    assert upload.status_code == 200
+    video_url = f"/videos/{upload.json()['id']}"
+    assert client.get(f'{video_url}/progress', headers=headers).json()['status'] == 'processed'
+    trajectory = client.get(f'{video_url}/trajectory', headers=headers)
+    assert trajectory.status_code == 200
+    assert trajectory.json()['drs_evaluation'] is None
+
+    partial = client.get(f'{video_url}/stream', headers={**headers, 'Range': 'bytes=0-9'})
+    assert partial.status_code == 206
+    with fixture.open('rb') as source:
+        assert partial.content == source.read(10)
+
+    assert client.delete(video_url, headers=headers).status_code == 200
+    assert not list(tmp_path.iterdir())
 
 
 def test_guest_auth_endpoint(client):

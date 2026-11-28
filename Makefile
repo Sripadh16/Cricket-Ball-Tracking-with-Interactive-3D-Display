@@ -11,10 +11,10 @@ help: ## Show this help message
 install: install-backend install-frontend ## Install all dependencies
 
 install-backend: ## Install Python backend dependencies
-	cd backend && pip install -r requirements.txt
+	cd backend && python -m pip install -r requirements-test.txt
 
 install-frontend: ## Install Node.js frontend dependencies
-	cd frontend && npm install
+	cd frontend && npm ci
 
 # Development servers
 dev: ## Start both backend and frontend development servers
@@ -22,7 +22,7 @@ dev: ## Start both backend and frontend development servers
 	@make -j2 dev-backend dev-frontend
 
 dev-backend: ## Start backend development server
-	cd backend && PYTHONPATH=src uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+	cd backend && python run_server.py
 
 dev-frontend: ## Start frontend development server
 	cd frontend && npm start
@@ -31,13 +31,15 @@ dev-frontend: ## Start frontend development server
 test: test-backend test-frontend ## Run all tests
 
 test-backend: ## Run backend tests
-	cd backend && python -m pytest tests/ -v --cov=src --cov-report=html
+	cd backend && python -m pytest tests/ -q
+	python scripts/generate_standard_deliveries.py --check
 
 test-frontend: ## Run frontend tests
-	cd frontend && npm test -- --watchAll=false --coverage
+	cd frontend && npm test -- --watchAll=false --runInBand
 
-test-e2e: ## Run end-to-end tests
-	npx cypress run
+test-e2e: ## Run the fixture browser audit (set CHROMIUM to the executable path)
+	cd frontend && REACT_APP_API_BASE_URL=http://localhost:8000 npm run build
+	node scripts/audit_ui.cjs "$(CHROMIUM)" docs/ui-audit/fixture.json tmp/ui-audit
 
 # Docker commands
 docker-build: ## Build Docker images

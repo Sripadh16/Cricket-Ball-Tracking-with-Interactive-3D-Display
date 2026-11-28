@@ -48,8 +48,14 @@ Existing database (`backend/drs.db`) and uploads (`../uploads/`) are preserved o
 
 ```bash
 cd backend
-.venv\Scripts\python.exe -m pytest tests/ -v
-# Expected: 23 passed
+python -m pip install -r requirements-test.txt
+python -m pytest tests -q
+cd ..
+python scripts/generate_standard_deliveries.py --check
+cd frontend
+npm ci
+npm test -- --watchAll=false --runInBand
+npm run build
 ```
 
 Test files:
@@ -133,8 +139,7 @@ Backend (FastAPI + SQLite)
 ### 5 – Results summary (30 s)
 | Metric | Value |
 |--------|-------|
-| Backend tests | 48 / 48 pass |
-| Frontend build | 0 errors |
+| Verification | Run the test and build commands above |
 | Simulation presets | 4 (inswinger, off-cutter, bouncer, leg spin) |
 | Real-video tracking | Accuracy depends on footage — uncalibrated, single camera |
 | Speed claims | Simulation: physics-derived ✓ · Video: pixel-velocity estimate, no calibration ✗ |
